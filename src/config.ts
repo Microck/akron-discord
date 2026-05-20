@@ -22,6 +22,7 @@ const configSchema = z.object({
   githubAppId: optionalId,
   githubAppPrivateKey: optionalId,
   githubAppInstallationId: optionalId,
+  githubToken: optionalId,
   githubOwner: optionalId,
   githubRepo: optionalId,
   databasePath: z.string().trim().default("data/akron-discord.sqlite")
@@ -54,6 +55,7 @@ export function loadConfig(): AppConfig {
     githubAppId: envValue("GITHUB_APP_ID"),
     githubAppPrivateKey: envValue("GITHUB_APP_PRIVATE_KEY")?.replace(/\\n/g, "\n"),
     githubAppInstallationId: envValue("GITHUB_APP_INSTALLATION_ID"),
+    githubToken: envValue("GITHUB_TOKEN"),
     githubOwner: envValue("GITHUB_OWNER"),
     githubRepo: envValue("GITHUB_REPO"),
     databasePath: envValue("DATABASE_PATH")
@@ -62,11 +64,9 @@ export function loadConfig(): AppConfig {
 
 export function hasGithubConfig(config: AppConfig): boolean {
   return Boolean(
-    config.githubAppId &&
-      config.githubAppPrivateKey &&
-      config.githubAppInstallationId &&
-      config.githubOwner &&
-      config.githubRepo
+    config.githubOwner &&
+      config.githubRepo &&
+      (config.githubToken || (config.githubAppId && config.githubAppPrivateKey && config.githubAppInstallationId))
   );
 }
 

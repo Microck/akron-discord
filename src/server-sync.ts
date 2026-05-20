@@ -534,7 +534,7 @@ async function buildForumExampleMessage(spec: ReturnType<typeof buildForumExampl
     files.push(new AttachmentBuilder(buildExampleAkrBytes(spec), { name: spec.akrFileName }));
   }
   if (spec.includeCapture) {
-    files.push(new AttachmentBuilder(await buildPlaceholderCaptureBytes(), { name: "glyph-map-capture-placeholder.jpg" }));
+    files.push(new AttachmentBuilder(await buildPlaceholderCaptureBytes(), { name: "akron-map-capture-placeholder.jpg" }));
   }
   return { content: spec.content, files };
 }
@@ -694,7 +694,7 @@ function crc32(buffer: Buffer): number {
 }
 
 async function buildPlaceholderCaptureBytes(): Promise<Buffer> {
-  const response = await fetch("https://gamebanana.com/mods/embeddables/150453?variant=sd_image")
+  const response = await fetch("https://files.catbox.moe/3fq1l4.jpg")
     .catch(() => null);
   if (response?.ok) {
     return Buffer.from(await response.arrayBuffer());

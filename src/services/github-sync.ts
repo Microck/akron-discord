@@ -22,6 +22,10 @@ export function createGithubClient(config: AppConfig): Octokit | null {
     return null;
   }
 
+  if (config.githubToken) {
+    return new Octokit({ auth: config.githubToken });
+  }
+
   return new Octokit({
     authStrategy: createAppAuth,
     auth: {
@@ -44,7 +48,7 @@ export async function syncForumPostToGithub(
 
   const client = createGithubClient(config);
   if (!client) {
-    throw new Error("GitHub App configuration is incomplete.");
+    throw new Error("GitHub configuration is incomplete.");
   }
 
   const labels = ["discord", input.kind, "needs-triage"];
@@ -119,7 +123,7 @@ export async function closeSyncedGithubIssue(
 
   const client = createGithubClient(config);
   if (!client) {
-    throw new Error("GitHub App configuration is incomplete.");
+    throw new Error("GitHub configuration is incomplete.");
   }
 
   if (input.reason.trim()) {
@@ -155,7 +159,7 @@ export async function closeSyncedGithubIssue(
 export async function planGithubLabels(config: AppConfig): Promise<string[]> {
   const client = createGithubClient(config);
   if (!client) {
-    return ["GitHub App configuration is incomplete."];
+    return ["GitHub configuration is incomplete."];
   }
 
   const existing = await client.issues.listLabelsForRepo({
@@ -173,7 +177,7 @@ export async function planGithubLabels(config: AppConfig): Promise<string[]> {
 export async function applyGithubLabels(config: AppConfig): Promise<string[]> {
   const client = createGithubClient(config);
   if (!client) {
-    return ["GitHub App configuration is incomplete."];
+    return ["GitHub configuration is incomplete."];
   }
 
   const changes: string[] = [];

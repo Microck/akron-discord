@@ -31,6 +31,7 @@ NVIDIA_NIM_MODEL=
 GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=
 GITHUB_APP_INSTALLATION_ID=
+GITHUB_TOKEN=
 GITHUB_OWNER=
 GITHUB_REPO=
 ```
@@ -131,6 +132,12 @@ The deployment image must include ImageMagick's `magick` binary for `optimo` ima
 ## GitHub Sync
 
 `issues` and `suggestions` forum posts sync one-way to the configured GitHub repo. The GitHub issue body includes a source Discord link and quotes user text as untrusted content.
+
+Use either `GITHUB_TOKEN` or the GitHub App fields. Fine-grained token minimum repository permissions:
+
+- Contents: read
+- Issues: read and write
+- Metadata: read
 
 GitHub App minimum repository permissions:
 

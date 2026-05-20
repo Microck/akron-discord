@@ -111,6 +111,7 @@ function config(overrides: Partial<AppConfig>): AppConfig {
     githubAppId: "",
     githubAppPrivateKey: "",
     githubAppInstallationId: "",
+    githubToken: "",
     githubOwner: "",
     githubRepo: "",
     databasePath: "data/test.sqlite",

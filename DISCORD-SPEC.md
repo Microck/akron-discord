@@ -57,14 +57,14 @@ SQLite stores:
 
 This bot targets one official server, so SQLite is the simplest correct default. Move to Postgres only if the deployment later needs multiple writer processes or stronger remote operational tooling.
 
-Use Octokit REST authenticated as a GitHub App for one-way GitHub issue sync.
+Use Octokit REST for one-way GitHub issue sync. Prefer a GitHub App for long-running production, but support a fine-grained `GITHUB_TOKEN` for private setup and early operation.
 
 Reasons:
 
 - GitHub Apps use repo-scoped permissions and short-lived installation tokens.
 - Octokit REST maps directly to issue creation, labels, comments, and state changes.
 - Probot is not needed unless the bot later needs a full GitHub webhook framework.
-- Fine-grained PATs are acceptable for throwaway prototypes, but not for the official long-running bot.
+- Fine-grained PATs are simple to configure, but they must be explicitly scoped to the configured repository.
 - One-way sync keeps v1 simple: Discord creates and links GitHub issues, but GitHub webhooks do not update Discord automatically.
 
 ## Server Sync
@@ -252,19 +252,30 @@ Tags are applied by the bot. Moderated tags should require `Moderator`.
 
 The `issues` and `suggestions` forums are linked to a configured GitHub repository. Do not infer the repository from any local checkout. The bot must read the target from configuration.
 
-The target repository should be `akron-tracker`. Create it as a private repository at first, then make it public later only if the project wants public issue visibility.
+The target repository should be configured explicitly. Do not hard-code or infer it from a local checkout.
 
 Required config:
+
+```text
+GITHUB_OWNER=
+GITHUB_REPO=
+```
+
+Authentication can use either a fine-grained personal access token:
+
+```text
+GITHUB_TOKEN=
+```
+
+or a GitHub App installation:
 
 ```text
 GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=
 GITHUB_APP_INSTALLATION_ID=
-GITHUB_OWNER=
-GITHUB_REPO=
 ```
 
-Minimum GitHub App permissions:
+Minimum token or GitHub App permissions:
 
 - Repository contents: read.
 - Issues: read and write.

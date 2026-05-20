@@ -204,7 +204,7 @@ function submissionExample(channelName: string, label: string, packType: string,
       "`Level:` *Glyph*",
       "`Map:` <https://gamebanana.com/mods/150453>",
       `\`Description:\` ${packType} setup for practicing Glyph rooms. Replace this with the rooms, markers, or settings your pack actually covers.`,
-      `\`Attachments:\` ${akrFileName}` + (includeCapture ? ", glyph-map-capture-placeholder.jpg" : ""),
+      `\`Attachments:\` ${akrFileName}` + (includeCapture ? ", akron-map-capture-placeholder.jpg" : ""),
       "",
       "_Use your own export when making a real submission._"
     ].join("\n"),
