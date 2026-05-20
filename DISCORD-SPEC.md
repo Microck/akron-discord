@@ -199,7 +199,7 @@ Required post data:
 
 Each map catalog forum must have post guidelines that link to `submission-guide`.
 
-Each public forum should have one bot-authored example post named `Example: ...` showing the shape of a good post. These posts should be plain text with Discord markdown formatting, not embeds, so they read like a user-authored forum post. Submission examples should include a template, then a concrete example using `Forsaken City (Chapter 1)` as the default Celeste level, with a realistic sample `.akr` attachment and a sample capture image where that forum benefits from captures. Bot-authored example threads must be ignored by submission scanning and GitHub issue sync.
+Each public forum should have one bot-authored example post named `Example: ...` showing the shape of a good post. These posts should be plain text with Discord markdown formatting, not embeds, so they read like a user-authored forum post. Submission examples should include a template, then a concrete example using `Glyph` (`https://gamebanana.com/mods/150453`) as the default map, with a realistic sample `.akr` attachment and a sample capture image where that forum benefits from captures. Bot-authored example threads must be ignored by submission scanning and GitHub issue sync.
 
 ### General Packs
 

@@ -131,7 +131,7 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
       "",
       "**Example**",
       "`Title:` How do I export only StartPos?",
-      "`Body:` I am practicing *Forsaken City (Chapter 1)*. I can export a profile, but I only want the StartPos section. Which export option should I use?"
+      "`Body:` I am practicing *Glyph*. I can export a profile, but I only want the StartPos section. Which export option should I use?"
     ]),
     feedbackExample("issues", "Issue report", [
       "**Template**",
@@ -139,8 +139,8 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
       "`Body:` What happened? What did you expect? How can staff reproduce it? Include Akron version, logs, screenshots, or crash text when useful.",
       "",
       "**Example**",
-      "`Title:` StartPos export fails on Forsaken City",
-      "`Body:` On Akron 0.0.0, exporting a StartPos pack for *Forsaken City* creates no file. Expected a `.akr` export. Steps: open Chapter 1, add one StartPos marker, export StartPos."
+      "`Title:` StartPos export fails on Glyph",
+      "`Body:` On Akron 0.0.0, exporting a StartPos pack for *Glyph* creates no file. Expected a `.akr` export. Steps: open Glyph, add one StartPos marker, export StartPos."
     ]),
     feedbackExample("suggestions", "Suggestion", [
       "**Template**",
@@ -186,7 +186,7 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
 
 function submissionExample(channelName: string, label: string, packType: string, includeCapture: boolean): ForumExampleSpec {
   const fileSlug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-  const akrFileName = `forsaken-city-${fileSlug}.akr`;
+  const akrFileName = `glyph-${fileSlug}.akr`;
   return {
     channelName,
     settingKey: `thread.example.${channelName}.id`,
@@ -200,11 +200,11 @@ function submissionExample(channelName: string, label: string, packType: string,
       "`Attachments:` <one scoped .akr file>" + (includeCapture ? ", <optional capture image>" : ""),
       "",
       "**Example**",
-      `\`Title:\` Forsaken City ${packType} Pack`,
-      "`Level:` *Forsaken City (Chapter 1)*",
-      "`Map:` Vanilla Celeste Chapter 1",
-      `\`Description:\` ${packType} setup for practicing early Forsaken City rooms. Replace this with the rooms, markers, or settings your pack actually covers.`,
-      `\`Attachments:\` ${akrFileName}` + (includeCapture ? ", forsaken-city-room-capture.png" : ""),
+      `\`Title:\` Glyph ${packType} Pack`,
+      "`Level:` *Glyph*",
+      "`Map:` <https://gamebanana.com/mods/150453>",
+      `\`Description:\` ${packType} setup for practicing Glyph rooms. Replace this with the rooms, markers, or settings your pack actually covers.`,
+      `\`Attachments:\` ${akrFileName}` + (includeCapture ? ", glyph-map-capture-placeholder.jpg" : ""),
       "",
       "_Use your own export when making a real submission._"
     ].join("\n"),
