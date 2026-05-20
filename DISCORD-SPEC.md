@@ -69,6 +69,8 @@ Expose admin-only commands:
 
 `dry-run` reports planned role, category, channel, forum tag, and permission changes. `apply` performs those changes.
 
+Server sync is intentionally non-destructive. Normal `apply` must not delete channels or replace same-name channels with incompatible types. If destructive reconciliation is needed later, it should be a separate explicit admin command or mode.
+
 Only configured admins can run server sync.
 
 ## Roles
