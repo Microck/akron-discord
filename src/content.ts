@@ -110,7 +110,8 @@ export type ForumExampleSpec = {
   settingKey: string;
   threadTitle: string;
   content: string;
-  includeAkr: boolean;
+  akrFileName: string;
+  akrSection: string;
   includeCapture: boolean;
 };
 
@@ -124,31 +125,31 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
     submissionExample("audio-packs", "Audio pack submission", "Audio settings", false),
     submissionExample("recorder-packs", "Recorder pack submission", "Recorder settings", false),
     feedbackExample("questions", "Question", [
-      "Template",
-      "Title: <short question>",
-      "Body: What are you trying to do? What did you try? What version/build are you on?",
+      "**Template**",
+      "`Title:` <short question>",
+      "`Body:` What are you trying to do? What did you try? What version/build are you on?",
       "",
-      "Example",
-      "Title: How do I export only StartPos?",
-      "Body: I am practicing Forsaken City, Chapter 1. I can export a profile, but I only want the StartPos section. Which export option should I use?"
+      "**Example**",
+      "`Title:` How do I export only StartPos?",
+      "`Body:` I am practicing *Forsaken City (Chapter 1)*. I can export a profile, but I only want the StartPos section. Which export option should I use?"
     ]),
     feedbackExample("issues", "Issue report", [
-      "Template",
-      "Title: <what broke>",
-      "Body: What happened? What did you expect? How can staff reproduce it? Include Akron version, logs, screenshots, or crash text when useful.",
+      "**Template**",
+      "`Title:` <what broke>",
+      "`Body:` What happened? What did you expect? How can staff reproduce it? Include Akron version, logs, screenshots, or crash text when useful.",
       "",
-      "Example",
-      "Title: StartPos export fails on Forsaken City",
-      "Body: On Akron 0.0.0, exporting a StartPos pack for Forsaken City creates no file. Expected a non-empty .akr export. Steps: open Chapter 1, add one StartPos marker, export StartPos."
+      "**Example**",
+      "`Title:` StartPos export fails on Forsaken City",
+      "`Body:` On Akron 0.0.0, exporting a StartPos pack for *Forsaken City* creates no file. Expected a `.akr` export. Steps: open Chapter 1, add one StartPos marker, export StartPos."
     ]),
     feedbackExample("suggestions", "Suggestion", [
-      "Template",
-      "Title: <what should Akron add or change?>",
-      "Body: What problem does this solve? What behavior do you want? Add examples or mockups if useful.",
+      "**Template**",
+      "`Title:` <what should Akron add or change?>",
+      "`Body:` What problem does this solve? What behavior do you want? Add examples or mockups if useful.",
       "",
-      "Example",
-      "Title: Add a preview before publishing a capture",
-      "Body: Before uploading a map capture, show a small preview so I can confirm StartPos markers and room context are visible."
+      "**Example**",
+      "`Title:` Add a preview before publishing a capture",
+      "`Body:` Before uploading a map capture, show a small preview so I can confirm StartPos markers and room context are visible."
     ])
   ];
 }
@@ -184,28 +185,31 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
 }
 
 function submissionExample(channelName: string, label: string, packType: string, includeCapture: boolean): ForumExampleSpec {
+  const fileSlug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const akrFileName = `forsaken-city-${fileSlug}.akr`;
   return {
     channelName,
     settingKey: `thread.example.${channelName}.id`,
     threadTitle: `Example: ${label}`,
     content: [
-      "Template",
-      "Title: <short pack name>",
-      "Level: <level or map name>",
-      "Map: <supported GameBanana map link for modded maps, or vanilla Celeste chapter name>",
-      "Description: <what the pack contains and when someone should use it>",
-      "Attachments: <one scoped .akr file>" + (includeCapture ? ", <optional capture image>" : ""),
+      "**Template**",
+      "`Title:` <short pack name>",
+      "`Level:` <level or map name>",
+      "`Map:` <supported GameBanana map link for modded maps, or vanilla Celeste chapter name>",
+      "`Description:` <what the pack contains and when someone should use it>",
+      "`Attachments:` <one scoped .akr file>" + (includeCapture ? ", <optional capture image>" : ""),
       "",
-      "Example",
-      `Title: Forsaken City ${packType} Pack`,
-      "Level: Forsaken City (Chapter 1)",
-      "Map: Vanilla Celeste Chapter 1",
-      `Description: Example ${packType.toLowerCase()} data for practicing the first chapter of Celeste. Replace this with the rooms, markers, or settings your pack actually covers.`,
-      "Attachments: example-empty.akr" + (includeCapture ? ", forsaken-city-placeholder-capture.png" : ""),
+      "**Example**",
+      `\`Title:\` Forsaken City ${packType} Pack`,
+      "`Level:` *Forsaken City (Chapter 1)*",
+      "`Map:` Vanilla Celeste Chapter 1",
+      `\`Description:\` ${packType} setup for practicing early Forsaken City rooms. Replace this with the rooms, markers, or settings your pack actually covers.`,
+      `\`Attachments:\` ${akrFileName}` + (includeCapture ? ", forsaken-city-room-capture.png" : ""),
       "",
-      "The attached .akr is a non-empty placeholder only. Do not repost it as a real submission."
+      "_Use your own export when making a real submission._"
     ].join("\n"),
-    includeAkr: true,
+    akrFileName,
+    akrSection: sectionForPackType(packType),
     includeCapture
   };
 }
@@ -216,7 +220,27 @@ function feedbackExample(channelName: string, label: string, lines: string[]): F
     settingKey: `thread.example.${channelName}.id`,
     threadTitle: `Example: ${label}`,
     content: lines.join("\n"),
-    includeAkr: false,
+    akrFileName: "",
+    akrSection: "",
     includeCapture: false
   };
+}
+
+function sectionForPackType(packType: string): string {
+  if (packType === "Auto Kill") {
+    return "AutoKill";
+  }
+  if (packType === "Auto Deafen") {
+    return "AutoDeafen";
+  }
+  if (packType === "HUD layout") {
+    return "Hud";
+  }
+  if (packType === "Audio settings") {
+    return "Audio";
+  }
+  if (packType === "Recorder settings") {
+    return "Recorder";
+  }
+  return packType;
 }
