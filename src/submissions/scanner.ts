@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import {
   ChannelType,
   EmbedBuilder,
@@ -14,7 +15,7 @@ import type { AkronDatabase } from "../db/database.js";
 import { scanStates } from "../db/schema.js";
 import { mapCatalogScopes, statusForumTags, submissionChannelScopes } from "../server-spec.js";
 import { logAudit, sendAuditLog } from "../services/audit.js";
-import { createR2Client } from "../services/r2.js";
+import { createR2Client, publicR2Url, putR2Object } from "../services/r2.js";
 import { publishCatalogEntry } from "../services/catalog.js";
 import { optimizeCatalogImage } from "../services/image-optimizer.js";
 import { resolveMapSid } from "../services/map-resolver.js";
@@ -69,6 +70,11 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
   let archiveMapSid = "";
   let r2PackKey = "";
   let r2ImageKey = "";
+  let catalogPublished = false;
+  let scannedArchiveKey = "";
+  let scannedArchiveUrl = "";
+  let scannedArchiveSha256 = "";
+  let r2Client: S3Client | undefined;
 
   if (!attachmentPlan.akr) {
     status = "Needs Fix";
@@ -89,6 +95,29 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
   if (attachmentPlan.akr) {
     try {
       akrBytes = await downloadAttachment(attachmentPlan.akr, akrMaxBytes);
+      r2Client = input.r2Client ?? createR2Client(input.config);
+      try {
+        const scannedArchive = await archiveScannedAkr(input.config, r2Client, {
+          parentName: parent.name,
+          threadId: input.thread.id,
+          bytes: akrBytes
+        });
+        scannedArchiveKey = scannedArchive.key;
+        scannedArchiveUrl = scannedArchive.url;
+        scannedArchiveSha256 = scannedArchive.sha256;
+        r2PackKey = scannedArchiveKey;
+      } catch (error) {
+        status = "Needs Moderator Review";
+        const reason = error instanceof Error ? error.message : "Failed to archive scanned .akr to R2.";
+        reasons.push("Failed to archive scanned .akr to R2; publication is blocked until staff review.");
+        await logAudit(input.db, {
+          actorId: "bot",
+          action: "submission_archive_failed",
+          target: input.thread.id,
+          details: { threadUrl: input.thread.url, reason }
+        });
+        await sendLog(input.thread.guild, "bot-alerts", `Submission archive failed for ${input.thread.url}: ${reason}`);
+      }
       const archive = await validateAkrArchive(akrBytes);
       archiveSection = archive.section;
       archiveMapSid = archive.mapSid ?? "";
@@ -144,7 +173,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
               fileName: attachmentPlan.image.name
             })
           : undefined;
-        const result = await publishCatalogEntry(input.config, input.db, input.r2Client ?? createR2Client(input.config), {
+        const result = await publishCatalogEntry(input.config, input.db, r2Client ?? input.r2Client ?? createR2Client(input.config), {
           discordThreadId: input.thread.id,
           title: input.thread.name,
           description: parsed.description,
@@ -159,6 +188,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
         archiveMapSid = mapping.mapSid;
         r2PackKey = result.packKey;
         r2ImageKey = result.imageKey;
+        catalogPublished = true;
       } catch (error) {
         status = "Needs Moderator Review";
         reasons.push(error instanceof Error ? error.message : "Failed to publish to R2 catalog.");
@@ -182,6 +212,10 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
     reasons: uniqueReasons(reasons),
     r2PackKey,
     r2ImageKey,
+    catalogPublished,
+    scannedArchiveKey,
+    scannedArchiveUrl,
+    scannedArchiveSha256,
     starter
   });
 }
@@ -197,6 +231,10 @@ async function finishScan(
     reasons: string[];
     r2PackKey?: string;
     r2ImageKey?: string;
+    catalogPublished?: boolean;
+    scannedArchiveKey?: string;
+    scannedArchiveUrl?: string;
+    scannedArchiveSha256?: string;
     starter?: Message<true>;
   }
 ): Promise<void> {
@@ -235,10 +273,14 @@ async function finishScan(
       }
     });
 
-  const embed = buildScanEmbed(result.status, result.scope, result.reasons, result.mapSid);
+  const embed = buildScanEmbed(result.status, result.scope, result.reasons, {
+    mapSid: result.mapSid,
+    scannedArchiveUrl: result.scannedArchiveUrl,
+    scannedArchiveSha256: result.scannedArchiveSha256
+  });
   await input.thread.send({ embeds: [embed] });
   await sendLog(input.thread.guild, "scan-log", `${result.status}: ${input.thread.url}`);
-  if (result.status === "Published" && result.r2PackKey) {
+  if (result.status === "Published" && result.catalogPublished && result.r2PackKey) {
     await logAudit(input.db, {
       actorId: "bot",
       action: "catalog_published",
@@ -257,9 +299,19 @@ async function finishScan(
       actorId: "bot",
       action: "submission_flagged",
       target: input.thread.id,
-      details: { threadUrl: input.thread.url, reasons: result.reasons }
+      details: {
+        threadUrl: input.thread.url,
+        reasons: result.reasons,
+        scannedArchiveKey: result.scannedArchiveKey,
+        scannedArchiveSha256: result.scannedArchiveSha256
+      }
     });
-    await sendLog(input.thread.guild, "mod-log", `Flagged submission ${input.thread.url}\n${result.reasons.join("\n")}`);
+    await sendLog(input.thread.guild, "mod-log", [
+      `Flagged submission ${input.thread.url}`,
+      result.scannedArchiveKey ? `Archived file: ${publicR2Url(input.config, result.scannedArchiveKey)}` : "",
+      result.scannedArchiveSha256 ? `SHA-256: ${result.scannedArchiveSha256}` : "",
+      result.reasons.join("\n")
+    ].filter(Boolean).join("\n"));
     await input.thread.setLocked(true, "Akron scan flagged this post.");
     await input.thread.setArchived(true, "Akron scan flagged this post.");
   }
@@ -341,15 +393,39 @@ async function applyStatusTag(
   }
 }
 
-function buildScanEmbed(status: ScanStatus, scope: AkronProfileSection, reasons: string[], mapSid?: string): EmbedBuilder {
+function buildScanEmbed(
+  status: ScanStatus,
+  scope: AkronProfileSection,
+  reasons: string[],
+  archive: {
+    mapSid?: string;
+    scannedArchiveUrl?: string;
+    scannedArchiveSha256?: string;
+  }
+): EmbedBuilder {
   const color = status === "Published" ? 0x2da44e : status === "Flagged" ? 0xcf222e : 0xbf8700;
   const embed = new EmbedBuilder()
     .setTitle(`Akron Scan: ${status}`)
     .setColor(color)
     .addFields({ name: "Scope", value: formatSection(scope), inline: true });
 
-  if (mapSid) {
-    embed.addFields({ name: "Map SID", value: mapSid, inline: true });
+  if (archive.mapSid) {
+    embed.addFields({ name: "Map SID", value: archive.mapSid, inline: true });
+  }
+
+  if (archive.scannedArchiveUrl && status !== "Flagged") {
+    embed.addFields({
+      name: "Scanned File",
+      value: [
+        `[Download exact scanned .akr](${archive.scannedArchiveUrl})`,
+        archive.scannedArchiveSha256 ? `SHA-256: \`${archive.scannedArchiveSha256}\`` : ""
+      ].filter(Boolean).join("\n")
+    });
+  } else if (archive.scannedArchiveSha256 && status === "Flagged") {
+    embed.addFields({
+      name: "Scanned File",
+      value: "Backed up for staff review. SHA-256: `" + archive.scannedArchiveSha256 + "`"
+    });
   }
 
   embed.setDescription(
@@ -359,6 +435,30 @@ function buildScanEmbed(status: ScanStatus, scope: AkronProfileSection, reasons:
   );
 
   return embed;
+}
+
+async function archiveScannedAkr(
+  config: AppConfig,
+  client: S3Client,
+  input: {
+    parentName: string;
+    threadId: string;
+    bytes: Buffer;
+  }
+): Promise<{ key: string; url: string; sha256: string }> {
+  const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+  const key = buildScannedArchiveKey(input.parentName, input.threadId, sha256);
+  const url = await putR2Object(config, client, {
+    key,
+    body: input.bytes,
+    contentType: "application/octet-stream"
+  });
+  return { key, url, sha256 };
+}
+
+export function buildScannedArchiveKey(parentName: string, threadId: string, sha256: string): string {
+  const safeParent = parentName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown-forum";
+  return `submissions/${safeParent}/${threadId}/${sha256}.akr`;
 }
 
 export function hasFlaggableArchiveReason(reasons: string[]): boolean {

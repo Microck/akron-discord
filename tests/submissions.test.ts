@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
+import { buildScannedArchiveKey, hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 
 describe("submission post parsing", () => {
@@ -115,6 +115,12 @@ describe("submission scan classification", () => {
       "Archive contains too many files.",
       "Archive JSON payload is too large: profile.json"
     ])).toBe(true);
+  });
+
+  it("builds immutable scanned archive keys from forum, thread, and hash", () => {
+    expect(buildScannedArchiveKey("StartPos Packs!", "123", "a".repeat(64))).toBe(
+      `submissions/startpos-packs/123/${"a".repeat(64)}.akr`
+    );
   });
 });
 

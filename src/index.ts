@@ -10,11 +10,12 @@ import {
   type PartialMessage,
   type TextChannel
 } from "discord.js";
+import { eq } from "drizzle-orm";
 import { loadConfig } from "./config.js";
 import { handleCommand } from "./commands.js";
 import { buildVerifyComponents, buildVerifyEmbed, verifyButtonCustomId } from "./content.js";
 import { createDatabase } from "./db/database.js";
-import { verificationLogs } from "./db/schema.js";
+import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
 import { scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
@@ -74,7 +75,11 @@ client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
   try {
     const message = newMessage.partial ? await newMessage.fetch() : newMessage;
     if (message.guildId === config.discordGuildId && isForumStarterMessage(message)) {
-      scheduleForumThread(message.channel as AnyThreadChannel);
+      const thread = message.channel as AnyThreadChannel;
+      if (await shouldSkipAutoRescan(thread)) {
+        return;
+      }
+      scheduleForumThread(thread);
     }
   } catch (error) {
     await reportRuntimeError(error);
@@ -131,6 +136,17 @@ function scheduleForumThread(thread: AnyThreadChannel): void {
 async function handleForumThread(thread: AnyThreadChannel): Promise<void> {
   await scanSubmissionThread({ config, db: database.db, thread });
   await syncGithubForumThread({ config, db: database.db, thread });
+}
+
+async function shouldSkipAutoRescan(thread: AnyThreadChannel): Promise<boolean> {
+  if (!thread.archived || !thread.locked) {
+    return false;
+  }
+
+  const state = await database.db.query.scanStates.findFirst({
+    where: eq(scanStates.discordThreadId, thread.id)
+  });
+  return state?.status === "Flagged";
 }
 
 async function reportRuntimeError(error: unknown): Promise<void> {

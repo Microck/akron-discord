@@ -441,7 +441,7 @@ Pending Scan -> Needs Moderator Review
 Pending Scan -> Flagged
 ```
 
-The bot should automatically scan new forum posts and debounced edits to the first post.
+The bot should automatically scan new forum posts and debounced edits to the first post. Archived and locked `Flagged` posts must not be rescanned automatically after user edits. A moderator or admin must explicitly unlock/unarchive and run `/rescan`.
 
 Manual rescan:
 
@@ -496,6 +496,8 @@ Flagged cases include:
 Flagged posts should be tagged `Flagged`, logged to `mod-log` and `scan-log`, then locked and archived. The bot should preserve the thread as moderation evidence instead of deleting it.
 
 Only `Moderator` or `Admin` can restore, override, or rescan a flagged post.
+
+Every downloaded `.akr` must be archived to R2 before publication or final scan feedback. Non-flagged scan embeds should link to the exact archived `.akr` bytes and include the SHA-256 hash. Flagged files should be backed up for staff review and logged to staff channels, but the user-visible flagged embed should not expose a public download link.
 
 ## Malware and AI Review
 
