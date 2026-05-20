@@ -77,11 +77,14 @@ Only configured admins can run server sync. On first setup only, when `AKRON_ADM
 
 The bot creates or maintains these roles:
 
-| Role | Purpose |
-| --- | --- |
-| `Admin` | Full trusted server operations. Can run server sync. |
-| `Moderator` | Can review flagged posts and run manual rescans. |
-| `Member` | Granted after verification. Unlocks normal community channels. |
+| Role | Color | Purpose |
+| --- | --- | --- |
+| `Admin` | Red | Full trusted server operations. Can run server sync. |
+| `Moderator` | Purple | Can review flagged posts and run manual rescans. |
+| `Member` | Green | Granted after verification. Unlocks normal community channels. |
+| `Tester` | Light blue | Optional tester marker for early users. |
+
+The bot's managed role should be yellow when Discord allows the bot to edit it.
 
 The implementation should keep role IDs in config after first sync:
 
@@ -137,15 +140,19 @@ Use hyphenated names for multi-word channels.
 | `faq` | Text | Members can read | Common questions and links. |
 | `submission-guide` | Text | Members can read | How to make `.akr` submissions and map captures. |
 
-### Community
+### Feedback
 
 | Channel | Type | Visibility | Purpose |
 | --- | --- | --- | --- |
 | `questions` | Forum | Members | Help and usage questions. |
+| `issues` | Forum | Members | User-authored bug reports synced to GitHub issues. |
+| `suggestions` | Forum | Members | User-authored feature suggestions. |
 
 `general` is intentionally omitted for now. The first server structure should prioritize structured support, submissions, issues, and suggestions over casual chat.
 
 Do not add extra public channels in v1. The current public/member-facing structure is the initial canonical structure.
+
+`questions`, `issues`, and `suggestions` should use forum post guidelines and tags so users can post naturally while the bot keeps the posts structured. Discord feedback posts are supported for convenience, but the channel copy should say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
 
 Suggested `questions` forum tags:
 
@@ -155,15 +162,6 @@ Suggested `questions` forum tags:
 - `Bug Help`
 - `Answered`
 - `Needs Staff`
-
-### Feedback
-
-| Channel | Type | Visibility | Purpose |
-| --- | --- | --- | --- |
-| `issues` | Forum | Members | User-authored bug reports synced to GitHub issues. |
-| `suggestions` | Forum | Members | User-authored feature suggestions. |
-
-`issues` and `suggestions` should use forum post guidelines and tags so users can post naturally while the bot keeps the posts structured. Discord feedback posts are supported for convenience, but the channel copy should say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
 
 ### Map Catalog
 

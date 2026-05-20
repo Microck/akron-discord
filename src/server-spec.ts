@@ -1,9 +1,10 @@
 import { ChannelType, PermissionFlagsBits } from "discord.js";
 
 export const roleSpecs = [
-  { key: "admin", name: "Admin" },
-  { key: "moderator", name: "Moderator" },
-  { key: "member", name: "Member" }
+  { key: "admin", name: "Admin", color: 0xed4245 },
+  { key: "moderator", name: "Moderator", color: 0x9b59b6 },
+  { key: "member", name: "Member", color: 0x57f287 },
+  { key: "tester", name: "Tester", color: 0x5dade2 }
 ] as const;
 
 export type RoleKey = (typeof roleSpecs)[number]["key"];
@@ -11,7 +12,7 @@ export type RoleKey = (typeof roleSpecs)[number]["key"];
 export type ChannelSpec = {
   name: string;
   type: ChannelType.GuildText | ChannelType.GuildForum;
-  category: "info" | "community" | "feedback" | "map-catalog" | "general-packs" | "staff";
+  category: "info" | "feedback" | "map-catalog" | "general-packs" | "staff";
   visibility: "public" | "member" | "staff" | "admin";
   topic?: string;
   forumTags?: string[];
@@ -19,7 +20,6 @@ export type ChannelSpec = {
 
 export const categorySpecs = [
   { key: "info", name: "Info" },
-  { key: "community", name: "Community" },
   { key: "feedback", name: "Feedback" },
   { key: "map-catalog", name: "Map Catalog" },
   { key: "general-packs", name: "General Packs" },
@@ -80,7 +80,7 @@ export const channelSpecs: ChannelSpec[] = [
   {
     name: "questions",
     type: ChannelType.GuildForum,
-    category: "community",
+    category: "feedback",
     visibility: "member",
     topic: "Ask one Akron question per post.",
     forumTags: ["Akron Setup", ".akr Packs", "Map Catalog", "Bug Help", "Answered", "Needs Staff"]

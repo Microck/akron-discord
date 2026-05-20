@@ -1,41 +1,29 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from "discord.js";
 
 export const verifyButtonCustomId = "akron:verify";
+const akronYellow = 0xfee75c;
 
 export function buildVerifyEmbed(): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("Verify for Akron Discord")
     .setDescription("Click Verify Me to unlock the server. This gives you the Member role.")
-    .setColor(0xc42a30);
+    .setColor(akronYellow);
 }
 
 export function buildRulesEmbed(): EmbedBuilder {
   return new EmbedBuilder()
-    .setTitle("Akron Discord Rules")
-    .setColor(0xc42a30)
-    .setDescription("Use this server for Akron support, submissions, issues, and suggestions. Keep posts actionable and safe.")
-    .addFields(
-      {
-        name: "Community",
-        value: "Be respectful, stay on topic, and do not harass, impersonate, scam, spam, dox, or post hateful content."
-      },
-      {
-        name: "Submissions",
-        value: "Only post scoped `.akr` packs in the matching forum. `Whole` profile packs are not accepted publicly yet."
-      },
-      {
-        name: "Safety",
-        value: "Do not include credentials, tokens, private overlays, suspicious commands, nested archives, or unrelated files in submissions."
-      },
-      {
-        name: "Moderation",
-        value: "`Needs Fix` means edit the post and rescan. `Needs Moderator Review` means staff must resolve it. `Flagged` posts are locked and archived for safety."
-      },
-      {
-        name: "Feedback",
-        value: "Issues and suggestions can be posted in Discord, but GitHub is preferred when you are comfortable opening them there directly."
-      }
-    );
+    .setTitle("Rules")
+    .setColor(akronYellow)
+    .setDescription([
+      "1. Be respectful. No harassment, hate, or personal attacks.",
+      "2. No spam. No flooding, self-promo, or unsolicited DMs.",
+      "3. Keep it legal & safe. No doxxing, scams, malware, or hacking help.",
+      "4. Stay on-topic. Use the right channels and keep threads focused.",
+      "5. No NSFW. Keep it clean.",
+      "6. Follow staff. Mods can remove content and take action as needed.",
+      "",
+      "By staying here, you agree to these rules."
+    ].join("\n"));
 }
 
 export function buildVerifyComponents(): ActionRowBuilder<ButtonBuilder>[] {
@@ -52,37 +40,65 @@ export function buildVerifyComponents(): ActionRowBuilder<ButtonBuilder>[] {
 export function buildSubmissionGuideEmbed(): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("How to Submit Akron Packs")
-    .setColor(0xc42a30)
-    .setDescription("Use the right forum, attach one scoped .akr pack, and include enough map context for other players to trust it.")
+    .setColor(akronYellow)
+    .setDescription("Post one scoped `.akr` in the right forum. The bot archives the exact scanned file, validates it, and publishes eligible map packs.")
     .addFields(
       {
-        name: "Map catalog packs",
-        value: "`startpos-packs`, `auto-kill-areas`, and `auto-deafen-areas` publish to Akron's in-game catalog after validation."
-      },
-      {
-        name: "Discord-only packs",
-        value: "`keybind-packs`, `hud-layouts`, `audio-packs`, and `recorder-packs` are scanned and kept on Discord only."
-      },
-      {
         name: "Required",
-        value: "Attach exactly one `.akr`, include a supported map link for map-specific packs, and choose the matching forum/tag."
+        value: "One `.akr`, the right forum, and a supported GameBanana map link for map-specific packs."
       },
       {
-        name: "Exporting",
-        value: "Export a scoped pack from Akron instead of a whole profile. `Whole` profile packs are disabled for public posting in this first version."
+        name: "Recommended",
+        value: "Add a short description and a capture from Akron showing markers, zones, or relevant rooms."
       },
       {
-        name: "Map captures",
-        value: "Map captures are optional but heavily recommended. Akron can generate room or map captures easily. Show StartPos markers, Auto Kill areas, or Auto Deafen areas clearly, and avoid private desktop content."
+        name: "Catalog",
+        value: "`startpos-packs`, `auto-kill-areas`, and `auto-deafen-areas` can publish to Akron's in-game catalog."
+      },
+      {
+        name: "Discord-only",
+        value: "`keybind-packs`, `hud-layouts`, `audio-packs`, and `recorder-packs` are scanned and kept here."
       },
       {
         name: "Example",
-        value: "Title: `Beginner Lobby StartPos Pack`\nMap: `https://gamebanana.com/mods/150453`\nDescription: `Start positions for common lobby practice rooms.`\nAttachments: `beginner-startpos.akr`, `beginner-startpos-capture.png`"
-      },
-      {
-        name: "Bot feedback",
-        value: "`Needs Fix` means you can edit the post. `Needs Moderator Review` means staff must resolve something. `Flagged` means the post was locked and archived for safety."
+        value: "`Map: https://gamebanana.com/mods/150453`\n`Description: Start positions for common practice rooms.`"
       }
+    );
+}
+
+export function buildWelcomeEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setTitle("Welcome to Akron")
+    .setColor(akronYellow)
+    .setDescription("This is the official Discord for Akron support, community packs, issues, and suggestions.")
+    .addFields(
+      { name: "Start Here", value: "Read #submission-guide before posting `.akr` packs." },
+      { name: "Need Help?", value: "Use `questions` for focused support threads." },
+      { name: "Website", value: "akron.micr.dev" }
+    );
+}
+
+export function buildFaqEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setTitle("FAQ")
+    .setColor(akronYellow)
+    .setDescription("Short answers for common Akron Discord workflows.")
+    .addFields(
+      { name: "How do I get access?", value: "Click the button in #verify." },
+      { name: "Where do I report bugs?", value: "Prefer GitHub directly. Discord `issues` posts are synced one-way when needed." },
+      { name: "Can I post whole profiles?", value: "Not yet. Export a scoped `.akr` pack." },
+      { name: "Why did my post get flagged?", value: "Staff can review locked flagged posts. The bot preserves the scanned file for evidence." }
+    );
+}
+
+export function buildAnnouncementsEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setTitle("Announcements")
+    .setColor(akronYellow)
+    .setDescription("Official Akron updates will be posted here.")
+    .addFields(
+      { name: "Follow", value: "Use this channel for release notes, server changes, and important moderation notices." },
+      { name: "Website", value: "akron.micr.dev" }
     );
 }
 

@@ -12,7 +12,17 @@ import {
 import { botSettings } from "./db/schema.js";
 import type { AkronDatabase } from "./db/database.js";
 import { categorySpecs, channelSpecs, roleSpecs, submissionChannelScopes, type ChannelSpec } from "./server-spec.js";
-import { buildRulesEmbed, buildSubmissionGuideEmbed, buildVerifyComponents, buildVerifyEmbed, feedbackForumGuidelines, forumGuidelines } from "./content.js";
+import {
+  buildAnnouncementsEmbed,
+  buildFaqEmbed,
+  buildRulesEmbed,
+  buildSubmissionGuideEmbed,
+  buildVerifyComponents,
+  buildVerifyEmbed,
+  buildWelcomeEmbed,
+  feedbackForumGuidelines,
+  forumGuidelines
+} from "./content.js";
 import { utcNow } from "./time.js";
 
 export type ServerSyncPlan = {
@@ -30,6 +40,9 @@ export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
       changes.push(`create role ${role.name}`);
     } else {
       roles.set(role.key, existing.id);
+      if (existing.color !== role.color) {
+        changes.push(`update color for role ${role.name}`);
+      }
     }
   }
 
@@ -82,12 +95,21 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
   const roles = new Map<string, string>();
   for (const role of roleSpecs) {
     const existing = guild.roles.cache.find(candidate => candidate.name === role.name);
-    const resolved = existing ?? await guild.roles.create({ name: role.name, reason: "Akron server sync" });
+    const resolved = existing ?? await guild.roles.create({ name: role.name, colors: { primaryColor: role.color }, reason: "Akron server sync" });
     roles.set(role.key, resolved.id);
     if (!existing) {
       changes.push(`created role ${role.name}`);
+    } else if (existing.color !== role.color) {
+      try {
+        await existing.setColors({ primaryColor: role.color }, "Akron server sync");
+        changes.push(`updated role color ${role.name}`);
+      } catch (error) {
+        changes.push(`skipped role color ${role.name}: ${formatDiscordSyncError(error)}`);
+      }
     }
   }
+
+  await configureBotRoleColor(guild, changes);
 
   for (const [key, id] of roles) {
     await upsertSetting(db, `role.${key}.id`, id);
@@ -137,9 +159,12 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
     }
   }
 
-  await ensureVerifyMessage(guild, db);
-  await ensureRulesMessage(guild, db);
-  await ensureSubmissionGuideMessage(guild, db);
+  await runContentSync(changes, "verify", () => ensureVerifyMessage(guild, db));
+  await runContentSync(changes, "rules", () => ensureRulesMessage(guild, db));
+  await runContentSync(changes, "welcome", () => ensureWelcomeMessage(guild, db));
+  await runContentSync(changes, "faq", () => ensureFaqMessage(guild, db));
+  await runContentSync(changes, "announcements", () => ensureAnnouncementsMessage(guild, db));
+  await runContentSync(changes, "submission-guide", () => ensureSubmissionGuideMessage(guild, db));
 
   if (changes.length === 0) {
     changes.push("no structural changes needed");
@@ -397,6 +422,46 @@ async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase): Pr
   await upsertSetting(db, "message.submission-guide.id", message.id);
 }
 
+async function ensureWelcomeMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+  const channel = guild.channels.cache.find(candidate => candidate.name === "welcome" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
+  if (!channel) {
+    return;
+  }
+  await ensureStoredEmbedMessage(db, channel, "message.welcome.id", buildWelcomeEmbed());
+}
+
+async function ensureFaqMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+  const channel = guild.channels.cache.find(candidate => candidate.name === "faq" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
+  if (!channel) {
+    return;
+  }
+  await ensureStoredEmbedMessage(db, channel, "message.faq.id", buildFaqEmbed());
+}
+
+async function ensureAnnouncementsMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+  const channel = guild.channels.cache.find(candidate => candidate.name === "announcements" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
+  if (!channel) {
+    return;
+  }
+  await ensureStoredEmbedMessage(db, channel, "message.announcements.id", buildAnnouncementsEmbed());
+}
+
+async function ensureStoredEmbedMessage(db: AkronDatabase, channel: TextChannel, settingKey: string, embed: ReturnType<typeof buildRulesEmbed>): Promise<void> {
+  const setting = await db.query.botSettings.findFirst({ where: eq(botSettings.key, settingKey) });
+  if (setting) {
+    try {
+      const message = await channel.messages.fetch(setting.value);
+      await message.edit({ embeds: [embed] });
+      return;
+    } catch {
+      // The stored message was deleted or moved. Recreate it below.
+    }
+  }
+
+  const message = await channel.send({ embeds: [embed] });
+  await upsertSetting(db, settingKey, message.id);
+}
+
 async function upsertSetting(db: AkronDatabase, key: string, value: string): Promise<void> {
   await db
     .insert(botSettings)
@@ -415,6 +480,29 @@ function describeChannelType(type: ChannelType): string {
       return "text";
     default:
       return `type-${type}`;
+  }
+}
+
+async function configureBotRoleColor(guild: Guild, changes: string[]): Promise<void> {
+  const member = await guild.members.fetchMe();
+  const botRole = member.roles.cache.find(role => role.managed && role.tags?.botId === guild.client.user.id);
+  if (!botRole || botRole.color === 0xfee75c) {
+    return;
+  }
+
+  try {
+    await botRole.setColors({ primaryColor: 0xfee75c }, "Akron server sync");
+    changes.push("updated role color Akron bot");
+  } catch (error) {
+    changes.push(`skipped role color Akron bot: ${formatDiscordSyncError(error)}`);
+  }
+}
+
+async function runContentSync(changes: string[], label: string, sync: () => Promise<void>): Promise<void> {
+  try {
+    await sync();
+  } catch (error) {
+    changes.push(`skipped ${label} content: ${formatDiscordSyncError(error)}`);
   }
 }
 
