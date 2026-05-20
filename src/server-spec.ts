@@ -90,7 +90,7 @@ export const channelSpecs: ChannelSpec[] = [
     category: "feedback",
     visibility: "member",
     topic: "Ask one Akron question per post.",
-    forumTags: ["Akron Setup", ".akr Packs", "Map Catalog", "Bug Help", "Answered", "Needs Staff", "Synced", "GitHub Open", "GitHub Closed"]
+    forumTags: ["Akron Setup", ".akr Packs", "Map Catalog", "Bug Help", "Answered", "Needs Staff"]
   },
   {
     name: "issues",
@@ -229,7 +229,6 @@ export const mapCatalogScopes = new Set(["StartPos", "AutoKill", "AutoDeafen"]);
 
 export const githubLabelSpecs = [
   { name: "discord", color: "5865F2", description: "Created from an Akron Discord forum post." },
-  { name: "question", color: "0969da", description: "Question or support request." },
   { name: "issue", color: "d73a4a", description: "Bug or broken behavior." },
   { name: "suggestion", color: "a2eeef", description: "Feature suggestion or product idea." },
   { name: "needs-triage", color: "fbca04", description: "Needs maintainer review." },

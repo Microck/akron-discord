@@ -5,7 +5,6 @@ import { slugMapSid } from "../src/services/map-resolver.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
 import { githubIssuesMarkdownLink } from "../src/content.js";
 import { githubIssueKindForForum } from "../src/github-forums.js";
-import { githubLabelSpecs } from "../src/server-spec.js";
 import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
 
@@ -80,14 +79,10 @@ describe("GitHub issue body", () => {
   });
 
   it("maps feedback forums to GitHub issue kinds", () => {
-    expect(githubIssueKindForForum("questions")).toBe("question");
+    expect(githubIssueKindForForum("questions")).toBeNull();
     expect(githubIssueKindForForum("issues")).toBe("issue");
     expect(githubIssueKindForForum("suggestions")).toBe("suggestion");
     expect(githubIssueKindForForum("startpos-packs")).toBeNull();
-  });
-
-  it("defines a GitHub label for synced questions", () => {
-    expect(githubLabelSpecs.some(label => label.name === "question")).toBe(true);
   });
 });
 

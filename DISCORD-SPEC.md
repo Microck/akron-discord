@@ -160,7 +160,7 @@ Use hyphenated names for multi-word channels.
 
 | Channel | Type | Visibility | Purpose |
 | --- | --- | --- | --- |
-| `questions` | Forum | Members | Help and usage questions synced to GitHub issues. |
+| `questions` | Forum | Members | Help and usage questions. |
 | `issues` | Forum | Members | User-authored bug reports synced to GitHub issues. |
 | `suggestions` | Forum | Members | User-authored feature suggestions. |
 
@@ -168,7 +168,7 @@ Use hyphenated names for multi-word channels.
 
 Do not add extra public channels in v1. The current public/member-facing structure is the initial canonical structure.
 
-`questions`, `issues`, and `suggestions` should use forum Post Guidelines and tags so users can post naturally while the bot keeps the posts structured. The copy-paste templates belong in Post Guidelines, not in seeded embeds. Discord feedback posts are supported for convenience, but the channel copy should use masked Markdown links when pointing to GitHub, for example `[the GitHub issues page](https://github.com/<owner>/<repo>/issues)`, and say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
+`questions`, `issues`, and `suggestions` should use forum Post Guidelines and tags so users can post naturally while the bot keeps the posts structured. The copy-paste templates belong in Post Guidelines, not in seeded embeds. Discord feedback posts are supported for convenience, but only `issues` and `suggestions` sync to GitHub. The channel copy should use masked Markdown links when pointing to GitHub, for example `[the GitHub issues page](https://github.com/<owner>/<repo>/issues)`, and say that users should preferably open GitHub issues directly when they are comfortable doing so.
 
 Suggested `questions` forum tags:
 
@@ -178,10 +178,6 @@ Suggested `questions` forum tags:
 - `Bug Help`
 - `Answered`
 - `Needs Staff`
-- `Synced`
-- `GitHub Open`
-- `GitHub Closed`
-
 ### Map Catalog
 
 These forum channels produce entries for Akron's in-game R2 catalog.
@@ -255,7 +251,7 @@ Tags are applied by the bot. Moderated tags should require `Moderator`.
 
 ## GitHub Issue Sync
 
-The `questions`, `issues`, and `suggestions` forums are linked to a configured GitHub repository. Do not infer the repository from any local checkout. The bot must read the target from configuration.
+The `issues` and `suggestions` forums are linked to a configured GitHub repository. Do not infer the repository from any local checkout. The bot must read the target from configuration.
 
 The target repository should be configured explicitly. Do not hard-code or infer it from a local checkout.
 
@@ -295,8 +291,6 @@ Issue forum post requirements:
 - Optional attachments, screenshots, logs, or crash text.
 
 On every synced forum post, the created GitHub issue must link back to the source Discord forum post.
-
-On a valid new `questions` forum post, the bot should create a GitHub issue with labels `discord`, `question`, and `needs-triage`, include the Discord forum post URL in the issue body, store the Discord-to-GitHub mapping in SQLite, reply with a GitHub issue URL embed, and log the sync to `github-sync-log`.
 
 On a valid new `issues` forum post, the bot should:
 
@@ -344,7 +338,6 @@ GitHub labels are managed as a canonical taxonomy. The bot should create missing
 
 Type labels:
 
-- `question`
 - `issue`
 - `suggestion`
 
@@ -476,6 +469,8 @@ Pending Scan -> Flagged
 The bot should automatically scan new forum posts and debounced edits to the first post. Archived and locked `Flagged` posts must not be rescanned automatically after user edits. A moderator or admin must explicitly unlock/unarchive and run `/rescan`.
 
 After each automatic scan or manual rescan, the bot should reply in the thread with a scan result embed that clearly states whether the post is valid. The reply should include a checklist covering the `.akr` attachment, immutable archived file, map link, map identity, deterministic archive validation, malware/policy result, optional capture, catalog publication when applicable, and whether user or staff action is needed. Scan embeds use the normal Akron leaf and yellow when valid, the desaturated leaf and gray when something is missing or needs review, and the flagged leaf and red when flagged.
+
+Failed scan embeds should include `Fixed` and `Cancel` buttons. `Fixed` reruns the scan. `Cancel` must warn the user first, then delete the entire forum post only after explicit confirmation. If a second scan also fails, the embed should add a gray `Notify` button that alerts staff that the user needs help.
 
 Bot-authored example threads are ignored by automatic scanning, but moderator-run `/rescan` should force them through the scanner so staff can preview the feedback UI.
 

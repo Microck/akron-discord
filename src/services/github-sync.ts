@@ -7,7 +7,7 @@ import { githubLinks } from "../db/schema.js";
 import { githubLabelSpecs } from "../server-spec.js";
 import { utcNow } from "../time.js";
 
-export type GithubIssueKind = "issue" | "suggestion" | "question";
+export type GithubIssueKind = "issue" | "suggestion";
 
 export type GithubSyncInput = {
   discordThreadId: string;
@@ -223,8 +223,5 @@ function githubIssueKindLabel(kind: GithubIssueKind): string {
   if (kind === "issue") {
     return "Issue";
   }
-  if (kind === "suggestion") {
-    return "Suggestion";
-  }
-  return "Question";
+  return "Suggestion";
 }

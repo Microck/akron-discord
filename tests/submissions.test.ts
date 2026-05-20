@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { buildScanEmbed, buildScannedArchiveKey, hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
+import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 
 describe("submission post parsing", () => {
@@ -165,6 +165,24 @@ describe("submission scan classification", () => {
 
     expect(embed.color).toBe(0xcf222e);
     expect(embed.thumbnail?.url).toBe("attachment://akronleaf-flagged.png");
+  });
+
+  it("labels NIM attention separately", () => {
+    const embed = buildScanEmbed("Needs Moderator Review", "StartPos", ["NIM review: model could not decide."], {
+      hasAkrAttachment: true,
+      isMapCatalogSubmission: true
+    }).toJSON();
+
+    expect(embed.fields?.some(field => field.name === "NIM review:")).toBe(true);
+  });
+
+  it("adds notify only after a repeated failed scan", () => {
+    const firstFailure = buildScanComponents("Needs Fix", false)[0]?.toJSON();
+    const repeatedFailure = buildScanComponents("Needs Fix", true)[0]?.toJSON();
+
+    expect(firstFailure?.components.map(component => "label" in component ? component.label : "")).toEqual(["Fixed", "Cancel"]);
+    expect(repeatedFailure?.components.map(component => "label" in component ? component.label : "")).toEqual(["Fixed", "Cancel", "Notify"]);
+    expect(buildScanComponents("Published", true)).toEqual([]);
   });
 });
 

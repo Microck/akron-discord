@@ -18,7 +18,7 @@ import { buildVerifyComponents, buildVerifyEmbed, verifyButtonCustomId } from ".
 import { createDatabase } from "./db/database.js";
 import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
-import { scanSubmissionThread } from "./submissions/scanner.js";
+import { handleScanButtonInteraction, scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
 
 const config = loadConfig();
@@ -45,6 +45,10 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton() && interaction.customId === verifyButtonCustomId) {
       await handleVerifyButton(interaction.member as GuildMember | null);
       await interaction.reply({ embeds: [buildVerifyEmbed()], components: buildVerifyComponents(), ephemeral: true });
+      return;
+    }
+
+    if (interaction.isButton() && await handleScanButtonInteraction({ interaction, config, db: database.db })) {
       return;
     }
 

@@ -1,12 +1,17 @@
 import { eq } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
+  ActionRowBuilder,
   ChannelType,
   AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   EmbedBuilder,
   type AnyThreadChannel,
   type Attachment,
+  type ButtonInteraction,
   type ForumChannel,
+  type GuildMember,
   type Message,
   type TextChannel
 } from "discord.js";
@@ -17,6 +22,7 @@ import { embedAssets, embedAssetAttachment, embedAssetUrl, type EmbedAssetName }
 import { scanStates } from "../db/schema.js";
 import { mapCatalogScopes, statusForumTags, submissionChannelScopes } from "../server-spec.js";
 import { logAudit, sendAuditLog } from "../services/audit.js";
+import { isModerator } from "../permissions.js";
 import { createR2Client, publicR2Url, putR2Object } from "../services/r2.js";
 import { publishCatalogEntry } from "../services/catalog.js";
 import { optimizeCatalogImage } from "../services/image-optimizer.js";
@@ -45,6 +51,12 @@ type AttachmentPlan = {
   image?: Attachment;
   problems: string[];
 };
+
+const scanButtonPrefix = "akron:scan:";
+const scanFixedCustomId = `${scanButtonPrefix}fixed`;
+const scanCancelCustomId = `${scanButtonPrefix}cancel`;
+const scanNotifyCustomId = `${scanButtonPrefix}notify`;
+const scanConfirmCancelPrefix = `${scanButtonPrefix}confirm-cancel:`;
 
 export function isSubmissionForumName(name: string): boolean {
   return submissionChannelScopes.has(name);
@@ -254,6 +266,11 @@ async function finishScan(
     isMapCatalogSubmission?: boolean;
   }
 ): Promise<ScanSubmissionResult> {
+  const previousState = await input.db.query.scanStates.findFirst({
+    where: eq(scanStates.discordThreadId, input.thread.id)
+  });
+  const repeatedFailure = Boolean(previousState && previousState.status !== "Published" && result.status !== "Published");
+
   await applyStatusTag(input.thread, parent, result.status, result.scope);
 
   await input.db
@@ -299,7 +316,11 @@ async function finishScan(
     hasCaptureImage: result.hasCaptureImage,
     isMapCatalogSubmission: result.isMapCatalogSubmission
   });
-  await input.thread.send({ embeds: [embed], files: scanEmbedFiles(result.status) });
+  await input.thread.send({
+    embeds: [embed],
+    files: scanEmbedFiles(result.status),
+    components: buildScanComponents(result.status, repeatedFailure)
+  });
   await sendLog(input.thread.guild, "scan-log", `${result.status}: ${input.thread.url}`);
   if (result.status === "Published" && result.catalogPublished && result.r2PackKey) {
     await logAudit(input.db, {
@@ -342,6 +363,75 @@ async function finishScan(
     status: result.status,
     message: `Scan completed with status: ${result.status}.`
   };
+}
+
+export async function handleScanButtonInteraction(input: {
+  interaction: ButtonInteraction;
+  config: AppConfig;
+  db: AkronDatabase;
+}): Promise<boolean> {
+  const { interaction, config, db } = input;
+  if (!interaction.customId.startsWith(scanButtonPrefix)) {
+    return false;
+  }
+
+  const thread = await resolveInteractionThread(interaction);
+  if (!thread) {
+    await interaction.reply({ content: "This button only works inside an Akron submission thread.", ephemeral: true });
+    return true;
+  }
+
+  if (!canUseScanButton(interaction, config, thread)) {
+    await interaction.reply({ content: "Only the thread author or staff can use this.", ephemeral: true });
+    return true;
+  }
+
+  if (interaction.customId === scanFixedCustomId) {
+    await interaction.reply({ content: "Rescanning this submission now.", ephemeral: true });
+    const result = await scanSubmissionThread({ config, db, thread, forceBotAuthored: true });
+    await interaction.followUp({
+      content: result.scanned ? result.message : `Rescan skipped: ${result.reason}`,
+      ephemeral: true
+    });
+    return true;
+  }
+
+  if (interaction.customId === scanCancelCustomId) {
+    await interaction.reply({
+      content: "This will delete the entire forum post and cannot be undone. Confirm only if you want to remove this submission.",
+      components: [
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`${scanConfirmCancelPrefix}${thread.id}`)
+            .setLabel("Confirm Delete")
+            .setStyle(ButtonStyle.Danger)
+        )
+      ],
+      ephemeral: true
+    });
+    return true;
+  }
+
+  if (interaction.customId.startsWith(scanConfirmCancelPrefix)) {
+    const expectedThreadId = interaction.customId.slice(scanConfirmCancelPrefix.length);
+    if (expectedThreadId !== thread.id) {
+      await interaction.reply({ content: "This confirmation belongs to a different thread.", ephemeral: true });
+      return true;
+    }
+
+    await interaction.reply({ content: "Deleting this submission.", ephemeral: true });
+    await thread.delete("Akron submission cancelled by user.");
+    return true;
+  }
+
+  if (interaction.customId === scanNotifyCustomId) {
+    const mention = config.akronAdminRoleId ? `<@&${config.akronAdminRoleId}>` : "Staff";
+    await sendLog(thread.guild, "bot-alerts", `${mention} help requested for ${thread.url} by <@${interaction.user.id}> after repeated scan failures.`);
+    await interaction.reply({ content: "Staff have been notified.", ephemeral: true });
+    return true;
+  }
+
+  return false;
 }
 
 function selectSubmissionAttachments(message: Message<true>): AttachmentPlan {
@@ -465,8 +555,9 @@ export function buildScanEmbed(
   }
 
   if (reasons.length > 0) {
+    const hasNimReason = reasons.some(reason => /^NIM (review|policy rejection):/i.test(reason));
     embed.addFields({
-      name: status === "Published" ? "Notes" : "What needs attention",
+      name: status === "Published" ? "Notes" : hasNimReason ? "NIM review:" : "What needs attention",
       value: reasons.slice(0, 10).map(reason => `- ${reason}`).join("\n").slice(0, 1024)
     });
   }
@@ -554,6 +645,49 @@ function scanEmbedAsset(status: ScanStatus): EmbedAssetName {
 
 function scanEmbedFiles(status: ScanStatus): AttachmentBuilder[] {
   return [embedAssetAttachment(scanEmbedAsset(status))];
+}
+
+export function buildScanComponents(status: ScanStatus, repeatedFailure: boolean): ActionRowBuilder<ButtonBuilder>[] {
+  if (status === "Published" || status === "Flagged") {
+    return [];
+  }
+
+  const buttons = [
+    new ButtonBuilder()
+      .setCustomId(scanFixedCustomId)
+      .setLabel("Fixed")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(scanCancelCustomId)
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger)
+  ];
+
+  if (repeatedFailure) {
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(scanNotifyCustomId)
+        .setLabel("Notify")
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+
+  return [new ActionRowBuilder<ButtonBuilder>().addComponents(buttons)];
+}
+
+async function resolveInteractionThread(interaction: ButtonInteraction): Promise<AnyThreadChannel | null> {
+  if (interaction.channel?.isThread()) {
+    return interaction.channel;
+  }
+
+  return null;
+}
+
+function canUseScanButton(interaction: ButtonInteraction, config: AppConfig, thread: AnyThreadChannel): boolean {
+  const member = interaction.member instanceof Object && "roles" in interaction.member
+    ? (interaction.member as GuildMember)
+    : null;
+  return interaction.user.id === thread.ownerId || Boolean(member && isModerator(member, config));
 }
 
 async function archiveScannedAkr(
