@@ -13,6 +13,9 @@ import { logAudit } from "./services/audit.js";
 import { syncForumPostToGithub, type GithubIssueKind } from "./services/github-sync.js";
 
 export function githubIssueKindForForum(name: string): GithubIssueKind | null {
+  if (name === "questions") {
+    return "question";
+  }
   if (name === "issues") {
     return "issue";
   }

@@ -54,13 +54,37 @@ export async function reviewWithNim(config: AppConfig, input: {
       ]
     });
 
-    const content = response.choices[0]?.message?.content ?? "{}";
+    const content = response.choices[0]?.message?.content;
+    if (!content?.trim()) {
+      throw new Error("NVIDIA NIM returned an empty response.");
+    }
     return nimReviewSchema.parse(JSON.parse(content));
-  } catch {
+  } catch (error) {
     return {
       decision: "needs_review",
       severity: "medium",
-      reasons: ["NVIDIA NIM review failed; moderator review required."]
+      reasons: [`NVIDIA NIM review failed (${formatNimError(error)}); moderator review required.`]
     };
   }
+}
+
+function formatNimError(error: unknown): string {
+  if (error instanceof SyntaxError) {
+    return "invalid JSON response";
+  }
+  if (error instanceof z.ZodError) {
+    return "unexpected JSON schema";
+  }
+
+  const candidate = error as { status?: unknown; code?: unknown; message?: unknown };
+  if (typeof candidate.status === "number") {
+    return `HTTP ${candidate.status}`;
+  }
+  if (typeof candidate.code === "string") {
+    return candidate.code;
+  }
+  if (typeof candidate.message === "string" && candidate.message.trim()) {
+    return candidate.message.slice(0, 120);
+  }
+  return "unknown error";
 }

@@ -7,7 +7,7 @@ import { githubLinks } from "../db/schema.js";
 import { githubLabelSpecs } from "../server-spec.js";
 import { utcNow } from "../time.js";
 
-export type GithubIssueKind = "issue" | "suggestion";
+export type GithubIssueKind = "issue" | "suggestion" | "question";
 
 export type GithubSyncInput = {
   discordThreadId: string;
@@ -56,7 +56,7 @@ export async function syncForumPostToGithub(
   const created = await client.issues.create({
     owner: config.githubOwner,
     repo: config.githubRepo,
-    title: `[${input.kind === "issue" ? "Issue" : "Suggestion"}]: ${input.title}`,
+    title: `[${githubIssueKindLabel(input.kind)}]: ${input.title}`,
     body,
     labels
   });
@@ -217,4 +217,14 @@ export function formatGithubIssueBody(input: GithubSyncInput): string {
     input.body.slice(0, 12000),
     "```"
   ].join("\n");
+}
+
+function githubIssueKindLabel(kind: GithubIssueKind): string {
+  if (kind === "issue") {
+    return "Issue";
+  }
+  if (kind === "suggestion") {
+    return "Suggestion";
+  }
+  return "Question";
 }

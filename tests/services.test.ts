@@ -4,6 +4,8 @@ import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js"
 import { slugMapSid } from "../src/services/map-resolver.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
 import { githubIssuesMarkdownLink } from "../src/content.js";
+import { githubIssueKindForForum } from "../src/github-forums.js";
+import { githubLabelSpecs } from "../src/server-spec.js";
 import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
 
@@ -75,6 +77,17 @@ describe("GitHub issue body", () => {
   it("formats the configured GitHub issues page as a masked Discord link", () => {
     expect(githubIssuesMarkdownLink(config({ githubOwner: "Microck", githubRepo: "akron" })))
       .toBe("[the GitHub issues page](https://github.com/Microck/akron/issues)");
+  });
+
+  it("maps feedback forums to GitHub issue kinds", () => {
+    expect(githubIssueKindForForum("questions")).toBe("question");
+    expect(githubIssueKindForForum("issues")).toBe("issue");
+    expect(githubIssueKindForForum("suggestions")).toBe("suggestion");
+    expect(githubIssueKindForForum("startpos-packs")).toBeNull();
+  });
+
+  it("defines a GitHub label for synced questions", () => {
+    expect(githubLabelSpecs.some(label => label.name === "question")).toBe(true);
   });
 });
 

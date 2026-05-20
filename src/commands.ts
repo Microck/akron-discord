@@ -37,7 +37,7 @@ export const commandDefinitions = [
     ),
   new SlashCommandBuilder()
     .setName("sync-issue")
-    .setDescription("Sync the current issues or suggestions forum post to GitHub.")
+    .setDescription("Sync the current questions, issues, or suggestions forum post to GitHub.")
     .addStringOption(option =>
       option.setName("thread-id").setDescription("Optional Discord thread ID. Defaults to the current thread.")
     ),
@@ -134,7 +134,7 @@ export async function handleCommand(input: {
     await interaction.deferReply({ ephemeral: true });
     const thread = await resolveThread(interaction, client);
     if (!thread) {
-      await interaction.editReply("Run this inside an issues/suggestions forum thread or pass `thread-id`.");
+      await interaction.editReply("Run this inside a questions/issues/suggestions forum thread or pass `thread-id`.");
       return;
     }
 
@@ -179,13 +179,13 @@ export async function handleCommand(input: {
     const thread = await resolveThread(interaction, client);
     const parent = thread?.parent;
     if (!thread || !parent || parent.type !== ChannelType.GuildForum) {
-      await interaction.editReply("Run this inside an issues/suggestions forum thread or pass `thread-id`.");
+      await interaction.editReply("Run this inside a questions/issues/suggestions forum thread or pass `thread-id`.");
       return;
     }
 
     const kind = githubIssueKindForForum(parent.name);
     if (!kind) {
-      await interaction.editReply("This command only applies to `issues` and `suggestions` forum threads.");
+      await interaction.editReply("This command only applies to `questions`, `issues`, and `suggestions` forum threads.");
       return;
     }
 

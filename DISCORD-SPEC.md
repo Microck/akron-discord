@@ -160,7 +160,7 @@ Use hyphenated names for multi-word channels.
 
 | Channel | Type | Visibility | Purpose |
 | --- | --- | --- | --- |
-| `questions` | Forum | Members | Help and usage questions. |
+| `questions` | Forum | Members | Help and usage questions synced to GitHub issues. |
 | `issues` | Forum | Members | User-authored bug reports synced to GitHub issues. |
 | `suggestions` | Forum | Members | User-authored feature suggestions. |
 
@@ -178,6 +178,9 @@ Suggested `questions` forum tags:
 - `Bug Help`
 - `Answered`
 - `Needs Staff`
+- `Synced`
+- `GitHub Open`
+- `GitHub Closed`
 
 ### Map Catalog
 
@@ -252,7 +255,7 @@ Tags are applied by the bot. Moderated tags should require `Moderator`.
 
 ## GitHub Issue Sync
 
-The `issues` and `suggestions` forums are linked to a configured GitHub repository. Do not infer the repository from any local checkout. The bot must read the target from configuration.
+The `questions`, `issues`, and `suggestions` forums are linked to a configured GitHub repository. Do not infer the repository from any local checkout. The bot must read the target from configuration.
 
 The target repository should be configured explicitly. Do not hard-code or infer it from a local checkout.
 
@@ -292,6 +295,8 @@ Issue forum post requirements:
 - Optional attachments, screenshots, logs, or crash text.
 
 On every synced forum post, the created GitHub issue must link back to the source Discord forum post.
+
+On a valid new `questions` forum post, the bot should create a GitHub issue with labels `discord`, `question`, and `needs-triage`, include the Discord forum post URL in the issue body, store the Discord-to-GitHub mapping in SQLite, reply with a GitHub issue URL embed, and log the sync to `github-sync-log`.
 
 On a valid new `issues` forum post, the bot should:
 
@@ -339,6 +344,7 @@ GitHub labels are managed as a canonical taxonomy. The bot should create missing
 
 Type labels:
 
+- `question`
 - `issue`
 - `suggestion`
 
