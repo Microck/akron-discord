@@ -469,7 +469,9 @@ Pending Scan -> Flagged
 
 The bot should automatically scan new forum posts and debounced edits to the first post. Archived and locked `Flagged` posts must not be rescanned automatically after user edits. A moderator or admin must explicitly unlock/unarchive and run `/rescan`.
 
-After each automatic scan or manual rescan, the bot should reply in the thread with a scan result embed that clearly states whether the post is valid. The reply should include a checklist covering the `.akr` attachment, immutable archived file, map link, map identity, deterministic archive validation, malware/policy result, optional capture, catalog publication when applicable, and whether user or staff action is needed.
+After each automatic scan or manual rescan, the bot should reply in the thread with a scan result embed that clearly states whether the post is valid. The reply should include a checklist covering the `.akr` attachment, immutable archived file, map link, map identity, deterministic archive validation, malware/policy result, optional capture, catalog publication when applicable, and whether user or staff action is needed. Scan embeds use the normal Akron leaf and yellow when valid, the desaturated leaf and gray when something is missing or needs review, and the flagged leaf and red when flagged.
+
+Bot-authored example threads are ignored by automatic scanning, but moderator-run `/rescan` should force them through the scanner so staff can preview the feedback UI.
 
 Manual rescan:
 

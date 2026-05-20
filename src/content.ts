@@ -1,5 +1,6 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from "discord.js";
 import type { AppConfig } from "./config.js";
+import { embedAssets, embedAssetUrl } from "./embed-assets.js";
 
 export const verifyButtonCustomId = "akron:verify";
 const akronYellow = 0xfee75c;
@@ -15,6 +16,7 @@ export function buildRulesEmbed(): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("Rules")
     .setColor(akronYellow)
+    .setThumbnail(embedAssetUrl(embedAssets.akronPillar))
     .setDescription([
       "1. Be respectful. No harassment, hate, or personal attacks.",
       "2. No spam. No flooding, self-promo, or unsolicited DMs.",
@@ -43,6 +45,7 @@ export function buildSubmissionGuideEmbed(config?: AppConfig): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("How to Submit Akron Packs")
     .setColor(akronYellow)
+    .setThumbnail(embedAssetUrl(embedAssets.akronDash))
     .setDescription("Follow these steps before posting. The bot archives the exact scanned `.akr`, checks it, and sends map packs to moderator review before catalog publication.")
     .addFields(
       {

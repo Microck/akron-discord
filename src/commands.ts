@@ -121,7 +121,7 @@ export async function handleCommand(input: {
       return;
     }
 
-    const result = await scanSubmissionThread({ config, db, thread });
+    const result = await scanSubmissionThread({ config, db, thread, forceBotAuthored: true });
     await interaction.editReply(result.scanned ? result.message : `Rescan skipped: ${result.reason}`);
     return;
   }

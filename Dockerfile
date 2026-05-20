@@ -37,6 +37,7 @@ RUN apt-get update \
 COPY --from=build --chown=akron:akron /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=akron:akron /app/node_modules ./node_modules
 COPY --from=build --chown=akron:akron /app/dist ./dist
+COPY --chown=akron:akron assets ./assets
 
 USER akron
 

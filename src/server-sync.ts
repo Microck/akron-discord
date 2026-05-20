@@ -27,6 +27,7 @@ import {
   forumGuidelines
 } from "./content.js";
 import type { AppConfig } from "./config.js";
+import { embedAssets, embedAssetAttachment, type EmbedAssetName } from "./embed-assets.js";
 import { utcNow } from "./time.js";
 
 export type ServerSyncPlan = {
@@ -420,14 +421,14 @@ async function ensureRulesMessage(guild: Guild, db: AkronDatabase): Promise<void
   if (setting) {
     try {
       const message = await rules.messages.fetch(setting.value);
-      await message.edit({ embeds: [buildRulesEmbed()] });
+      await message.edit(embedEditOptions(buildRulesEmbed(), embedAssets.akronPillar));
       return;
     } catch {
       // The stored message was deleted or moved. Recreate it below.
     }
   }
 
-  const message = await rules.send({ embeds: [buildRulesEmbed()] });
+  const message = await rules.send(embedCreateOptions(buildRulesEmbed(), embedAssets.akronPillar));
   await upsertSetting(db, "message.rules.id", message.id);
 }
 
@@ -441,14 +442,14 @@ async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase, con
   if (setting) {
     try {
       const message = await guide.messages.fetch(setting.value);
-      await message.edit({ embeds: [buildSubmissionGuideEmbed(config)] });
+      await message.edit(embedEditOptions(buildSubmissionGuideEmbed(config), embedAssets.akronDash));
       return;
     } catch {
       // The stored message was deleted or moved. Recreate it below.
     }
   }
 
-  const message = await guide.send({ embeds: [buildSubmissionGuideEmbed(config)] });
+  const message = await guide.send(embedCreateOptions(buildSubmissionGuideEmbed(config), embedAssets.akronDash));
   await upsertSetting(db, "message.submission-guide.id", message.id);
 }
 
@@ -482,6 +483,18 @@ async function ensureStoredEmbedMessage(db: AkronDatabase, channel: TextChannel,
 
   const message = await channel.send({ embeds: [embed] });
   await upsertSetting(db, settingKey, message.id);
+}
+
+function embedCreateOptions(embed: ReturnType<typeof buildRulesEmbed>, asset?: EmbedAssetName) {
+  return asset
+    ? { embeds: [embed], files: [embedAssetAttachment(asset)] }
+    : { embeds: [embed] };
+}
+
+function embedEditOptions(embed: ReturnType<typeof buildRulesEmbed>, asset?: EmbedAssetName) {
+  return asset
+    ? { embeds: [embed], files: [embedAssetAttachment(asset)], attachments: [] }
+    : { embeds: [embed] };
 }
 
 async function removeStoredMessage(guild: Guild, db: AkronDatabase, channelName: string, settingKey: string): Promise<void> {

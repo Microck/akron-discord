@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
   ChannelType,
+  AttachmentBuilder,
   EmbedBuilder,
   type AnyThreadChannel,
   type Attachment,
@@ -12,6 +13,7 @@ import {
 import type { S3Client } from "@aws-sdk/client-s3";
 import type { AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
+import { embedAssets, embedAssetAttachment, embedAssetUrl, type EmbedAssetName } from "../embed-assets.js";
 import { scanStates } from "../db/schema.js";
 import { mapCatalogScopes, statusForumTags, submissionChannelScopes } from "../server-spec.js";
 import { logAudit, sendAuditLog } from "../services/audit.js";
@@ -31,6 +33,7 @@ type ScanThreadInput = {
   db: AkronDatabase;
   thread: AnyThreadChannel;
   r2Client?: S3Client;
+  forceBotAuthored?: boolean;
 };
 
 export type ScanSubmissionResult =
@@ -48,7 +51,7 @@ export function isSubmissionForumName(name: string): boolean {
 }
 
 export async function scanSubmissionThread(input: ScanThreadInput): Promise<ScanSubmissionResult> {
-  if (input.thread.ownerId === input.thread.client.user.id) {
+  if (input.thread.ownerId === input.thread.client.user.id && !input.forceBotAuthored) {
     return { scanned: false, reason: "Skipped bot-authored example thread." };
   }
 
@@ -296,7 +299,7 @@ async function finishScan(
     hasCaptureImage: result.hasCaptureImage,
     isMapCatalogSubmission: result.isMapCatalogSubmission
   });
-  await input.thread.send({ embeds: [embed] });
+  await input.thread.send({ embeds: [embed], files: scanEmbedFiles(result.status) });
   await sendLog(input.thread.guild, "scan-log", `${result.status}: ${input.thread.url}`);
   if (result.status === "Published" && result.catalogPublished && result.r2PackKey) {
     await logAudit(input.db, {
@@ -432,11 +435,12 @@ export function buildScanEmbed(
     isMapCatalogSubmission?: boolean;
   }
 ): EmbedBuilder {
-  const color = status === "Published" ? 0x2da44e : status === "Flagged" ? 0xcf222e : 0xbf8700;
+  const color = scanEmbedColor(status);
   const validity = scanValidityLabel(status);
   const embed = new EmbedBuilder()
     .setTitle(`Akron Scan: ${validity}`)
     .setColor(color)
+    .setThumbnail(embedAssetUrl(scanEmbedAsset(status)))
     .addFields({ name: "Scope", value: formatSection(scope), inline: true });
 
   embed.setDescription(buildScanChecklist(status, scope, reasons, archive));
@@ -526,6 +530,30 @@ function scanValidityLabel(status: ScanStatus): string {
 
 function checkbox(complete: boolean): string {
   return complete ? "[x]" : "[ ]";
+}
+
+function scanEmbedColor(status: ScanStatus): number {
+  if (status === "Published") {
+    return 0xfee75c;
+  }
+  if (status === "Flagged") {
+    return 0xcf222e;
+  }
+  return 0x80848e;
+}
+
+function scanEmbedAsset(status: ScanStatus): EmbedAssetName {
+  if (status === "Published") {
+    return embedAssets.akronLeaf;
+  }
+  if (status === "Flagged") {
+    return embedAssets.akronLeafFlagged;
+  }
+  return embedAssets.akronLeafDesaturated;
+}
+
+function scanEmbedFiles(status: ScanStatus): AttachmentBuilder[] {
+  return [embedAssetAttachment(scanEmbedAsset(status))];
 }
 
 async function archiveScannedAkr(

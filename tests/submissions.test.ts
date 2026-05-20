@@ -136,6 +136,8 @@ describe("submission scan classification", () => {
     }).toJSON();
 
     expect(embed.title).toBe("Akron Scan: Valid");
+    expect(embed.color).toBe(0xfee75c);
+    expect(embed.thumbnail?.url).toBe("attachment://akronleaf.png");
     expect(embed.description).toContain("**Result:** Valid");
     expect(embed.description).toContain("[x] One `.akr` attachment found");
     expect(embed.description).toContain("[x] Published to the Akron catalog");
@@ -148,9 +150,21 @@ describe("submission scan classification", () => {
     }).toJSON();
 
     expect(embed.title).toBe("Akron Scan: Needs Fix");
+    expect(embed.color).toBe(0x80848e);
+    expect(embed.thumbnail?.url).toBe("attachment://akronleaf-desaturated.png");
     expect(embed.description).toContain("[ ] One `.akr` attachment found");
     expect(embed.description).toContain("[!] Action needed before this is valid");
     expect(embed.fields?.some(field => field.name === "What needs attention")).toBe(true);
+  });
+
+  it("uses the flagged leaf and red color for flagged scan feedback", () => {
+    const embed = buildScanEmbed("Flagged", "StartPos", ["Archive contains an unsafe path."], {
+      hasAkrAttachment: true,
+      isMapCatalogSubmission: true
+    }).toJSON();
+
+    expect(embed.color).toBe(0xcf222e);
+    expect(embed.thumbnail?.url).toBe("attachment://akronleaf-flagged.png");
   });
 });
 
