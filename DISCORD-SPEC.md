@@ -144,12 +144,14 @@ Use hyphenated names for multi-word channels.
 
 ### Info
 
+`verify` is intentionally top-level and outside all categories so it appears at the very top of the server for unverified users.
+
 | Channel | Type | Visibility | Purpose |
 | --- | --- | --- | --- |
 | `rules` | Text | Everyone can read | Server rules and submission policy. |
 | `verify` | Text | Unverified users can read | Button verification entrypoint. |
 | `announcements` | Text | Members can read | Official Akron announcements. The bot should not seed an embed here. |
-| `links` | Text | Members can read | Official Akron links and resources. |
+| `links` | Text | Members can read | Official Akron links and resources. The bot should not seed an embed here; links are posted manually by staff. |
 | `welcome` | Text | Members can read | Post-verification orientation. |
 | `faq` | Text | Members can read | Common questions and links. |
 | `submission-guide` | Text | Members can read | How to make `.akr` submissions and map captures. |
@@ -166,7 +168,7 @@ Use hyphenated names for multi-word channels.
 
 Do not add extra public channels in v1. The current public/member-facing structure is the initial canonical structure.
 
-`questions`, `issues`, and `suggestions` should use forum post guidelines and tags so users can post naturally while the bot keeps the posts structured. Discord feedback posts are supported for convenience, but the channel copy should say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
+`questions`, `issues`, and `suggestions` should use forum Post Guidelines and tags so users can post naturally while the bot keeps the posts structured. The copy-paste templates belong in Post Guidelines, not in seeded embeds. Discord feedback posts are supported for convenience, but the channel copy should say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
 
 Suggested `questions` forum tags:
 
@@ -197,9 +199,9 @@ Required post data:
 - Optional description.
 - Optional but strongly recommended map capture image.
 
-Each map catalog forum must have post guidelines that link to `submission-guide`.
+Each map catalog forum must have Post Guidelines that link to `submission-guide` and include the copy-paste submission template.
 
-Each public forum should have one bot-authored example post named `Example: ...` showing the shape of a good post. These posts should be plain text with Discord markdown formatting, not embeds, so they read like a user-authored forum post. Submission examples should include a template, then a concrete example using `Glyph` (`https://gamebanana.com/mods/150453`) as the default map, with a realistic sample `.akr` attachment and a sample capture image where that forum benefits from captures. Bot-authored example threads must be ignored by submission scanning and GitHub issue sync.
+Each public forum should have one bot-authored example post named `Example: ...` showing the shape of a good post. These posts should be plain text with Discord markdown formatting, not embeds, so they read like a user-authored forum post. Submission examples should use `Glyph` (`https://gamebanana.com/mods/150453`) as the default map, with a realistic sample `.akr` attachment and a sample capture image where that forum benefits from captures. Bot-authored example threads must be ignored by submission scanning and GitHub issue sync.
 
 ### General Packs
 
@@ -214,7 +216,7 @@ These are Discord-only after scanning. They do not enter the in-game map catalog
 
 `Whole` profile packs are not allowed for public posting in the first version.
 
-Each general pack forum must have post guidelines that link to `submission-guide`.
+Each general pack forum must have Post Guidelines that link to `submission-guide` and include the copy-paste submission template.
 
 Each general pack forum should also have one bot-authored plain-text example post showing the expected title, description, and attachment pattern.
 

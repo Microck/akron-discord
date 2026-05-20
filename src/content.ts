@@ -95,16 +95,6 @@ export function buildFaqEmbed(): EmbedBuilder {
     );
 }
 
-export function buildLinksEmbed(): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle("Links")
-    .setColor(akronYellow)
-    .setDescription("Official Akron links will be posted here.")
-    .addFields(
-      { name: "Website", value: "akron.micr.dev" }
-    );
-}
-
 export type ForumExampleSpec = {
   channelName: string;
   settingKey: string;
@@ -125,28 +115,16 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
     submissionExample("audio-packs", "Audio pack submission", "Audio settings", false),
     submissionExample("recorder-packs", "Recorder pack submission", "Recorder settings", false),
     feedbackExample("questions", "Question", [
-      "**Template**",
-      "`Title:` <short question>",
-      "`Body:` What are you trying to do? What did you try? What version/build are you on?",
-      "",
       "**Example**",
       "`Title:` How do I export only StartPos?",
       "`Body:` I am practicing *Glyph*. I can export a profile, but I only want the StartPos section. Which export option should I use?"
     ]),
     feedbackExample("issues", "Issue report", [
-      "**Template**",
-      "`Title:` <what broke>",
-      "`Body:` What happened? What did you expect? How can staff reproduce it? Include Akron version, logs, screenshots, or crash text when useful.",
-      "",
       "**Example**",
       "`Title:` StartPos export fails on Glyph",
       "`Body:` On Akron 0.0.0, exporting a StartPos pack for *Glyph* creates no file. Expected a `.akr` export. Steps: open Glyph, add one StartPos marker, export StartPos."
     ]),
     feedbackExample("suggestions", "Suggestion", [
-      "**Template**",
-      "`Title:` <what should Akron add or change?>",
-      "`Body:` What problem does this solve? What behavior do you want? Add examples or mockups if useful.",
-      "",
       "**Example**",
       "`Title:` Add a preview before publishing a capture",
       "`Body:` Before uploading a map capture, show a small preview so I can confirm StartPos markers and room context are visible."
@@ -155,32 +133,67 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
 }
 
 export function forumGuidelines(scope: string): string {
+  const needsMap = ["StartPos", "AutoKill", "AutoDeafen"].includes(scope);
   return [
-    `Post one ${scope} pack per forum post.`,
-    "Attach one scoped .akr file.",
-    "For map-specific packs, include a supported map link.",
-    "Add a short description and a map capture when possible.",
-    "Read #submission-guide before posting."
+    `Post one ${scope} pack per forum post. Read #submission-guide before posting.`,
+    "",
+    "Template",
+    "Title: <short pack name>",
+    "Level: <level or map name>",
+    needsMap
+      ? "Map: <supported GameBanana map link or vanilla Celeste chapter name>"
+      : "Map: <optional map link when the pack is map-specific>",
+    "Description: <what the pack contains and when someone should use it>",
+    "Attachments: <one scoped .akr file>, <optional but recommended capture image>",
+    "",
+    "Requirements",
+    "- Attach exactly one scoped .akr file.",
+    needsMap ? "- Include a supported map link or vanilla chapter name." : "- Do not attach whole profile exports yet.",
+    "- Add a short description.",
+    "- Add a room or map capture when it helps show the contents."
   ].join("\n");
 }
 
-export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
+export function feedbackForumGuidelines(kind: "issue" | "suggestion" | "question"): string {
+  if (kind === "question") {
+    return [
+      "Ask one focused Akron question per post.",
+      "",
+      "Template",
+      "Title: <short question>",
+      "Body: What are you trying to do? What did you try? What Akron version/build are you on?",
+      "",
+      "Tips",
+      "- Include screenshots, logs, or pack details when they matter.",
+      "- Use issue reports for bugs and suggestions for product ideas."
+    ].join("\n");
+  }
+
   if (kind === "issue") {
     return [
       "Use one post per bug report.",
-      "Include observed behavior, expected behavior, and version/build context when possible.",
-      "Attach screenshots, logs, or crash text when useful.",
-      "The bot syncs valid reports one-way to GitHub.",
-      "Prefer opening the GitHub issue directly when you are comfortable doing so."
+      "The bot syncs valid reports one-way to GitHub. Prefer opening the GitHub issue directly when you are comfortable doing so.",
+      "",
+      "Template",
+      "Title: <what broke>",
+      "Observed: <what happened>",
+      "Expected: <what should have happened>",
+      "Reproduction: <steps staff can follow>",
+      "Version: <Akron version/build>",
+      "Attachments: <optional screenshots, logs, or crash text>"
     ].join("\n");
   }
 
   return [
     "Use one post per feature suggestion.",
-    "Describe the problem or opportunity and the proposed behavior.",
-    "Attach examples, screenshots, or mockups when useful.",
-    "The bot syncs valid suggestions one-way to GitHub.",
-    "Prefer opening the GitHub issue directly when you are comfortable doing so."
+    "The bot syncs valid suggestions one-way to GitHub. Prefer opening the GitHub issue directly when you are comfortable doing so.",
+    "",
+    "Template",
+    "Title: <what should Akron add or change?>",
+    "Problem: <what pain or opportunity this addresses>",
+    "Proposed behavior: <what you want Akron to do>",
+    "Examples: <optional screenshots, mockups, links, or related tools>",
+    "Priority: <low, medium, or high if you have a clear reason>"
   ].join("\n");
 }
 
@@ -192,13 +205,6 @@ function submissionExample(channelName: string, label: string, packType: string,
     settingKey: `thread.example.${channelName}.id`,
     threadTitle: `Example: ${label}`,
     content: [
-      "**Template**",
-      "`Title:` <short pack name>",
-      "`Level:` <level or map name>",
-      "`Map:` <supported GameBanana map link for modded maps, or vanilla Celeste chapter name>",
-      "`Description:` <what the pack contains and when someone should use it>",
-      "`Attachments:` <one scoped .akr file>" + (includeCapture ? ", <optional capture image>" : ""),
-      "",
       "**Example**",
       `\`Title:\` Glyph ${packType} Pack`,
       "`Level:` *Glyph*",

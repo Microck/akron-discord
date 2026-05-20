@@ -13,7 +13,7 @@ export type RoleKey = (typeof roleSpecs)[number]["key"];
 export type ChannelSpec = {
   name: string;
   type: ChannelType.GuildText | ChannelType.GuildForum;
-  category: "info" | "feedback" | "map-catalog" | "general-packs" | "staff";
+  category?: "info" | "feedback" | "map-catalog" | "general-packs" | "staff";
   visibility: "public" | "member" | "staff" | "admin";
   topic?: string;
   forumTags?: string[];
@@ -46,7 +46,6 @@ export const channelSpecs: ChannelSpec[] = [
   {
     name: "verify",
     type: ChannelType.GuildText,
-    category: "info",
     visibility: "public",
     topic: "Click Verify Me to unlock the Akron Discord."
   },
