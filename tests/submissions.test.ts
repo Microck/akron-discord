@@ -167,13 +167,14 @@ describe("submission scan classification", () => {
     expect(embed.thumbnail?.url).toBe("attachment://akronleaf-flagged.png");
   });
 
-  it("labels NIM attention separately", () => {
-    const embed = buildScanEmbed("Needs Moderator Review", "StartPos", ["NIM review: model could not decide."], {
+  it("keeps AI review issues under the generic attention label", () => {
+    const embed = buildScanEmbed("Needs Moderator Review", "StartPos", ["model could not decide."], {
       hasAkrAttachment: true,
       isMapCatalogSubmission: true
     }).toJSON();
 
-    expect(embed.fields?.some(field => field.name === "NIM review:")).toBe(true);
+    expect(embed.fields?.some(field => field.name === "What needs attention")).toBe(true);
+    expect(JSON.stringify(embed)).not.toContain("NIM review");
   });
 
   it("adds notify only after a repeated failed scan", () => {

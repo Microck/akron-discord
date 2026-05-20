@@ -534,7 +534,7 @@ Every downloaded `.akr` must be archived to R2 before publication or final scan 
 
 NVIDIA NIM is not the malware scanner.
 
-NIM review failures must not hard-flag a post by themselves. If NIM is unavailable, unauthorized, or returns malformed output, the submission moves to `Needs Moderator Review`.
+AI review failures must not hard-flag a post by themselves. If NVIDIA NIM is unavailable, unauthorized, or returns malformed output, the submission moves to `Needs Moderator Review`.
 
 The scan pipeline must run deterministic validation first:
 

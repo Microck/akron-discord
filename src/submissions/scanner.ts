@@ -166,10 +166,10 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
         });
         if (nim.decision === "reject" || nim.severity === "high") {
           status = "Flagged";
-          reasons.push(...nim.reasons.map(reason => "NIM policy rejection: " + reason));
+          reasons.push(...nim.reasons);
         } else if (nim.decision === "needs_review") {
           status = status === "Published" ? "Needs Moderator Review" : status;
-          reasons.push(...nim.reasons.map(reason => "NIM review: " + reason));
+          reasons.push(...nim.reasons);
         }
       }
     } catch (error) {
@@ -555,9 +555,8 @@ export function buildScanEmbed(
   }
 
   if (reasons.length > 0) {
-    const hasNimReason = reasons.some(reason => /^NIM (review|policy rejection):/i.test(reason));
     embed.addFields({
-      name: status === "Published" ? "Notes" : hasNimReason ? "NIM review:" : "What needs attention",
+      name: status === "Published" ? "Notes" : "What needs attention",
       value: reasons.slice(0, 10).map(reason => `- ${reason}`).join("\n").slice(0, 1024)
     });
   }

@@ -63,7 +63,7 @@ export async function reviewWithNim(config: AppConfig, input: {
     return {
       decision: "needs_review",
       severity: "medium",
-      reasons: [`NVIDIA NIM review failed (${formatNimError(error)}); moderator review required.`]
+      reasons: [`AI review failed (${formatNimError(error)}); moderator review required.`]
     };
   }
 }
