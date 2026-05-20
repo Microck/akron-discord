@@ -71,7 +71,7 @@ Expose admin-only commands:
 
 Server sync is intentionally non-destructive. Normal `apply` must not delete channels or replace same-name channels with incompatible types. If destructive reconciliation is needed later, it should be a separate explicit admin command or mode.
 
-Only configured admins can run server sync.
+Only configured admins can run server sync. On first setup only, when `AKRON_ADMIN_ROLE_ID` is blank, Discord users with the built-in Administrator permission may run the initial server sync so the Akron roles can be created.
 
 ## Roles
 

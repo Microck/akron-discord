@@ -97,6 +97,8 @@ Run:
 
 `/sync-server` requires the configured `AKRON_ADMIN_ROLE_ID`. After sync, keep the created `Admin`, `Moderator`, and `Member` role IDs in `.env` so command authorization and verification stay explicit.
 
+On a fresh server where `AKRON_ADMIN_ROLE_ID` is still blank, Discord users with the built-in Administrator permission can run the first `/sync-server mode:apply`. After role IDs are copied into `.env`, the bot uses the configured Akron roles.
+
 ## Submission Flow
 
 Users post directly in forum channels. The bot scans the starter post and applies one status tag:

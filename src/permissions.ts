@@ -1,4 +1,4 @@
-import type { ChatInputCommandInteraction, GuildMember } from "discord.js";
+import { PermissionFlagsBits, type ChatInputCommandInteraction, type GuildMember } from "discord.js";
 import type { AppConfig } from "./config.js";
 
 export function hasConfiguredRole(member: GuildMember, roleId: string): boolean {
@@ -6,6 +6,9 @@ export function hasConfiguredRole(member: GuildMember, roleId: string): boolean 
 }
 
 export function isAdmin(member: GuildMember, config: AppConfig): boolean {
+  if (!config.akronAdminRoleId && member.permissions.has(PermissionFlagsBits.Administrator)) {
+    return true;
+  }
   return hasConfiguredRole(member, config.akronAdminRoleId);
 }
 
