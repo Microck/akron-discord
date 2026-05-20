@@ -161,7 +161,7 @@ Suggested `questions` forum tags:
 | `issues` | Forum | Members | User-authored bug reports synced to GitHub issues. |
 | `suggestions` | Forum | Members | User-authored feature suggestions. |
 
-`issues` and `suggestions` should use forum post guidelines and tags so users can post naturally while the bot keeps the posts structured.
+`issues` and `suggestions` should use forum post guidelines and tags so users can post naturally while the bot keeps the posts structured. Discord feedback posts are supported for convenience, but the channel copy should say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
 
 ### Map Catalog
 

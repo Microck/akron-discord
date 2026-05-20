@@ -30,6 +30,10 @@ export function buildRulesEmbed(): EmbedBuilder {
       {
         name: "Moderation",
         value: "`Needs Fix` means edit the post and rescan. `Needs Moderator Review` means staff must resolve it. `Flagged` posts are locked for safety."
+      },
+      {
+        name: "Feedback",
+        value: "Issues and suggestions can be posted in Discord, but GitHub is preferred when you are comfortable opening them there directly."
       }
     );
 }
@@ -98,7 +102,8 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
       "Use one post per bug report.",
       "Include observed behavior, expected behavior, and version/build context when possible.",
       "Attach screenshots, logs, or crash text when useful.",
-      "The bot syncs valid reports one-way to GitHub."
+      "The bot syncs valid reports one-way to GitHub.",
+      "Prefer opening the GitHub issue directly when you are comfortable doing so."
     ].join("\n");
   }
 
@@ -106,6 +111,7 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
     "Use one post per feature suggestion.",
     "Describe the problem or opportunity and the proposed behavior.",
     "Attach examples, screenshots, or mockups when useful.",
-    "The bot syncs valid suggestions one-way to GitHub."
+    "The bot syncs valid suggestions one-way to GitHub.",
+    "Prefer opening the GitHub issue directly when you are comfortable doing so."
   ].join("\n");
 }
