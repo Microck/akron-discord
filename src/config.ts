@@ -22,7 +22,7 @@ const configSchema = z.object({
   githubAppPrivateKey: optionalId,
   githubAppInstallationId: optionalId,
   githubOwner: optionalId,
-  githubRepo: z.string().trim().default("akron-tracker"),
+  githubRepo: optionalId,
   databasePath: z.string().trim().default("data/akron-discord.sqlite")
 });
 

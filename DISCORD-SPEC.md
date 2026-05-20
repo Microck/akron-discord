@@ -499,6 +499,8 @@ Only `Moderator` or `Admin` can restore, override, or rescan a flagged post.
 
 NVIDIA NIM is not the malware scanner.
 
+NIM review failures must not hard-flag a post by themselves. If NIM is unavailable, unauthorized, or returns malformed output, the submission moves to `Needs Moderator Review`.
+
 The scan pipeline must run deterministic validation first:
 
 1. Download the Discord attachment.
@@ -640,6 +642,14 @@ GITHUB_APP_INSTALLATION_ID=
 GITHUB_OWNER=
 GITHUB_REPO=
 ```
+
+Recommended NIM model:
+
+```text
+nvidia/llama-3.3-nemotron-super-49b-v1.5
+```
+
+The GitHub repository name must be configured explicitly for the deployment. The public config contract must not default to an operator-owned repository.
 
 ## Open Decisions
 

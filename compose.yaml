@@ -1,0 +1,9 @@
+services:
+  akron-discord:
+    build: .
+    image: akron-discord:local
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

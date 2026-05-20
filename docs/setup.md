@@ -31,8 +31,16 @@ GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=
 GITHUB_APP_INSTALLATION_ID=
 GITHUB_OWNER=
-GITHUB_REPO=akron-tracker
+GITHUB_REPO=
 ```
+
+Recommended NIM model:
+
+```text
+nvidia/llama-3.3-nemotron-super-49b-v1.5
+```
+
+This model is the current best fit for Akron's advisory review because it has a large context window and strong instruction-following behavior for structured JSON output. The deterministic `.akr` scanner remains the malware scanner; NIM only adds policy and content review. If the NIM API returns an auth or service error, the bot sends the submission to moderator review instead of publishing or flagging it.
 
 Register slash commands for the configured guild:
 
@@ -52,6 +60,20 @@ Run production build:
 npm run build
 npm start
 ```
+
+Run with Docker:
+
+```sh
+docker compose up -d --build
+```
+
+The container stores SQLite data in `./data` through the compose volume. It includes ImageMagick, FFmpeg, jpegtran, gifsicle, and svgo for `optimo`.
+
+## Cloudflare R2
+
+Create one private bucket for catalog archives and optimized map captures. Enable public `r2.dev` access or attach a public custom domain, then set `CLOUDFLARE_R2_PUBLIC_BASE_URL` to that origin.
+
+The bot uploads through the S3-compatible R2 API, so it also needs an R2 API token with Object Read & Write access scoped to that bucket. Copy the token's Access Key ID and Secret Access Key into the local deployment `.env`. Cloudflare only shows the secret once.
 
 ## Discord App Requirements
 

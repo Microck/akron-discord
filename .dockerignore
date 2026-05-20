@@ -1,0 +1,13 @@
+.git/
+.residue/
+node_modules/
+dist/
+data/
+tmp/
+coverage/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+Dockerfile
+compose.yaml
