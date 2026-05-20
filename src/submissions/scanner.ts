@@ -179,13 +179,13 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
   }
 
   if (isMapCatalogScope(scope) && parsed.mapUrl && isSupportedMapUrl(parsed.mapUrl) && status !== "Flagged") {
-    const mapping = await resolveMapSid(input.db, parsed.mapUrl);
-    if (!mapping) {
+    const mapIdentity = resolveCatalogMapIdentity(await resolveMapSid(input.db, parsed.mapUrl), archiveMapSid, parsed.mapUrl);
+    if (!mapIdentity.mapSid) {
       status = status === "Published" ? "Needs Moderator Review" : status;
-      reasons.push("Map link is valid, but no map SID mapping exists yet. A moderator must add it.");
-    } else if (archiveMapSid && mapping.mapSid !== archiveMapSid) {
+      reasons.push("Map link is valid, but the .akr did not include a map SID. A moderator must add a mapping.");
+    } else if (mapIdentity.conflict) {
       status = "Flagged";
-      reasons.push(`Archive map SID ${archiveMapSid} does not match mapped SID ${mapping.mapSid}.`);
+      reasons.push(`Archive map SID ${archiveMapSid} does not match mapped SID ${mapIdentity.mappingSid}.`);
     } else if (akrBytes && status === "Published") {
       try {
         const optimizedImage = attachmentPlan.image
@@ -200,14 +200,14 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
           title: input.thread.name,
           description: parsed.description,
           section: scope,
-          mapSid: mapping.mapSid,
-          mapUrl: mapping.mapUrl,
+          mapSid: mapIdentity.mapSid,
+          mapUrl: mapIdentity.mapUrl,
           authorName: starter.member?.displayName ?? starter.author.username,
           authorAvatarUrl: starter.author.displayAvatarURL(),
           akrBytes,
           image: optimizedImage
         });
-        archiveMapSid = mapping.mapSid;
+        archiveMapSid = mapIdentity.mapSid;
         r2PackKey = result.packKey;
         r2ImageKey = result.imageKey;
         catalogPublished = true;
@@ -717,6 +717,25 @@ export function hasFlaggableArchiveReason(reasons: string[]): boolean {
   return reasons.some(reason =>
     /unsafe path|unexpected file|too many files|nested archives|compression ratio|payload is too large|not valid JSON|manifest\.kind|missing manifest|missing profile|scope mismatch|whole profile|suspicious text|large text value/i.test(reason)
   );
+}
+
+export function resolveCatalogMapIdentity(
+  mapping: { mapUrl: string; mapSid: string } | null,
+  archiveMapSid: string,
+  submittedMapUrl: string
+): {
+  mapSid: string;
+  mapUrl: string;
+  conflict: boolean;
+  mappingSid?: string;
+} {
+  const mapSid = mapping?.mapSid ?? archiveMapSid;
+  return {
+    mapSid,
+    mapUrl: mapping?.mapUrl ?? submittedMapUrl,
+    conflict: Boolean(mapping && archiveMapSid && mapping.mapSid !== archiveMapSid),
+    mappingSid: mapping?.mapSid
+  };
 }
 
 function isMapCatalogScope(scope: AkronProfileSection): boolean {

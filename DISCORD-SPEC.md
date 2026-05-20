@@ -581,13 +581,17 @@ Prompt-injection protection:
 
 Map-specific catalog submissions require strict map identity validation.
 
-The post must include a supported map link. The bot resolves that link to a Celeste `mapSid`. The `.akr` manifest/profile target must match that map SID.
+The post must include a supported map link. The bot reads the Celeste `mapSid` from the uploaded `.akr` manifest/profile target and uses that as the catalog identity.
 
 If the map link uses an unsupported domain or is malformed, the post is `Needs Fix`.
 
-If the map link is valid but missing from the resolver table, the post is `Needs Moderator Review`. This is a catalog-maintenance task because most users will not know the exact Celeste map SID.
+If the `.akr` contains a map SID, no hardcoded map list is required. This lets new catalog maps publish without maintaining a complete GameBanana-to-SID table.
 
-The first implementation can use a committed or R2-backed resolver table:
+If the map link is valid but the `.akr` does not include a map SID, the post is `Needs Moderator Review`. A moderator can add a manual mapping and rescan the post.
+
+If a manual mapping exists and conflicts with the `.akr` map SID, the post is `Flagged`. Manual mappings are overrides and validation guards, not the default catalog source.
+
+The resolver table remains available for rare missing-SID packs:
 
 ```json
 {

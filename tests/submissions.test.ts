@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
+import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasFlaggableArchiveReason, resolveCatalogMapIdentity } from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 
 describe("submission post parsing", () => {
@@ -121,6 +121,28 @@ describe("submission scan classification", () => {
     expect(buildScannedArchiveKey("StartPos Packs!", "123", "a".repeat(64))).toBe(
       `submissions/startpos-packs/123/${"a".repeat(64)}.akr`
     );
+  });
+
+  it("uses the archive map SID when no manual map override exists", () => {
+    expect(resolveCatalogMapIdentity(null, "Glyph/Glyph", "https://gamebanana.com/mods/150453")).toEqual({
+      mapSid: "Glyph/Glyph",
+      mapUrl: "https://gamebanana.com/mods/150453",
+      conflict: false,
+      mappingSid: undefined
+    });
+  });
+
+  it("flags manual map overrides that conflict with the archive map SID", () => {
+    expect(resolveCatalogMapIdentity(
+      { mapUrl: "https://gamebanana.com/mods/150453", mapSid: "Other/Map" },
+      "Glyph/Glyph",
+      "https://gamebanana.com/mods/150453"
+    )).toEqual({
+      mapSid: "Other/Map",
+      mapUrl: "https://gamebanana.com/mods/150453",
+      conflict: true,
+      mappingSid: "Other/Map"
+    });
   });
 
   it("formats scan feedback as a validity checklist", () => {
