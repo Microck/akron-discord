@@ -152,10 +152,10 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
         reasons.push("Whole profile packs are not accepted publicly yet.");
       }
 
-      if (hasFlaggableArchiveReason(archive.reasons)) {
+      if (hasMalwareArchiveReason(archive.reasons)) {
         status = "Flagged";
       } else if (!archive.ok || (archive.section && archive.section !== scope)) {
-        status = status === "Published" ? "Needs Fix" : status;
+        status = status === "Published" ? "Needs Moderator Review" : status;
       }
 
       if (status !== "Flagged") {
@@ -165,7 +165,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
           archiveFacts: archive.normalizedFacts
         });
         if (nim.decision === "reject" || nim.severity === "high") {
-          status = "Flagged";
+          status = status === "Published" ? "Needs Moderator Review" : status;
           reasons.push(...nim.reasons);
         } else if (nim.decision === "needs_review") {
           status = status === "Published" ? "Needs Moderator Review" : status;
@@ -173,7 +173,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
         }
       }
     } catch (error) {
-      status = "Flagged";
+      status = status === "Published" ? "Needs Moderator Review" : status;
       reasons.push(error instanceof Error ? error.message : "Failed to scan .akr archive.");
     }
   }
@@ -184,7 +184,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
       status = status === "Published" ? "Needs Moderator Review" : status;
       reasons.push("Map link is valid, but the .akr did not include a map SID. A moderator must add a mapping.");
     } else if (mapIdentity.conflict) {
-      status = "Flagged";
+      status = status === "Published" ? "Needs Moderator Review" : status;
       reasons.push(`Archive map SID ${archiveMapSid} does not match mapped SID ${mapIdentity.mappingSid}.`);
     } else if (akrBytes && status === "Published") {
       try {
@@ -594,7 +594,7 @@ function buildScanChecklist(
       ? `${checkbox(Boolean(archive.mapSid))} Map identity resolved`
       : "[-] Map identity not required for this forum",
     `${checkbox(reasons.length === 0 || ok)} Deterministic archive validation passed`,
-    `${checkbox(status !== "Flagged")} Malware and policy checks did not flag the post`,
+    `${checkbox(status !== "Flagged")} Malware check did not flag the post`,
     archive.hasCaptureImage ? "[x] Optional capture image attached" : "[-] Optional capture image not attached",
     mapRequired
       ? `${checkbox(Boolean(archive.catalogPublished))} Published to the Akron catalog`
@@ -713,9 +713,9 @@ export function buildScannedArchiveKey(parentName: string, threadId: string, sha
   return `submissions/${safeParent}/${threadId}/${sha256}.akr`;
 }
 
-export function hasFlaggableArchiveReason(reasons: string[]): boolean {
+export function hasMalwareArchiveReason(reasons: string[]): boolean {
   return reasons.some(reason =>
-    /unsafe path|unexpected file|too many files|nested archives|compression ratio|payload is too large|not valid JSON|manifest\.kind|missing manifest|missing profile|scope mismatch|whole profile|suspicious text|large text value/i.test(reason)
+    /suspicious text/i.test(reason)
   );
 }
 

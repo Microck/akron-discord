@@ -470,7 +470,7 @@ Pending Scan -> Flagged
 
 The bot should automatically scan new forum posts and debounced edits to the first post. Archived and locked `Flagged` posts must not be rescanned automatically after user edits. A moderator or admin must explicitly unlock/unarchive and run `/rescan`.
 
-After each automatic scan or manual rescan, the bot should reply in the thread with a scan result embed that clearly states whether the post is valid. The reply should include a checklist covering the `.akr` attachment, immutable archived file, map link, map identity, deterministic archive validation, malware/policy result, optional capture, catalog publication when applicable, and whether user or staff action is needed. Scan embeds use the normal Akron leaf and yellow when valid, the desaturated leaf and gray when something is missing or needs review, and the flagged leaf and red when flagged.
+After each automatic scan or manual rescan, the bot should reply in the thread with a scan result embed that clearly states whether the post is valid. The reply should include a checklist covering the `.akr` attachment, immutable archived file, map link, map identity, deterministic archive validation, malware result, optional capture, catalog publication when applicable, and whether user or staff action is needed. Scan embeds use the normal Akron leaf and yellow when valid, the desaturated leaf and gray when something is missing or needs review, and the flagged leaf and red when flagged.
 
 Failed scan embeds should include `Fixed` and `Cancel` buttons. `Fixed` reruns the scan. `Cancel` must warn the user first, then delete the entire forum post only after explicit confirmation. If a second scan also fails, the embed should add a gray `Notify` button that alerts staff that the user needs help.
 
@@ -507,28 +507,17 @@ The bot replies with a clear embed that lists the exact problems and how to fix 
 
 ## Flagged
 
-Use `Flagged` when the post should not stay publicly accessible without staff action.
+Use `Flagged` only when the bot sees malware-like content in the uploaded `.akr`.
 
 Flagged cases include:
 
-- Zip path traversal.
-- Absolute paths in archive entries.
-- Nested archives if the implementation disallows them.
-- Zip bomb or extreme compression ratio.
-- Too many files or oversized payloads.
-- Missing `manifest.json` or `profile.json`.
-- Extra unexpected files.
-- Manifest/profile scope mismatch.
-- Map SID mismatch for a map-specific forum.
-- `Whole` profile pack.
 - Suspicious file paths, process names, shell commands, URLs, tokens, or credentials in config content.
-- Huge or malformed values likely intended to crash parsing or rendering.
-- Offensive, hateful, doxxing, scam, spam, impersonation, or social-engineering content.
-- High-severity NVIDIA NIM policy result.
 
 Flagged posts should be tagged `Flagged`, logged to `mod-log` and `scan-log`, then locked and archived. The bot should preserve the thread as moderation evidence instead of deleting it.
 
 Only `Moderator` or `Admin` can restore, override, or rescan a flagged post.
+
+Non-malware problems must not use `Flagged`. Archive structure problems, malformed JSON, unsupported or conflicting map identity, wrong forum scope, `Whole` packs, offensive text, spam, NIM `reject`, and NIM high-severity policy results should move to `Needs Moderator Review` unless they are simple user-fixable input omissions already covered by `Needs Fix`.
 
 Every downloaded `.akr` must be archived to R2 before publication or final scan feedback. Non-flagged scan embeds should use masked Markdown links to the exact archived `.akr` bytes and include the SHA-256 hash. Flagged files should be backed up for staff review and logged to staff channels, but the user-visible flagged embed should not expose a public download link.
 
@@ -589,7 +578,7 @@ If the `.akr` contains a map SID, no hardcoded map list is required. This lets n
 
 If the map link is valid but the `.akr` does not include a map SID, the post is `Needs Moderator Review`. A moderator can add a manual mapping and rescan the post.
 
-If a manual mapping exists and conflicts with the `.akr` map SID, the post is `Flagged`. Manual mappings are overrides and validation guards, not the default catalog source.
+If a manual mapping exists and conflicts with the `.akr` map SID, the post is `Needs Moderator Review`. Manual mappings are overrides and validation guards, not the default catalog source.
 
 The resolver table remains available for rare missing-SID packs:
 

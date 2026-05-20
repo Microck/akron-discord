@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasFlaggableArchiveReason, resolveCatalogMapIdentity } from "../src/submissions/scanner.js";
+import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasMalwareArchiveReason, resolveCatalogMapIdentity } from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 
 describe("submission post parsing", () => {
@@ -110,10 +110,13 @@ describe("map URL normalization", () => {
 });
 
 describe("submission scan classification", () => {
-  it("treats archive hardening failures as flagged reasons", () => {
-    expect(hasFlaggableArchiveReason([
+  it("only treats malware-like archive findings as flagged reasons", () => {
+    expect(hasMalwareArchiveReason([
       "Archive contains too many files.",
       "Archive JSON payload is too large: profile.json"
+    ])).toBe(false);
+    expect(hasMalwareArchiveReason([
+      "Config contains suspicious text: powershell -enc bad"
     ])).toBe(true);
   });
 
@@ -132,7 +135,7 @@ describe("submission scan classification", () => {
     });
   });
 
-  it("flags manual map overrides that conflict with the archive map SID", () => {
+  it("detects manual map overrides that conflict with the archive map SID", () => {
     expect(resolveCatalogMapIdentity(
       { mapUrl: "https://gamebanana.com/mods/150453", mapSid: "Other/Map" },
       "Glyph/Glyph",
