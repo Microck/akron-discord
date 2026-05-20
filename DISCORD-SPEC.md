@@ -202,6 +202,8 @@ Each map catalog forum must have Post Guidelines that link to `submission-guide`
 
 Each public forum should have one bot-authored example post named `Example: ...` showing the shape of a good post. These posts should be plain text with Discord markdown formatting, not embeds, so they read like a user-authored forum post. Submission examples should use `Glyph` (`https://gamebanana.com/mods/150453`) as the default map, with a realistic sample `.akr` attachment and a sample capture image where that forum benefits from captures. Bot-authored example threads must be ignored by submission scanning and GitHub issue sync.
 
+Bot-authored example posts should be pinned and locked so users can read the template but cannot reply in the example thread.
+
 ### General Packs
 
 These are Discord-only after scanning. They do not enter the in-game map catalog.

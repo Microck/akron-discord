@@ -728,6 +728,10 @@ async function buildPlaceholderCaptureBytes(): Promise<Buffer> {
 }
 
 async function cleanExampleThread(thread: PublicThreadChannel): Promise<void> {
+  if (thread.archived) {
+    await thread.setArchived(false, "Akron server sync");
+  }
+
   const starter = await thread.fetchStarterMessage();
   if (starter) {
     await starter.suppressEmbeds(true);
@@ -745,6 +749,14 @@ async function cleanExampleThread(thread: PublicThreadChannel): Promise<void> {
     if (isBotCleanupMessage) {
       await message.delete();
     }
+  }
+
+  const maybePinned = thread as PublicThreadChannel & { pinned?: boolean };
+  if (maybePinned.pinned !== true) {
+    await thread.pin("Akron server sync");
+  }
+  if (!thread.locked) {
+    await thread.setLocked(true, "Akron server sync");
   }
 }
 
