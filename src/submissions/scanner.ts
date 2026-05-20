@@ -201,9 +201,6 @@ async function finishScan(
   }
 ): Promise<void> {
   await applyStatusTag(input.thread, parent, result.status, result.scope);
-  if (result.status === "Flagged") {
-    await input.thread.setLocked(true, "Akron scan flagged this post.");
-  }
 
   await input.db
     .insert(scanStates)
@@ -263,6 +260,8 @@ async function finishScan(
       details: { threadUrl: input.thread.url, reasons: result.reasons }
     });
     await sendLog(input.thread.guild, "mod-log", `Flagged submission ${input.thread.url}\n${result.reasons.join("\n")}`);
+    await input.thread.setLocked(true, "Akron scan flagged this post.");
+    await input.thread.setArchived(true, "Akron scan flagged this post.");
   }
 }
 

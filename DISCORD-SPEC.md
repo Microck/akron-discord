@@ -493,7 +493,7 @@ Flagged cases include:
 - Offensive, hateful, doxxing, scam, spam, impersonation, or social-engineering content.
 - High-severity NVIDIA NIM policy result.
 
-Flagged posts should be hidden or locked immediately. The bot logs the reason to `mod-log` and `scan-log`.
+Flagged posts should be tagged `Flagged`, logged to `mod-log` and `scan-log`, then locked and archived. The bot should preserve the thread as moderation evidence instead of deleting it.
 
 Only `Moderator` or `Admin` can restore, override, or rescan a flagged post.
 

@@ -29,7 +29,7 @@ export function buildRulesEmbed(): EmbedBuilder {
       },
       {
         name: "Moderation",
-        value: "`Needs Fix` means edit the post and rescan. `Needs Moderator Review` means staff must resolve it. `Flagged` posts are locked for safety."
+        value: "`Needs Fix` means edit the post and rescan. `Needs Moderator Review` means staff must resolve it. `Flagged` posts are locked and archived for safety."
       },
       {
         name: "Feedback",
@@ -81,7 +81,7 @@ export function buildSubmissionGuideEmbed(): EmbedBuilder {
       },
       {
         name: "Bot feedback",
-        value: "`Needs Fix` means you can edit the post. `Needs Moderator Review` means staff must resolve something. `Flagged` means the post was locked or hidden for safety."
+        value: "`Needs Fix` means you can edit the post. `Needs Moderator Review` means staff must resolve something. `Flagged` means the post was locked and archived for safety."
       }
     );
 }
