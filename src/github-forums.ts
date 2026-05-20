@@ -27,6 +27,10 @@ export async function syncGithubForumThread(input: {
   db: AkronDatabase;
   thread: AnyThreadChannel;
 }): Promise<void> {
+  if (input.thread.ownerId === input.thread.client.user.id) {
+    return;
+  }
+
   const parent = input.thread.parent;
   if (!parent || parent.type !== ChannelType.GuildForum) {
     return;

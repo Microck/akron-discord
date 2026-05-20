@@ -1,9 +1,11 @@
 import { eq } from "drizzle-orm";
 import {
   ChannelType,
+  type ForumChannel,
   type Guild,
   type GuildBasedChannel,
   type GuildForumTagData,
+  type PublicThreadChannel,
   type OverwriteResolvable,
   OverwriteType,
   PermissionsBitField,
@@ -13,8 +15,9 @@ import { botSettings } from "./db/schema.js";
 import type { AkronDatabase } from "./db/database.js";
 import { categorySpecs, channelSpecs, roleSpecs, submissionChannelScopes, type ChannelSpec } from "./server-spec.js";
 import {
-  buildAnnouncementsEmbed,
   buildFaqEmbed,
+  buildForumExampleSpecs,
+  buildLinksEmbed,
   buildRulesEmbed,
   buildSubmissionGuideEmbed,
   buildVerifyComponents,
@@ -114,6 +117,7 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
   for (const [key, id] of roles) {
     await upsertSetting(db, `role.${key}.id`, id);
   }
+  await assignBotRole(guild, roles, changes);
 
   const categories = new Map<string, string>();
   for (const category of categorySpecs) {
@@ -170,8 +174,10 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
   await runContentSync(changes, "rules", () => ensureRulesMessage(guild, db));
   await runContentSync(changes, "welcome", () => ensureWelcomeMessage(guild, db));
   await runContentSync(changes, "faq", () => ensureFaqMessage(guild, db));
-  await runContentSync(changes, "announcements", () => ensureAnnouncementsMessage(guild, db));
+  await runContentSync(changes, "links", () => ensureLinksMessage(guild, db));
+  await runContentSync(changes, "announcements", () => removeStoredMessage(guild, db, "announcements", "message.announcements.id"));
   await runContentSync(changes, "submission-guide", () => ensureSubmissionGuideMessage(guild, db));
+  await runContentSync(changes, "forum examples", () => ensureForumExampleThreads(guild, db));
 
   if (changes.length === 0) {
     changes.push("no structural changes needed");
@@ -445,12 +451,12 @@ async function ensureFaqMessage(guild: Guild, db: AkronDatabase): Promise<void> 
   await ensureStoredEmbedMessage(db, channel, "message.faq.id", buildFaqEmbed());
 }
 
-async function ensureAnnouncementsMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const channel = findAccessibleTextChannel(guild, "announcements");
+async function ensureLinksMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+  const channel = findAccessibleTextChannel(guild, "links");
   if (!channel) {
     return;
   }
-  await ensureStoredEmbedMessage(db, channel, "message.announcements.id", buildAnnouncementsEmbed());
+  await ensureStoredEmbedMessage(db, channel, "message.links.id", buildLinksEmbed());
 }
 
 async function ensureStoredEmbedMessage(db: AkronDatabase, channel: TextChannel, settingKey: string, embed: ReturnType<typeof buildRulesEmbed>): Promise<void> {
@@ -467,6 +473,83 @@ async function ensureStoredEmbedMessage(db: AkronDatabase, channel: TextChannel,
 
   const message = await channel.send({ embeds: [embed] });
   await upsertSetting(db, settingKey, message.id);
+}
+
+async function removeStoredMessage(guild: Guild, db: AkronDatabase, channelName: string, settingKey: string): Promise<void> {
+  const setting = await db.query.botSettings.findFirst({ where: eq(botSettings.key, settingKey) });
+  if (!setting) {
+    return;
+  }
+
+  const channel = findAccessibleTextChannel(guild, channelName);
+  if (channel) {
+    try {
+      const message = await channel.messages.fetch(setting.value);
+      await message.delete();
+    } catch {
+      // The message may already be gone, or it may be in an inaccessible stale channel.
+    }
+  }
+
+  await db.delete(botSettings).where(eq(botSettings.key, settingKey));
+}
+
+async function ensureForumExampleThreads(guild: Guild, db: AkronDatabase): Promise<void> {
+  for (const spec of buildForumExampleSpecs()) {
+    const forum = findAccessibleForumChannel(guild, spec.channelName);
+    if (!forum) {
+      continue;
+    }
+
+    const message = {
+      embeds: [spec.embed]
+    };
+    const setting = await db.query.botSettings.findFirst({ where: eq(botSettings.key, spec.settingKey) });
+    if (setting) {
+      const existing = await fetchStoredExampleThread(guild, forum.id, setting.value);
+      if (existing) {
+        await existing.setName(spec.threadTitle, "Akron server sync");
+        const starter = await existing.fetchStarterMessage();
+        if (starter) {
+          await starter.edit(message);
+        }
+        await cleanExampleThread(existing);
+        continue;
+      }
+    }
+
+    const thread = await forum.threads.create({
+      name: spec.threadTitle,
+      message,
+      reason: "Akron server sync"
+    });
+    await cleanExampleThread(thread);
+    await upsertSetting(db, spec.settingKey, thread.id);
+  }
+}
+
+async function cleanExampleThread(thread: PublicThreadChannel): Promise<void> {
+  if (typeof thread.setAppliedTags === "function" && thread.appliedTags.length > 0) {
+    await thread.setAppliedTags([], "Akron server sync");
+  }
+
+  const messages = await thread.messages.fetch({ limit: 20 });
+  for (const message of messages.values()) {
+    const isBotCleanupMessage = message.author.id === thread.client.user.id &&
+      message.id !== thread.id &&
+      message.embeds.some(embed => embed.title?.startsWith("Akron Scan") || embed.title === "GitHub Sync");
+    if (isBotCleanupMessage) {
+      await message.delete();
+    }
+  }
+}
+
+async function fetchStoredExampleThread(guild: Guild, parentId: string, threadId: string): Promise<PublicThreadChannel | undefined> {
+  const channel = await guild.client.channels.fetch(threadId).catch(() => null);
+  if (!channel?.isThread() || channel.parentId !== parentId || channel.type !== ChannelType.PublicThread) {
+    return undefined;
+  }
+  return channel;
 }
 
 async function upsertSetting(db: AkronDatabase, key: string, value: string): Promise<void> {
@@ -502,8 +585,35 @@ function findAccessibleTextChannel(guild: Guild, name: string): TextChannel | un
   ) as TextChannel | undefined;
 }
 
+function findAccessibleForumChannel(guild: Guild, name: string): ForumChannel | undefined {
+  return guild.channels.cache.find(channel =>
+    channel.name === name &&
+    channel.type === ChannelType.GuildForum &&
+    isChannelAccessible(channel)
+  ) as ForumChannel | undefined;
+}
+
 function isChannelAccessible(channel: GuildBasedChannel): boolean {
   return !("viewable" in channel) || channel.viewable;
+}
+
+async function assignBotRole(guild: Guild, roles: Map<string, string>, changes: string[]): Promise<void> {
+  const botRoleId = roles.get("bot");
+  if (!botRoleId) {
+    return;
+  }
+
+  const member = await guild.members.fetchMe();
+  if (member.roles.cache.has(botRoleId)) {
+    return;
+  }
+
+  try {
+    await member.roles.add(botRoleId, "Akron server sync");
+    changes.push("assigned Bot role to Akron bot");
+  } catch (error) {
+    changes.push(`skipped Bot role assignment: ${formatDiscordSyncError(error)}`);
+  }
 }
 
 async function configureBotRoleColor(guild: Guild, changes: string[]): Promise<void> {

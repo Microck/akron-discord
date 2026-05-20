@@ -44,6 +44,10 @@ export function isSubmissionForumName(name: string): boolean {
 }
 
 export async function scanSubmissionThread(input: ScanThreadInput): Promise<void> {
+  if (input.thread.ownerId === input.thread.client.user.id) {
+    return;
+  }
+
   const parent = input.thread.parent;
   if (!parent || parent.type !== ChannelType.GuildForum || !isSubmissionForumName(parent.name)) {
     return;

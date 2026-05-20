@@ -83,8 +83,9 @@ The bot creates or maintains these roles:
 | `Moderator` | Purple | Can review flagged posts and run manual rescans. |
 | `Member` | Green | Granted after verification. Unlocks normal community channels. |
 | `Tester` | Light blue | Optional tester marker for early users. |
+| `Bot` | Yellow | Visible marker for Akron bot accounts. |
 
-The bot's managed role should be yellow when Discord allows the bot to edit it.
+The bot should also try to color its managed integration role yellow when Discord allows the bot to edit it. If Discord blocks editing the managed role, the normal visible `Bot` role is still created and assigned.
 
 The implementation should keep role IDs in config after first sync:
 
@@ -120,6 +121,7 @@ Examples:
 - `verify`, not `verify-me`.
 - `rules`.
 - `announcements`.
+- `links`.
 - `general`.
 - `staff-chat`.
 - `mod-log`.
@@ -135,7 +137,8 @@ Use hyphenated names for multi-word channels.
 | --- | --- | --- | --- |
 | `rules` | Text | Everyone can read | Server rules and submission policy. |
 | `verify` | Text | Unverified users can read | Button verification entrypoint. |
-| `announcements` | Text | Members can read | Official Akron announcements. |
+| `announcements` | Text | Members can read | Official Akron announcements. The bot should not seed an embed here. |
+| `links` | Text | Members can read | Official Akron links and resources. |
 | `welcome` | Text | Members can read | Post-verification orientation. |
 | `faq` | Text | Members can read | Common questions and links. |
 | `submission-guide` | Text | Members can read | How to make `.akr` submissions and map captures. |
@@ -185,6 +188,8 @@ Required post data:
 
 Each map catalog forum must have post guidelines that link to `submission-guide`.
 
+Each public forum should have one bot-authored example post named `Example: ...` showing the shape of a good post. Bot-authored example threads must be ignored by submission scanning and GitHub issue sync.
+
 ### General Packs
 
 These are Discord-only after scanning. They do not enter the in-game map catalog.
@@ -199,6 +204,8 @@ These are Discord-only after scanning. They do not enter the in-game map catalog
 `Whole` profile packs are not allowed for public posting in the first version.
 
 Each general pack forum must have post guidelines that link to `submission-guide`.
+
+Each general pack forum should also have one bot-authored example post showing the expected title, description, and attachment pattern.
 
 ### Staff
 
@@ -400,10 +407,7 @@ The guide should cover:
 - Which `.akr` scopes are allowed in the in-game catalog.
 - Which `.akr` scopes are Discord-only.
 - Why `Whole` profile packs are not allowed yet.
-- How to export a scoped `.akr` pack from Akron.
-- How to include a supported map link.
-- How to include a short useful description.
-- How to attach a map capture image.
+- Step-by-step posting instructions: choose the forum, export one scoped `.akr`, add the map link, write the description, add the capture, attach the file, and wait for bot feedback.
 - That map capture images are optional but heavily recommended because Akron can already generate them easily.
 - How to read bot feedback when a post is `Needs Fix` or `Flagged`.
 

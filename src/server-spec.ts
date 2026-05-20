@@ -4,7 +4,8 @@ export const roleSpecs = [
   { key: "admin", name: "Admin", color: 0xed4245 },
   { key: "moderator", name: "Moderator", color: 0x9b59b6 },
   { key: "member", name: "Member", color: 0x57f287 },
-  { key: "tester", name: "Tester", color: 0x5dade2 }
+  { key: "tester", name: "Tester", color: 0x5dade2 },
+  { key: "bot", name: "Bot", color: 0xfee75c }
 ] as const;
 
 export type RoleKey = (typeof roleSpecs)[number]["key"];
@@ -55,6 +56,13 @@ export const channelSpecs: ChannelSpec[] = [
     category: "info",
     visibility: "member",
     topic: "Official Akron announcements."
+  },
+  {
+    name: "links",
+    type: ChannelType.GuildText,
+    category: "info",
+    visibility: "member",
+    topic: "Official Akron links and resources."
   },
   {
     name: "welcome",

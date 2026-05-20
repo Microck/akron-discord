@@ -41,27 +41,31 @@ export function buildSubmissionGuideEmbed(): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle("How to Submit Akron Packs")
     .setColor(akronYellow)
-    .setDescription("Post one scoped `.akr` in the right forum. The bot archives the exact scanned file, validates it, and publishes eligible map packs.")
+    .setDescription("Follow these steps before posting. The bot archives the exact scanned `.akr`, checks it, and sends map packs to moderator review before catalog publication.")
     .addFields(
       {
-        name: "Required",
-        value: "One `.akr`, the right forum, and a supported GameBanana map link for map-specific packs."
+        name: "1. Pick the forum",
+        value: "`startpos-packs`, `auto-kill-areas`, and `auto-deafen-areas` are map catalog packs. `keybind-packs`, `hud-layouts`, `audio-packs`, and `recorder-packs` stay Discord-only."
       },
       {
-        name: "Recommended",
-        value: "Add a short description and a capture from Akron showing markers, zones, or relevant rooms."
+        name: "2. Export one scoped pack",
+        value: "In Akron, export only the matching section. Do not post whole profiles yet."
       },
       {
-        name: "Catalog",
-        value: "`startpos-packs`, `auto-kill-areas`, and `auto-deafen-areas` can publish to Akron's in-game catalog."
+        name: "3. Add the map link",
+        value: "For map-specific forums, include `Map: https://gamebanana.com/mods/...` in the post body."
       },
       {
-        name: "Discord-only",
-        value: "`keybind-packs`, `hud-layouts`, `audio-packs`, and `recorder-packs` are scanned and kept here."
+        name: "4. Add a short description",
+        value: "Explain what the pack contains, for example the rooms covered, marker purpose, or layout goal."
       },
       {
-        name: "Example",
-        value: "`Map: https://gamebanana.com/mods/150453`\n`Description: Start positions for common practice rooms.`"
+        name: "5. Add a capture",
+        value: "Optional, but heavily recommended. Use Akron's room or map capture so markers, StartPos points, Auto Kill areas, or Auto Deafen areas are visible. Keep room context in frame and avoid private desktop content."
+      },
+      {
+        name: "6. Post and wait",
+        value: "Attach exactly one `.akr`. The bot will reply with the scanned file link, SHA-256, status, and any fixes needed."
       }
     );
 }
@@ -91,15 +95,71 @@ export function buildFaqEmbed(): EmbedBuilder {
     );
 }
 
-export function buildAnnouncementsEmbed(): EmbedBuilder {
+export function buildLinksEmbed(): EmbedBuilder {
   return new EmbedBuilder()
-    .setTitle("Announcements")
+    .setTitle("Links")
     .setColor(akronYellow)
-    .setDescription("Official Akron updates will be posted here.")
+    .setDescription("Official Akron links will be posted here.")
     .addFields(
-      { name: "Follow", value: "Use this channel for release notes, server changes, and important moderation notices." },
       { name: "Website", value: "akron.micr.dev" }
     );
+}
+
+export type ForumExampleSpec = {
+  channelName: string;
+  settingKey: string;
+  threadTitle: string;
+  embed: EmbedBuilder;
+};
+
+export function buildForumExampleSpecs(): ForumExampleSpec[] {
+  return [
+    submissionExample("startpos-packs", "StartPos submission", [
+      "Map: https://gamebanana.com/mods/150453",
+      "Description: Start positions for lobby practice and common room resets.",
+      "Attachments: lobby-startpos.akr, lobby-startpos-capture.png"
+    ]),
+    submissionExample("auto-kill-areas", "Auto Kill submission", [
+      "Map: https://gamebanana.com/mods/150453",
+      "Description: Auto Kill areas for fast reset practice in the hard rooms.",
+      "Attachments: hard-rooms-auto-kill.akr, hard-rooms-capture.png"
+    ]),
+    submissionExample("auto-deafen-areas", "Auto Deafen submission", [
+      "Map: https://gamebanana.com/mods/150453",
+      "Description: Auto Deafen areas around music-heavy practice rooms.",
+      "Attachments: music-rooms-auto-deafen.akr, music-rooms-capture.png"
+    ]),
+    submissionExample("keybind-packs", "Keybind submission", [
+      "Description: Practice keybinds for quick restart, capture, and marker editing.",
+      "Attachments: practice-keybinds.akr"
+    ]),
+    submissionExample("hud-layouts", "HUD layout submission", [
+      "Description: Compact HUD layout for recording and room practice.",
+      "Attachments: compact-hud.akr, compact-hud-preview.png"
+    ]),
+    submissionExample("audio-packs", "Audio pack submission", [
+      "Description: Audio settings tuned for practice streams.",
+      "Attachments: stream-audio.akr"
+    ]),
+    submissionExample("recorder-packs", "Recorder pack submission", [
+      "Description: Recorder settings for lightweight 1080p clips.",
+      "Attachments: 1080p-recorder.akr"
+    ]),
+    feedbackExample("questions", "Question", [
+      "Title: How do I export only StartPos?",
+      "Body: Say what you tried, your Akron version, and what part is confusing."
+    ]),
+    feedbackExample("issues", "Issue report", [
+      "Title: StartPos export fails on map X",
+      "Body: Include what happened, what you expected, Akron version, logs/screenshots, and reproduction steps.",
+      "GitHub: Prefer opening this directly on GitHub when you can."
+    ]),
+    feedbackExample("suggestions", "Suggestion", [
+      "Title: Add a preview before publishing a capture",
+      "Body: Describe the problem, proposed behavior, and examples or mockups.",
+      "GitHub: Prefer opening this directly on GitHub when you can."
+    ])
+  ];
 }
 
 export function forumGuidelines(scope: string): string {
@@ -130,4 +190,37 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
     "The bot syncs valid suggestions one-way to GitHub.",
     "Prefer opening the GitHub issue directly when you are comfortable doing so."
   ].join("\n");
+}
+
+function submissionExample(channelName: string, label: string, lines: string[]): ForumExampleSpec {
+  return {
+    channelName,
+    settingKey: `thread.example.${channelName}.id`,
+    threadTitle: `Example: ${label}`,
+    embed: buildExampleEmbed(label, [
+      "Use this shape for your own post. Replace the text and attach your real files.",
+      "",
+      ...lines
+    ])
+  };
+}
+
+function feedbackExample(channelName: string, label: string, lines: string[]): ForumExampleSpec {
+  return {
+    channelName,
+    settingKey: `thread.example.${channelName}.id`,
+    threadTitle: `Example: ${label}`,
+    embed: buildExampleEmbed(label, [
+      "Use one focused forum post. Keep follow-up details in the thread.",
+      "",
+      ...lines
+    ])
+  };
+}
+
+function buildExampleEmbed(label: string, lines: string[]): EmbedBuilder {
+  return new EmbedBuilder()
+    .setTitle(`Example ${label}`)
+    .setColor(akronYellow)
+    .setDescription(lines.join("\n"));
 }
