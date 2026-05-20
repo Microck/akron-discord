@@ -20,6 +20,7 @@ CLOUDFLARE_R2_ACCESS_KEY_ID=
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=
 CLOUDFLARE_R2_BUCKET=
 CLOUDFLARE_R2_PUBLIC_BASE_URL=
+AKRON_PUBLIC_ASSET_BASE_URL=https://akron.micr.dev
 ```
 
 Optional but expected for production:
@@ -71,7 +72,9 @@ The container stores SQLite data in `./data` through the compose volume. It incl
 
 ## Cloudflare R2
 
-Create one private bucket for catalog archives and optimized map captures. Enable public `r2.dev` access or attach a public custom domain, then set `CLOUDFLARE_R2_PUBLIC_BASE_URL` to that origin.
+Create one private bucket for catalog archives and optimized map captures. Enable public `r2.dev` access or attach a public custom domain, then set `CLOUDFLARE_R2_PUBLIC_BASE_URL` to that raw storage origin.
+
+Set `AKRON_PUBLIC_ASSET_BASE_URL=https://akron.micr.dev` so Discord embeds and catalog entries use branded URLs. The website should proxy the reserved asset paths to R2. See `docs/akron-asset-urls.md`.
 
 The bot uploads through the S3-compatible R2 API, so it also needs an R2 API token with Object Read & Write access scoped to that bucket. Copy the token's Access Key ID and Secret Access Key into the local deployment `.env`. Cloudflare only shows the secret once.
 

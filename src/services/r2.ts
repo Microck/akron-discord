@@ -44,5 +44,37 @@ export async function getR2Text(config: AppConfig, client: S3Client, key: string
 }
 
 export function publicR2Url(config: AppConfig, key: string): string {
-  return config.cloudflareR2PublicBaseUrl.replace(/\/$/, "") + "/" + key.split("/").map(encodeURIComponent).join("/");
+  const brandedBaseUrl = config.akronPublicAssetBaseUrl.trim();
+  if (brandedBaseUrl) {
+    return brandedBaseUrl.replace(/\/$/, "") + publicAssetPath(key);
+  }
+
+  return config.cloudflareR2PublicBaseUrl.replace(/\/$/, "") + "/" + encodePathSegments(key);
+}
+
+export function publicAssetPath(key: string): string {
+  const parts = key.split("/").filter(Boolean);
+
+  if (key === "catalog/index.json") {
+    return "/catalog/index.json";
+  }
+
+  if (parts[0] === "packs" && parts.length === 3) {
+    return "/maps/" + encodePathSegments(parts.slice(1).join("/"));
+  }
+
+  if (parts[0] === "captures" && parts.length === 3) {
+    const captureName = parts[2].replace(/\.webp$/i, "");
+    return "/maps/" + encodePathSegments(`${parts[1]}/${captureName}/capture.webp`);
+  }
+
+  if (parts[0] === "submissions") {
+    return "/submissions/" + encodePathSegments(parts.slice(1).join("/"));
+  }
+
+  return "/assets/" + encodePathSegments(key);
+}
+
+function encodePathSegments(path: string): string {
+  return path.split("/").map(encodeURIComponent).join("/");
 }

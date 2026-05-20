@@ -33,6 +33,17 @@ R2 stores:
 
 Do not use Discord attachment URLs as the catalog contract. Discord can host the original forum post attachments, but R2 is the stable public source for the game client.
 
+Public URLs should use the Akron domain instead of raw R2 URLs when `AKRON_PUBLIC_ASSET_BASE_URL` is configured:
+
+```text
+https://akron.micr.dev/catalog/index.json
+https://akron.micr.dev/maps/<map-id>/<pack-id>.akr
+https://akron.micr.dev/maps/<map-id>/<pack-id>/capture.webp
+https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
+```
+
+The website may use `/` and `/docs`; only `/catalog`, `/maps`, `/submissions`, and `/assets` are reserved for storage proxying.
+
 Use SQLite with Drizzle ORM as the persistent database for v1.
 
 SQLite stores:
@@ -637,6 +648,7 @@ CLOUDFLARE_R2_ACCESS_KEY_ID=
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=
 CLOUDFLARE_R2_BUCKET=
 CLOUDFLARE_R2_PUBLIC_BASE_URL=
+AKRON_PUBLIC_ASSET_BASE_URL=https://akron.micr.dev
 
 NVIDIA_NIM_API_KEY=
 NVIDIA_NIM_BASE_URL=https://integrate.api.nvidia.com/v1

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
+import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
+import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
 
 describe("map resolver helpers", () => {
@@ -32,6 +34,25 @@ describe("catalog index merging", () => {
 
   it("formats catalog backup timestamps without colons", () => {
     expect(formatCatalogBackupTimestamp(new Date("2026-05-20T12:34:56.789Z"))).toBe("2026-05-20T12-34-56Z");
+  });
+});
+
+describe("public asset URLs", () => {
+  it("maps R2 keys to Akron-branded public paths", () => {
+    expect(publicAssetPath("catalog/index.json")).toBe("/catalog/index.json");
+    expect(publicAssetPath("packs/spring-collab/my-pack.akr")).toBe("/maps/spring-collab/my-pack.akr");
+    expect(publicAssetPath("captures/spring-collab/my-pack.webp")).toBe("/maps/spring-collab/my-pack/capture.webp");
+    expect(publicAssetPath("submissions/startpos-packs/123/abc.akr")).toBe("/submissions/startpos-packs/123/abc.akr");
+  });
+
+  it("uses the Akron public asset base URL when configured", () => {
+    expect(publicR2Url(config({ akronPublicAssetBaseUrl: "https://akron.micr.dev/" }), "packs/map-id/pack.akr"))
+      .toBe("https://akron.micr.dev/maps/map-id/pack.akr");
+  });
+
+  it("falls back to the raw R2 public origin when no branded base is configured", () => {
+    expect(publicR2Url(config({ akronPublicAssetBaseUrl: "" }), "packs/map id/pack.akr"))
+      .toBe("https://pub.example.r2.dev/packs/map%20id/pack.akr");
   });
 });
 
@@ -66,6 +87,33 @@ function pack(overrides: Partial<CatalogPack>): CatalogPack {
     downloadCount: 0,
     updatedUtc: "2026-05-20T00:00:00.000Z",
     tags: ["startpos"],
+    ...overrides
+  };
+}
+
+function config(overrides: Partial<AppConfig>): AppConfig {
+  return {
+    discordToken: "token",
+    discordClientId: "client",
+    discordGuildId: "guild",
+    akronAdminRoleId: "",
+    akronModRoleId: "",
+    akronMemberRoleId: "",
+    cloudflareR2AccountId: "account",
+    cloudflareR2AccessKeyId: "key",
+    cloudflareR2SecretAccessKey: "secret",
+    cloudflareR2Bucket: "bucket",
+    cloudflareR2PublicBaseUrl: "https://pub.example.r2.dev",
+    akronPublicAssetBaseUrl: "",
+    nvidiaNimApiKey: "",
+    nvidiaNimBaseUrl: "https://integrate.api.nvidia.com/v1",
+    nvidiaNimModel: "",
+    githubAppId: "",
+    githubAppPrivateKey: "",
+    githubAppInstallationId: "",
+    githubOwner: "",
+    githubRepo: "",
+    databasePath: "data/test.sqlite",
     ...overrides
   };
 }
