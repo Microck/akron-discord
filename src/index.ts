@@ -1,4 +1,5 @@
 import {
+  ActivityType,
   ChannelType,
   Client,
   Events,
@@ -35,6 +36,7 @@ const client = new Client({
 });
 
 client.once(Events.ClientReady, readyClient => {
+  readyClient.user.setActivity("akron.micr.dev", { type: ActivityType.Watching });
   console.log(`Akron Discord bot ready as ${readyClient.user.tag}`);
 });
 
