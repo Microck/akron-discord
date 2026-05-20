@@ -53,7 +53,7 @@ export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
   }
 
   for (const channel of channelSpecs) {
-    const existing = guild.channels.cache.find(candidate => candidate.name === channel.name);
+    const existing = findAccessibleNamedChannel(guild, channel.name);
     if (!existing) {
       changes.push(`create ${describeChannelType(channel.type)} channel ${channel.name}`);
       continue;
@@ -130,7 +130,12 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
   }
 
   for (const channelSpec of channelSpecs) {
-    const existing = guild.channels.cache.find(channel => channel.name === channelSpec.name);
+    const hasInaccessibleSameType = guild.channels.cache.some(channel =>
+      channel.name === channelSpec.name &&
+      channel.type === channelSpec.type &&
+      !isChannelAccessible(channel)
+    );
+    const existing = findAccessibleNamedChannel(guild, channelSpec.name);
     if (existing && existing.type !== channelSpec.type) {
       changes.push(`skipped ${channelSpec.name}: existing channel has incompatible type`);
       continue;
@@ -149,7 +154,9 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
     });
 
     if (!existing) {
-      changes.push(`created channel ${channelSpec.name}`);
+      changes.push(hasInaccessibleSameType
+        ? `created channel ${channelSpec.name} because an existing channel is inaccessible`
+        : `created channel ${channelSpec.name}`);
     }
 
     try {
@@ -360,7 +367,7 @@ function permissionOverwritesMatch(channel: GuildBasedChannel, expected: Overwri
 }
 
 async function ensureVerifyMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const verify = guild.channels.cache.find(channel => channel.name === "verify" && channel.type === ChannelType.GuildText) as TextChannel | undefined;
+  const verify = findAccessibleTextChannel(guild, "verify");
   if (!verify) {
     return;
   }
@@ -381,7 +388,7 @@ async function ensureVerifyMessage(guild: Guild, db: AkronDatabase): Promise<voi
 }
 
 async function ensureRulesMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const rules = guild.channels.cache.find(channel => channel.name === "rules" && channel.type === ChannelType.GuildText) as TextChannel | undefined;
+  const rules = findAccessibleTextChannel(guild, "rules");
   if (!rules) {
     return;
   }
@@ -402,7 +409,7 @@ async function ensureRulesMessage(guild: Guild, db: AkronDatabase): Promise<void
 }
 
 async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const guide = guild.channels.cache.find(channel => channel.name === "submission-guide" && channel.type === ChannelType.GuildText) as TextChannel | undefined;
+  const guide = findAccessibleTextChannel(guild, "submission-guide");
   if (!guide) {
     return;
   }
@@ -423,7 +430,7 @@ async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase): Pr
 }
 
 async function ensureWelcomeMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const channel = guild.channels.cache.find(candidate => candidate.name === "welcome" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
+  const channel = findAccessibleTextChannel(guild, "welcome");
   if (!channel) {
     return;
   }
@@ -431,7 +438,7 @@ async function ensureWelcomeMessage(guild: Guild, db: AkronDatabase): Promise<vo
 }
 
 async function ensureFaqMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const channel = guild.channels.cache.find(candidate => candidate.name === "faq" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
+  const channel = findAccessibleTextChannel(guild, "faq");
   if (!channel) {
     return;
   }
@@ -439,7 +446,7 @@ async function ensureFaqMessage(guild: Guild, db: AkronDatabase): Promise<void> 
 }
 
 async function ensureAnnouncementsMessage(guild: Guild, db: AkronDatabase): Promise<void> {
-  const channel = guild.channels.cache.find(candidate => candidate.name === "announcements" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
+  const channel = findAccessibleTextChannel(guild, "announcements");
   if (!channel) {
     return;
   }
@@ -481,6 +488,22 @@ function describeChannelType(type: ChannelType): string {
     default:
       return `type-${type}`;
   }
+}
+
+function findAccessibleNamedChannel(guild: Guild, name: string): GuildBasedChannel | undefined {
+  return guild.channels.cache.find(channel => channel.name === name && isChannelAccessible(channel));
+}
+
+function findAccessibleTextChannel(guild: Guild, name: string): TextChannel | undefined {
+  return guild.channels.cache.find(channel =>
+    channel.name === name &&
+    channel.type === ChannelType.GuildText &&
+    isChannelAccessible(channel)
+  ) as TextChannel | undefined;
+}
+
+function isChannelAccessible(channel: GuildBasedChannel): boolean {
+  return !("viewable" in channel) || channel.viewable;
 }
 
 async function configureBotRoleColor(guild: Guild, changes: string[]): Promise<void> {
