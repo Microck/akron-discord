@@ -220,7 +220,10 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
     scannedArchiveKey,
     scannedArchiveUrl,
     scannedArchiveSha256,
-    starter
+    starter,
+    hasAkrAttachment: Boolean(attachmentPlan.akr),
+    hasCaptureImage: Boolean(attachmentPlan.image),
+    isMapCatalogSubmission: isMapCatalogScope(scope)
   });
 }
 
@@ -240,6 +243,9 @@ async function finishScan(
     scannedArchiveUrl?: string;
     scannedArchiveSha256?: string;
     starter?: Message<true>;
+    hasAkrAttachment?: boolean;
+    hasCaptureImage?: boolean;
+    isMapCatalogSubmission?: boolean;
   }
 ): Promise<void> {
   await applyStatusTag(input.thread, parent, result.status, result.scope);
@@ -278,9 +284,14 @@ async function finishScan(
     });
 
   const embed = buildScanEmbed(result.status, result.scope, result.reasons, {
+    mapUrl: result.mapUrl,
     mapSid: result.mapSid,
     scannedArchiveUrl: result.scannedArchiveUrl,
-    scannedArchiveSha256: result.scannedArchiveSha256
+    scannedArchiveSha256: result.scannedArchiveSha256,
+    catalogPublished: result.catalogPublished,
+    hasAkrAttachment: result.hasAkrAttachment,
+    hasCaptureImage: result.hasCaptureImage,
+    isMapCatalogSubmission: result.isMapCatalogSubmission
   });
   await input.thread.send({ embeds: [embed] });
   await sendLog(input.thread.guild, "scan-log", `${result.status}: ${input.thread.url}`);
@@ -397,21 +408,29 @@ async function applyStatusTag(
   }
 }
 
-function buildScanEmbed(
+export function buildScanEmbed(
   status: ScanStatus,
   scope: AkronProfileSection,
   reasons: string[],
   archive: {
+    mapUrl?: string;
     mapSid?: string;
     scannedArchiveUrl?: string;
     scannedArchiveSha256?: string;
+    catalogPublished?: boolean;
+    hasAkrAttachment?: boolean;
+    hasCaptureImage?: boolean;
+    isMapCatalogSubmission?: boolean;
   }
 ): EmbedBuilder {
   const color = status === "Published" ? 0x2da44e : status === "Flagged" ? 0xcf222e : 0xbf8700;
+  const validity = scanValidityLabel(status);
   const embed = new EmbedBuilder()
-    .setTitle(`Akron Scan: ${status}`)
+    .setTitle(`Akron Scan: ${validity}`)
     .setColor(color)
     .addFields({ name: "Scope", value: formatSection(scope), inline: true });
+
+  embed.setDescription(buildScanChecklist(status, scope, reasons, archive));
 
   if (archive.mapSid) {
     embed.addFields({ name: "Map SID", value: archive.mapSid, inline: true });
@@ -432,13 +451,72 @@ function buildScanEmbed(
     });
   }
 
-  embed.setDescription(
-    reasons.length > 0
-      ? reasons.slice(0, 10).map(reason => `- ${reason}`).join("\n").slice(0, 4000)
-      : "Submission passed deterministic validation."
-  );
+  if (reasons.length > 0) {
+    embed.addFields({
+      name: status === "Published" ? "Notes" : "What needs attention",
+      value: reasons.slice(0, 10).map(reason => `- ${reason}`).join("\n").slice(0, 1024)
+    });
+  }
 
   return embed;
+}
+
+function buildScanChecklist(
+  status: ScanStatus,
+  scope: AkronProfileSection,
+  reasons: string[],
+  archive: {
+    mapUrl?: string;
+    mapSid?: string;
+    scannedArchiveUrl?: string;
+    scannedArchiveSha256?: string;
+    catalogPublished?: boolean;
+    hasAkrAttachment?: boolean;
+    hasCaptureImage?: boolean;
+    isMapCatalogSubmission?: boolean;
+  }
+): string {
+  const ok = status === "Published";
+  const mapRequired = archive.isMapCatalogSubmission ?? isMapCatalogScope(scope);
+  const attention = status === "Needs Fix" || status === "Needs Moderator Review" || status === "Flagged";
+  const lines = [
+    `**Result:** ${scanValidityLabel(status)}`,
+    "",
+    `${checkbox(Boolean(archive.hasAkrAttachment))} `.concat("One `.akr` attachment found"),
+    `${checkbox(Boolean(archive.scannedArchiveSha256))} `.concat("Exact `.akr` archived before feedback"),
+    mapRequired
+      ? `${checkbox(Boolean(archive.mapUrl))} Supported map link included`
+      : "[-] Map link not required for this forum",
+    mapRequired
+      ? `${checkbox(Boolean(archive.mapSid))} Map identity resolved`
+      : "[-] Map identity not required for this forum",
+    `${checkbox(reasons.length === 0 || ok)} Deterministic archive validation passed`,
+    `${checkbox(status !== "Flagged")} Malware and policy checks did not flag the post`,
+    archive.hasCaptureImage ? "[x] Optional capture image attached" : "[-] Optional capture image not attached",
+    mapRequired
+      ? `${checkbox(Boolean(archive.catalogPublished))} Published to the Akron catalog`
+      : "[-] Catalog publishing not used for Discord-only packs",
+    attention ? "[!] Action needed before this is valid" : "[x] No user action needed"
+  ];
+
+  return lines.join("\n").slice(0, 4000);
+}
+
+function scanValidityLabel(status: ScanStatus): string {
+  if (status === "Published") {
+    return "Valid";
+  }
+  if (status === "Needs Fix") {
+    return "Needs Fix";
+  }
+  if (status === "Needs Moderator Review") {
+    return "Needs Moderator Review";
+  }
+  return "Flagged";
+}
+
+function checkbox(complete: boolean): string {
+  return complete ? "[x]" : "[ ]";
 }
 
 async function archiveScannedAkr(

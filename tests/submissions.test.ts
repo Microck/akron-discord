@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { buildScannedArchiveKey, hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
+import { buildScanEmbed, buildScannedArchiveKey, hasFlaggableArchiveReason } from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 
 describe("submission post parsing", () => {
@@ -121,6 +121,36 @@ describe("submission scan classification", () => {
     expect(buildScannedArchiveKey("StartPos Packs!", "123", "a".repeat(64))).toBe(
       `submissions/startpos-packs/123/${"a".repeat(64)}.akr`
     );
+  });
+
+  it("formats scan feedback as a validity checklist", () => {
+    const embed = buildScanEmbed("Published", "StartPos", [], {
+      mapUrl: "https://gamebanana.com/mods/150453",
+      mapSid: "Glyph/Glyph",
+      scannedArchiveUrl: "https://akron.micr.dev/submissions/startpos-packs/123/hash.akr",
+      scannedArchiveSha256: "a".repeat(64),
+      catalogPublished: true,
+      hasAkrAttachment: true,
+      hasCaptureImage: true,
+      isMapCatalogSubmission: true
+    }).toJSON();
+
+    expect(embed.title).toBe("Akron Scan: Valid");
+    expect(embed.description).toContain("**Result:** Valid");
+    expect(embed.description).toContain("[x] One `.akr` attachment found");
+    expect(embed.description).toContain("[x] Published to the Akron catalog");
+    expect(embed.fields?.some(field => field.name === "Scanned File")).toBe(true);
+  });
+
+  it("marks invalid scan feedback as action-needed", () => {
+    const embed = buildScanEmbed("Needs Fix", "StartPos", ["Attach exactly one `.akr` file."], {
+      isMapCatalogSubmission: true
+    }).toJSON();
+
+    expect(embed.title).toBe("Akron Scan: Needs Fix");
+    expect(embed.description).toContain("[ ] One `.akr` attachment found");
+    expect(embed.description).toContain("[!] Action needed before this is valid");
+    expect(embed.fields?.some(field => field.name === "What needs attention")).toBe(true);
   });
 });
 

@@ -1,4 +1,5 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from "discord.js";
+import type { AppConfig } from "./config.js";
 
 export const verifyButtonCustomId = "akron:verify";
 const akronYellow = 0xfee75c;
@@ -37,7 +38,8 @@ export function buildVerifyComponents(): ActionRowBuilder<ButtonBuilder>[] {
   ];
 }
 
-export function buildSubmissionGuideEmbed(): EmbedBuilder {
+export function buildSubmissionGuideEmbed(config?: AppConfig): EmbedBuilder {
+  const githubIssues = githubIssuesMarkdownLink(config);
   return new EmbedBuilder()
     .setTitle("How to Submit Akron Packs")
     .setColor(akronYellow)
@@ -66,6 +68,10 @@ export function buildSubmissionGuideEmbed(): EmbedBuilder {
       {
         name: "6. Post and wait",
         value: "Attach exactly one `.akr`. The bot will reply with the scanned file link, SHA-256, status, and any fixes needed."
+      },
+      {
+        name: "Issues and suggestions",
+        value: `Discord forums work when needed, but prefer opening bug reports and feature requests directly on ${githubIssues}.`
       }
     );
 }
@@ -82,14 +88,15 @@ export function buildWelcomeEmbed(): EmbedBuilder {
     );
 }
 
-export function buildFaqEmbed(): EmbedBuilder {
+export function buildFaqEmbed(config?: AppConfig): EmbedBuilder {
+  const githubIssues = githubIssuesMarkdownLink(config);
   return new EmbedBuilder()
     .setTitle("FAQ")
     .setColor(akronYellow)
     .setDescription("Short answers for common Akron Discord workflows.")
     .addFields(
       { name: "How do I get access?", value: "Click the button in #verify." },
-      { name: "Where do I report bugs?", value: "Prefer GitHub directly. Discord `issues` posts are synced one-way when needed." },
+      { name: "Where do I report bugs?", value: `Prefer ${githubIssues}. Discord \`issues\` posts are synced one-way when needed.` },
       { name: "Can I post whole profiles?", value: "Not yet. Export a scoped `.akr` pack." },
       { name: "Why did my post get flagged?", value: "Staff can review locked flagged posts. The bot preserves the scanned file for evidence." }
     );
@@ -154,7 +161,9 @@ export function forumGuidelines(scope: string): string {
   ].join("\n");
 }
 
-export function feedbackForumGuidelines(kind: "issue" | "suggestion" | "question"): string {
+export function feedbackForumGuidelines(kind: "issue" | "suggestion" | "question", config?: AppConfig): string {
+  const githubIssues = githubIssuesMarkdownLink(config);
+
   if (kind === "question") {
     return [
       "Ask one focused Akron question per post.",
@@ -165,14 +174,14 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion" | "question
       "",
       "Tips",
       "- Include screenshots, logs, or pack details when they matter.",
-      "- Use issue reports for bugs and suggestions for product ideas."
+      `- Use issue reports for bugs and suggestions for product ideas. Prefer ${githubIssues} when possible.`
     ].join("\n");
   }
 
   if (kind === "issue") {
     return [
       "Use one post per bug report.",
-      "The bot syncs valid reports one-way to GitHub. Prefer opening the GitHub issue directly when you are comfortable doing so.",
+      `The bot syncs valid reports one-way to GitHub. Prefer opening reports directly on ${githubIssues} when you are comfortable doing so.`,
       "",
       "Template",
       "Title: <what broke>",
@@ -186,7 +195,7 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion" | "question
 
   return [
     "Use one post per feature suggestion.",
-    "The bot syncs valid suggestions one-way to GitHub. Prefer opening the GitHub issue directly when you are comfortable doing so.",
+    `The bot syncs valid suggestions one-way to GitHub. Prefer opening suggestions directly on ${githubIssues} when you are comfortable doing so.`,
     "",
     "Template",
     "Title: <what should Akron add or change?>",
@@ -195,6 +204,14 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion" | "question
     "Examples: <optional screenshots, mockups, links, or related tools>",
     "Priority: <low, medium, or high if you have a clear reason>"
   ].join("\n");
+}
+
+export function githubIssuesMarkdownLink(config?: Pick<AppConfig, "githubOwner" | "githubRepo">): string {
+  if (!config?.githubOwner || !config.githubRepo) {
+    return "the GitHub issues page";
+  }
+
+  return `[the GitHub issues page](https://github.com/${config.githubOwner}/${config.githubRepo}/issues)`;
 }
 
 function submissionExample(channelName: string, label: string, packType: string, includeCapture: boolean): ForumExampleSpec {

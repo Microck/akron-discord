@@ -26,13 +26,14 @@ import {
   feedbackForumGuidelines,
   forumGuidelines
 } from "./content.js";
+import type { AppConfig } from "./config.js";
 import { utcNow } from "./time.js";
 
 export type ServerSyncPlan = {
   changes: string[];
 };
 
-export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
+export async function planServerSync(guild: Guild, config?: AppConfig): Promise<ServerSyncPlan> {
   await guild.roles.fetch();
   await guild.channels.fetch();
   const changes: string[] = [];
@@ -74,7 +75,7 @@ export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
       changes.push(`move ${channel.name} to ${expectedParentName ?? "top level"}`);
     }
 
-    const topic = buildChannelTopic(channel);
+    const topic = buildChannelTopic(channel, config);
     if ("topic" in existing && topic && existing.topic !== topic) {
       changes.push(`update topic for ${channel.name}`);
     }
@@ -98,7 +99,7 @@ export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
   return { changes };
 }
 
-export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<ServerSyncPlan> {
+export async function applyServerSync(guild: Guild, db: AkronDatabase, config?: AppConfig): Promise<ServerSyncPlan> {
   await guild.roles.fetch();
   await guild.channels.fetch();
   const changes: string[] = [];
@@ -158,7 +159,7 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
       name: channelSpec.name,
       type: channelSpec.type,
       parent,
-      topic: buildChannelTopic(channelSpec),
+      topic: buildChannelTopic(channelSpec, config),
       availableTags: buildForumTags(channelSpec),
       reason: "Akron server sync",
       permissionOverwrites
@@ -171,7 +172,7 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
     }
 
     try {
-      await configureExistingChannel(channel, channelSpec, parent, permissionOverwrites);
+      await configureExistingChannel(channel, channelSpec, parent, permissionOverwrites, config);
     } catch (error) {
       changes.push(`skipped ${channelSpec.name}: ${formatDiscordSyncError(error)}`);
     }
@@ -180,10 +181,10 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
   await runContentSync(changes, "verify", () => ensureVerifyMessage(guild, db));
   await runContentSync(changes, "rules", () => ensureRulesMessage(guild, db));
   await runContentSync(changes, "welcome", () => ensureWelcomeMessage(guild, db));
-  await runContentSync(changes, "faq", () => ensureFaqMessage(guild, db));
+  await runContentSync(changes, "faq", () => ensureFaqMessage(guild, db, config));
   await runContentSync(changes, "links", () => removeStoredMessage(guild, db, "links", "message.links.id"));
   await runContentSync(changes, "announcements", () => removeStoredMessage(guild, db, "announcements", "message.announcements.id"));
-  await runContentSync(changes, "submission-guide", () => ensureSubmissionGuideMessage(guild, db));
+  await runContentSync(changes, "submission-guide", () => ensureSubmissionGuideMessage(guild, db, config));
   await runContentSync(changes, "forum examples", () => ensureForumExampleThreads(guild, db));
 
   if (changes.length === 0) {
@@ -197,7 +198,8 @@ async function configureExistingChannel(
   channel: GuildBasedChannel,
   spec: ChannelSpec,
   parent: string | undefined,
-  permissionOverwrites: OverwriteResolvable[]
+  permissionOverwrites: OverwriteResolvable[],
+  config?: AppConfig
 ): Promise<void> {
   if ("setParent" in channel && channel.parentId !== (parent ?? null)) {
     await channel.setParent(parent ?? null, { lockPermissions: false, reason: "Akron server sync" });
@@ -207,7 +209,7 @@ async function configureExistingChannel(
     await channel.setPosition(0, { reason: "Akron server sync" });
   }
 
-  const topic = buildChannelTopic(spec);
+  const topic = buildChannelTopic(spec, config);
   if ("setTopic" in channel && topic && channel.topic !== topic) {
     await channel.setTopic(topic);
   }
@@ -332,21 +334,21 @@ function buildForumTags(spec: ChannelSpec): GuildForumTagData[] | undefined {
   }));
 }
 
-function buildChannelTopic(spec: ChannelSpec): string | undefined {
+function buildChannelTopic(spec: ChannelSpec, config?: AppConfig): string | undefined {
   if (spec.type === ChannelType.GuildForum && submissionChannelScopes.has(spec.name)) {
     return forumGuidelines(submissionChannelScopes.get(spec.name) ?? "Akron");
   }
 
   if (spec.name === "issues") {
-    return feedbackForumGuidelines("issue");
+    return feedbackForumGuidelines("issue", config);
   }
 
   if (spec.name === "suggestions") {
-    return feedbackForumGuidelines("suggestion");
+    return feedbackForumGuidelines("suggestion", config);
   }
 
   if (spec.name === "questions") {
-    return feedbackForumGuidelines("question");
+    return feedbackForumGuidelines("question", config);
   }
 
   return spec.topic;
@@ -429,7 +431,7 @@ async function ensureRulesMessage(guild: Guild, db: AkronDatabase): Promise<void
   await upsertSetting(db, "message.rules.id", message.id);
 }
 
-async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase, config?: AppConfig): Promise<void> {
   const guide = findAccessibleTextChannel(guild, "submission-guide");
   if (!guide) {
     return;
@@ -439,14 +441,14 @@ async function ensureSubmissionGuideMessage(guild: Guild, db: AkronDatabase): Pr
   if (setting) {
     try {
       const message = await guide.messages.fetch(setting.value);
-      await message.edit({ embeds: [buildSubmissionGuideEmbed()] });
+      await message.edit({ embeds: [buildSubmissionGuideEmbed(config)] });
       return;
     } catch {
       // The stored message was deleted or moved. Recreate it below.
     }
   }
 
-  const message = await guide.send({ embeds: [buildSubmissionGuideEmbed()] });
+  const message = await guide.send({ embeds: [buildSubmissionGuideEmbed(config)] });
   await upsertSetting(db, "message.submission-guide.id", message.id);
 }
 
@@ -458,12 +460,12 @@ async function ensureWelcomeMessage(guild: Guild, db: AkronDatabase): Promise<vo
   await ensureStoredEmbedMessage(db, channel, "message.welcome.id", buildWelcomeEmbed());
 }
 
-async function ensureFaqMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+async function ensureFaqMessage(guild: Guild, db: AkronDatabase, config?: AppConfig): Promise<void> {
   const channel = findAccessibleTextChannel(guild, "faq");
   if (!channel) {
     return;
   }
-  await ensureStoredEmbedMessage(db, channel, "message.faq.id", buildFaqEmbed());
+  await ensureStoredEmbedMessage(db, channel, "message.faq.id", buildFaqEmbed(config));
 }
 
 async function ensureStoredEmbedMessage(db: AkronDatabase, channel: TextChannel, settingKey: string, embed: ReturnType<typeof buildRulesEmbed>): Promise<void> {

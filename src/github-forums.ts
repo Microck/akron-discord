@@ -78,7 +78,7 @@ export async function syncGithubForumThread(input: {
   await applyGithubTags(input.thread, parent);
   await input.thread.send({
     embeds: [
-      buildGithubSyncEmbed(`Synced to GitHub issue #${result.issueNumber}.`, result.issueUrl)
+      buildGithubSyncEmbed(`Synced to [GitHub issue #${result.issueNumber}](${result.issueUrl}).`, result.issueUrl)
     ]
   });
   await logAudit(input.db, {

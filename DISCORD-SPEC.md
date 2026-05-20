@@ -168,7 +168,7 @@ Use hyphenated names for multi-word channels.
 
 Do not add extra public channels in v1. The current public/member-facing structure is the initial canonical structure.
 
-`questions`, `issues`, and `suggestions` should use forum Post Guidelines and tags so users can post naturally while the bot keeps the posts structured. The copy-paste templates belong in Post Guidelines, not in seeded embeds. Discord feedback posts are supported for convenience, but the channel copy should say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
+`questions`, `issues`, and `suggestions` should use forum Post Guidelines and tags so users can post naturally while the bot keeps the posts structured. The copy-paste templates belong in Post Guidelines, not in seeded embeds. Discord feedback posts are supported for convenience, but the channel copy should use masked Markdown links when pointing to GitHub, for example `[the GitHub issues page](https://github.com/<owner>/<repo>/issues)`, and say that users should preferably open GitHub issues directly when they are comfortable doing so. Discord-created feedback remains one-way synced to GitHub.
 
 Suggested `questions` forum tags:
 
@@ -469,6 +469,8 @@ Pending Scan -> Flagged
 
 The bot should automatically scan new forum posts and debounced edits to the first post. Archived and locked `Flagged` posts must not be rescanned automatically after user edits. A moderator or admin must explicitly unlock/unarchive and run `/rescan`.
 
+After each automatic scan or manual rescan, the bot should reply in the thread with a scan result embed that clearly states whether the post is valid. The reply should include a checklist covering the `.akr` attachment, immutable archived file, map link, map identity, deterministic archive validation, malware/policy result, optional capture, catalog publication when applicable, and whether user or staff action is needed.
+
 Manual rescan:
 
 ```text
@@ -523,7 +525,7 @@ Flagged posts should be tagged `Flagged`, logged to `mod-log` and `scan-log`, th
 
 Only `Moderator` or `Admin` can restore, override, or rescan a flagged post.
 
-Every downloaded `.akr` must be archived to R2 before publication or final scan feedback. Non-flagged scan embeds should link to the exact archived `.akr` bytes and include the SHA-256 hash. Flagged files should be backed up for staff review and logged to staff channels, but the user-visible flagged embed should not expose a public download link.
+Every downloaded `.akr` must be archived to R2 before publication or final scan feedback. Non-flagged scan embeds should use masked Markdown links to the exact archived `.akr` bytes and include the SHA-256 hash. Flagged files should be backed up for staff review and logged to staff channels, but the user-visible flagged embed should not expose a public download link.
 
 ## Malware and AI Review
 

@@ -96,7 +96,7 @@ export async function handleCommand(input: {
     await interaction.deferReply({ ephemeral: true });
     const mode = interaction.options.getString("mode", true);
     const guild = await client.guilds.fetch(config.discordGuildId);
-    const plan = mode === "apply" ? await applyServerSync(guild, db) : await planServerSync(guild);
+    const plan = mode === "apply" ? await applyServerSync(guild, db, config) : await planServerSync(guild, config);
     if (mode === "apply") {
       await logAudit(db, {
         actorId: interaction.user.id,
