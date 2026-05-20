@@ -9,7 +9,7 @@ https://akron.micr.dev/maps/<map-id>/<pack-id>/capture.webp
 https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
 ```
 
-The website owns `akron.micr.dev`. Keep normal website routes such as `/` and `/docs` in the website app, and proxy only the reserved asset prefixes to R2:
+The Vercel website owns `akron.micr.dev`. Keep normal website routes in the website app. Route `/docs` to Mintlify from Vercel, and route only the reserved asset prefixes to R2:
 
 ```text
 /catalog/*
@@ -30,27 +30,56 @@ Keep `CLOUDFLARE_R2_PUBLIC_BASE_URL` configured as the raw R2 public origin. The
 
 ## Netlify DNS
 
-In the Netlify DNS panel for `micr.dev`, add:
+`micr.dev` uses Netlify DNS, but `akron.micr.dev` should point to Vercel because the main Akron site will be hosted there.
+
+In the Netlify DNS panel for `micr.dev`, add the DNS record Vercel asks for after you add `akron.micr.dev` to the Vercel project. For a normal subdomain, that is usually:
 
 ```text
 Type: CNAME
 Name: akron
-Value: <your-akron-site>.netlify.app
+Value: cname.vercel-dns.com
 TTL: automatic
 ```
 
-Then add `akron.micr.dev` as a custom domain on the Netlify site that will serve the Akron website.
+If Vercel asks for a different target or a verification TXT record, use the exact values shown in the Vercel domain setup screen.
 
-## Netlify Proxy Rules
+## Vercel Rewrites
 
-Add these rules to the future Akron website's public `_redirects` file, replacing `<R2_PUBLIC_BASE_URL>` with the raw R2 public origin:
+Add rewrites to the future Akron website's `vercel.json`. Replace `<MINTLIFY_SUBDOMAIN>` with the Mintlify project subdomain and `<R2_PUBLIC_BASE_URL>` with the raw R2 public origin:
 
-```text
-/catalog/* <R2_PUBLIC_BASE_URL>/catalog/:splat 200
-/maps/:map/:pack.akr <R2_PUBLIC_BASE_URL>/packs/:map/:pack.akr 200
-/maps/:map/:pack/capture.webp <R2_PUBLIC_BASE_URL>/captures/:map/:pack.webp 200
-/submissions/* <R2_PUBLIC_BASE_URL>/submissions/:splat 200
-/assets/* <R2_PUBLIC_BASE_URL>/:splat 200
+```json
+{
+  "rewrites": [
+    {
+      "source": "/docs",
+      "destination": "https://<MINTLIFY_SUBDOMAIN>.mintlify.dev/docs"
+    },
+    {
+      "source": "/docs/:match*",
+      "destination": "https://<MINTLIFY_SUBDOMAIN>.mintlify.dev/docs/:match*"
+    },
+    {
+      "source": "/catalog/:path*",
+      "destination": "<R2_PUBLIC_BASE_URL>/catalog/:path*"
+    },
+    {
+      "source": "/maps/:map/:pack.akr",
+      "destination": "<R2_PUBLIC_BASE_URL>/packs/:map/:pack.akr"
+    },
+    {
+      "source": "/maps/:map/:pack/capture.webp",
+      "destination": "<R2_PUBLIC_BASE_URL>/captures/:map/:pack.webp"
+    },
+    {
+      "source": "/submissions/:path*",
+      "destination": "<R2_PUBLIC_BASE_URL>/submissions/:path*"
+    },
+    {
+      "source": "/assets/:path*",
+      "destination": "<R2_PUBLIC_BASE_URL>/:path*"
+    }
+  ]
+}
 ```
 
-If the website framework also owns `/catalog/*`, use a server route or Netlify Edge Function instead of `_redirects`, but keep the same public URL contract.
+DNS cannot send `/docs` to Mintlify directly because DNS only routes hostnames. Vercel must receive `akron.micr.dev` first and rewrite `/docs` to Mintlify.
