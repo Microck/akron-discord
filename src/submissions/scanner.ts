@@ -33,6 +33,10 @@ type ScanThreadInput = {
   r2Client?: S3Client;
 };
 
+export type ScanSubmissionResult =
+  | { scanned: true; status: ScanStatus; message: string }
+  | { scanned: false; reason: string };
+
 type AttachmentPlan = {
   akr?: Attachment;
   image?: Attachment;
@@ -43,14 +47,14 @@ export function isSubmissionForumName(name: string): boolean {
   return submissionChannelScopes.has(name);
 }
 
-export async function scanSubmissionThread(input: ScanThreadInput): Promise<void> {
+export async function scanSubmissionThread(input: ScanThreadInput): Promise<ScanSubmissionResult> {
   if (input.thread.ownerId === input.thread.client.user.id) {
-    return;
+    return { scanned: false, reason: "Skipped bot-authored example thread." };
   }
 
   const parent = input.thread.parent;
   if (!parent || parent.type !== ChannelType.GuildForum || !isSubmissionForumName(parent.name)) {
-    return;
+    return { scanned: false, reason: "This is not an Akron submission forum thread." };
   }
 
   await applyStatusTag(input.thread, parent, "Pending Scan");
@@ -58,12 +62,11 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
   const scope = submissionChannelScopes.get(parent.name) as AkronProfileSection;
   const starter = await input.thread.fetchStarterMessage();
   if (!starter) {
-    await finishScan(input, parent, {
+    return await finishScan(input, parent, {
       status: "Needs Moderator Review",
       scope,
       reasons: ["Could not fetch the forum starter message."]
     });
-    return;
   }
 
   const attachmentPlan = selectSubmissionAttachments(starter);
@@ -208,7 +211,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<void
     }
   }
 
-  await finishScan(input, parent, {
+  return await finishScan(input, parent, {
     status,
     scope,
     mapUrl: parsed.mapUrl,
@@ -247,7 +250,7 @@ async function finishScan(
     hasCaptureImage?: boolean;
     isMapCatalogSubmission?: boolean;
   }
-): Promise<void> {
+): Promise<ScanSubmissionResult> {
   await applyStatusTag(input.thread, parent, result.status, result.scope);
 
   await input.db
@@ -330,6 +333,12 @@ async function finishScan(
     await input.thread.setLocked(true, "Akron scan flagged this post.");
     await input.thread.setArchived(true, "Akron scan flagged this post.");
   }
+
+  return {
+    scanned: true,
+    status: result.status,
+    message: `Scan completed with status: ${result.status}.`
+  };
 }
 
 function selectSubmissionAttachments(message: Message<true>): AttachmentPlan {

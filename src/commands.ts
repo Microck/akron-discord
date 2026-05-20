@@ -121,8 +121,8 @@ export async function handleCommand(input: {
       return;
     }
 
-    await scanSubmissionThread({ config, db, thread });
-    await interaction.editReply("Rescan queued and completed.");
+    const result = await scanSubmissionThread({ config, db, thread });
+    await interaction.editReply(result.scanned ? result.message : `Rescan skipped: ${result.reason}`);
     return;
   }
 
