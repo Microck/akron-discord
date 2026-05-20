@@ -361,7 +361,7 @@ async function finishScan(
   return {
     scanned: true,
     status: result.status,
-    message: `Scan completed with status: ${result.status}.`
+    message: `Scan completed with status: ${scanValidityLabel(result.status)}.`
   };
 }
 
@@ -613,7 +613,7 @@ function scanValidityLabel(status: ScanStatus): string {
     return "Needs Fix";
   }
   if (status === "Needs Moderator Review") {
-    return "Needs Moderator Review";
+    return "Needs Review";
   }
   return "Flagged";
 }

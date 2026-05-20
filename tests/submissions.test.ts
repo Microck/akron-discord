@@ -173,6 +173,8 @@ describe("submission scan classification", () => {
       isMapCatalogSubmission: true
     }).toJSON();
 
+    expect(embed.title).toBe("Akron Scan: Needs Review");
+    expect(embed.description).toContain("**Result:** Needs Review");
     expect(embed.fields?.some(field => field.name === "What needs attention")).toBe(true);
     expect(JSON.stringify(embed)).not.toContain("NIM review");
   });
