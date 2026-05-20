@@ -132,7 +132,7 @@ Use hyphenated names for multi-word channels.
 | --- | --- | --- | --- |
 | `rules` | Text | Everyone can read | Server rules and submission policy. |
 | `verify` | Text | Unverified users can read | Button verification entrypoint. |
-| `announcements` | Announcement or text | Members can read | Official Akron announcements. |
+| `announcements` | Text | Members can read | Official Akron announcements. |
 | `welcome` | Text | Members can read | Post-verification orientation. |
 | `faq` | Text | Members can read | Common questions and links. |
 | `submission-guide` | Text | Members can read | How to make `.akr` submissions and map captures. |

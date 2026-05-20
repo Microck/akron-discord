@@ -10,7 +10,7 @@ export type RoleKey = (typeof roleSpecs)[number]["key"];
 
 export type ChannelSpec = {
   name: string;
-  type: ChannelType.GuildText | ChannelType.GuildForum | ChannelType.GuildAnnouncement;
+  type: ChannelType.GuildText | ChannelType.GuildForum;
   category: "info" | "community" | "feedback" | "map-catalog" | "general-packs" | "staff";
   visibility: "public" | "member" | "staff" | "admin";
   topic?: string;
@@ -51,7 +51,7 @@ export const channelSpecs: ChannelSpec[] = [
   },
   {
     name: "announcements",
-    type: ChannelType.GuildAnnouncement,
+    type: ChannelType.GuildText,
     category: "info",
     visibility: "member",
     topic: "Official Akron announcements."

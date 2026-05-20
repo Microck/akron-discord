@@ -5,6 +5,7 @@ import {
   type GuildBasedChannel,
   type GuildForumTagData,
   type OverwriteResolvable,
+  OverwriteType,
   PermissionsBitField,
   type TextChannel
 } from "discord.js";
@@ -19,6 +20,8 @@ export type ServerSyncPlan = {
 };
 
 export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
+  await guild.roles.fetch();
+  await guild.channels.fetch();
   const changes: string[] = [];
   const roles = new Map<string, string>();
   for (const role of roleSpecs) {
@@ -58,7 +61,7 @@ export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
     }
 
     if (roles.size === roleSpecs.length && "permissionOverwrites" in existing) {
-      const expected = buildPermissionOverwrites(guild.id, roles, channel);
+      const expected = buildPermissionOverwrites(guild.id, roles, channel, guild.client.user.id);
       if (!permissionOverwritesMatch(existing, expected)) {
         changes.push(`update permissions for ${channel.name}`);
       }
@@ -73,6 +76,8 @@ export async function planServerSync(guild: Guild): Promise<ServerSyncPlan> {
 }
 
 export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<ServerSyncPlan> {
+  await guild.roles.fetch();
+  await guild.channels.fetch();
   const changes: string[] = [];
   const roles = new Map<string, string>();
   for (const role of roleSpecs) {
@@ -110,7 +115,7 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
     }
 
     const parent = categories.get(channelSpec.category);
-    const permissionOverwrites = buildPermissionOverwrites(guild.id, roles, channelSpec);
+    const permissionOverwrites = buildPermissionOverwrites(guild.id, roles, channelSpec, guild.client.user.id);
     const channel = existing ?? await guild.channels.create({
       name: channelSpec.name,
       type: channelSpec.type,
@@ -125,7 +130,11 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase): Promise<
       changes.push(`created channel ${channelSpec.name}`);
     }
 
-    await configureExistingChannel(channel, channelSpec, parent, permissionOverwrites);
+    try {
+      await configureExistingChannel(channel, channelSpec, parent, permissionOverwrites);
+    } catch (error) {
+      changes.push(`skipped ${channelSpec.name}: ${formatDiscordSyncError(error)}`);
+    }
   }
 
   await ensureVerifyMessage(guild, db);
@@ -166,7 +175,7 @@ async function configureExistingChannel(
   }
 }
 
-export function buildPermissionOverwrites(guildId: string, roles: Map<string, string>, spec: ChannelSpec): OverwriteResolvable[] {
+export function buildPermissionOverwrites(guildId: string, roles: Map<string, string>, spec: ChannelSpec, botUserId = ""): OverwriteResolvable[] {
   const admin = roles.get("admin") ?? "";
   const moderator = roles.get("moderator") ?? "";
   const member = roles.get("member") ?? "";
@@ -212,6 +221,23 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
       PermissionsBitField.Flags.ManageThreads
     ]
   };
+  const botAllow = botUserId
+    ? [{
+        id: botUserId,
+        type: OverwriteType.Member,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.SendMessagesInThreads,
+          PermissionsBitField.Flags.CreatePublicThreads,
+          PermissionsBitField.Flags.ManageChannels,
+          PermissionsBitField.Flags.ManageThreads,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.EmbedLinks
+        ]
+      }]
+    : [];
 
   if (spec.name === "verify" || spec.name === "rules") {
     return [
@@ -222,27 +248,28 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
       },
       memberReadAllow,
       moderatorAllow,
-      adminAllow
+      adminAllow,
+      ...botAllow
     ];
   }
 
   if (spec.visibility === "public") {
-    return [memberPostAllow, moderatorAllow, adminAllow];
+    return [memberPostAllow, moderatorAllow, adminAllow, ...botAllow];
   }
 
   if (spec.category === "info") {
-    return [everyoneDeny, memberReadAllow, moderatorAllow, adminAllow];
+    return [everyoneDeny, memberReadAllow, moderatorAllow, adminAllow, ...botAllow];
   }
 
   if (spec.visibility === "member") {
-    return [everyoneDeny, memberPostAllow, moderatorAllow, adminAllow];
+    return [everyoneDeny, memberPostAllow, moderatorAllow, adminAllow, ...botAllow];
   }
 
   if (spec.visibility === "staff") {
-    return [everyoneDeny, moderatorAllow, adminAllow];
+    return [everyoneDeny, moderatorAllow, adminAllow, ...botAllow];
   }
 
-  return [everyoneDeny, adminAllow];
+  return [everyoneDeny, adminAllow, ...botAllow];
 }
 
 function buildForumTags(spec: ChannelSpec): GuildForumTagData[] | undefined {
@@ -384,11 +411,21 @@ function describeChannelType(type: ChannelType): string {
   switch (type) {
     case ChannelType.GuildForum:
       return "forum";
-    case ChannelType.GuildAnnouncement:
-      return "announcement";
     case ChannelType.GuildText:
       return "text";
     default:
       return `type-${type}`;
   }
+}
+
+function formatDiscordSyncError(error: unknown): string {
+  const code = (error as { code?: number | string }).code;
+  const message = error instanceof Error ? error.message : String(error);
+  if (code === 50001) {
+    return "bot is missing channel access";
+  }
+  if (code === 50013) {
+    return "bot is missing permissions or role hierarchy";
+  }
+  return message;
 }
