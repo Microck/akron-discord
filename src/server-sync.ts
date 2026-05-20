@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import {
+  AttachmentBuilder,
   ChannelType,
   type ForumChannel,
   type Guild,
@@ -501,9 +502,7 @@ async function ensureForumExampleThreads(guild: Guild, db: AkronDatabase): Promi
       continue;
     }
 
-    const message = {
-      embeds: [spec.embed]
-    };
+    const message = buildForumExampleMessage(spec);
     const setting = await db.query.botSettings.findFirst({ where: eq(botSettings.key, spec.settingKey) });
     if (setting) {
       const existing = await fetchStoredExampleThread(guild, forum.id, setting.value);
@@ -511,7 +510,7 @@ async function ensureForumExampleThreads(guild: Guild, db: AkronDatabase): Promi
         await existing.setName(spec.threadTitle, "Akron server sync");
         const starter = await existing.fetchStarterMessage();
         if (starter) {
-          await starter.edit(message);
+          await starter.edit({ ...message, attachments: [], embeds: [] });
         }
         await cleanExampleThread(existing);
         continue;
@@ -526,6 +525,33 @@ async function ensureForumExampleThreads(guild: Guild, db: AkronDatabase): Promi
     await cleanExampleThread(thread);
     await upsertSetting(db, spec.settingKey, thread.id);
   }
+}
+
+function buildForumExampleMessage(spec: ReturnType<typeof buildForumExampleSpecs>[number]) {
+  const files = [];
+  if (spec.includeAkr) {
+    files.push(new AttachmentBuilder(buildExampleAkrBytes(), { name: "example-empty.akr" }));
+  }
+  if (spec.includeCapture) {
+    files.push(new AttachmentBuilder(buildPlaceholderCaptureBytes(), { name: "forsaken-city-placeholder-capture.png" }));
+  }
+  return { content: spec.content, files };
+}
+
+function buildExampleAkrBytes(): Buffer {
+  return Buffer.from([
+    "AKRON EXAMPLE PLACEHOLDER",
+    "This is intentionally not an empty file.",
+    "Create a real scoped .akr export from Akron before posting a submission.",
+    "Default example level: Forsaken City, Chapter 1."
+  ].join("\n"));
+}
+
+function buildPlaceholderCaptureBytes(): Buffer {
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAASwAAACWCAIAAADrOSKFAAABfklEQVR4nO3UMQ0AIBDAMMC/5+ONAvZoFSzZnZkZuAvwWwIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAQeAgcBA4CBwEDgIHgYPAAW7aAqFRf0gTAAAAAElFTkSuQmCC",
+    "base64"
+  );
 }
 
 async function cleanExampleThread(thread: PublicThreadChannel): Promise<void> {

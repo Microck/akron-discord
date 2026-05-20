@@ -109,55 +109,46 @@ export type ForumExampleSpec = {
   channelName: string;
   settingKey: string;
   threadTitle: string;
-  embed: EmbedBuilder;
+  content: string;
+  includeAkr: boolean;
+  includeCapture: boolean;
 };
 
 export function buildForumExampleSpecs(): ForumExampleSpec[] {
   return [
-    submissionExample("startpos-packs", "StartPos submission", [
-      "Map: https://gamebanana.com/mods/150453",
-      "Description: Start positions for lobby practice and common room resets.",
-      "Attachments: lobby-startpos.akr, lobby-startpos-capture.png"
-    ]),
-    submissionExample("auto-kill-areas", "Auto Kill submission", [
-      "Map: https://gamebanana.com/mods/150453",
-      "Description: Auto Kill areas for fast reset practice in the hard rooms.",
-      "Attachments: hard-rooms-auto-kill.akr, hard-rooms-capture.png"
-    ]),
-    submissionExample("auto-deafen-areas", "Auto Deafen submission", [
-      "Map: https://gamebanana.com/mods/150453",
-      "Description: Auto Deafen areas around music-heavy practice rooms.",
-      "Attachments: music-rooms-auto-deafen.akr, music-rooms-capture.png"
-    ]),
-    submissionExample("keybind-packs", "Keybind submission", [
-      "Description: Practice keybinds for quick restart, capture, and marker editing.",
-      "Attachments: practice-keybinds.akr"
-    ]),
-    submissionExample("hud-layouts", "HUD layout submission", [
-      "Description: Compact HUD layout for recording and room practice.",
-      "Attachments: compact-hud.akr, compact-hud-preview.png"
-    ]),
-    submissionExample("audio-packs", "Audio pack submission", [
-      "Description: Audio settings tuned for practice streams.",
-      "Attachments: stream-audio.akr"
-    ]),
-    submissionExample("recorder-packs", "Recorder pack submission", [
-      "Description: Recorder settings for lightweight 1080p clips.",
-      "Attachments: 1080p-recorder.akr"
-    ]),
+    submissionExample("startpos-packs", "StartPos submission", "StartPos", true),
+    submissionExample("auto-kill-areas", "Auto Kill submission", "Auto Kill", true),
+    submissionExample("auto-deafen-areas", "Auto Deafen submission", "Auto Deafen", true),
+    submissionExample("keybind-packs", "Keybind submission", "Keybinds", false),
+    submissionExample("hud-layouts", "HUD layout submission", "HUD layout", true),
+    submissionExample("audio-packs", "Audio pack submission", "Audio settings", false),
+    submissionExample("recorder-packs", "Recorder pack submission", "Recorder settings", false),
     feedbackExample("questions", "Question", [
+      "Template",
+      "Title: <short question>",
+      "Body: What are you trying to do? What did you try? What version/build are you on?",
+      "",
+      "Example",
       "Title: How do I export only StartPos?",
-      "Body: Say what you tried, your Akron version, and what part is confusing."
+      "Body: I am practicing Forsaken City, Chapter 1. I can export a profile, but I only want the StartPos section. Which export option should I use?"
     ]),
     feedbackExample("issues", "Issue report", [
-      "Title: StartPos export fails on map X",
-      "Body: Include what happened, what you expected, Akron version, logs/screenshots, and reproduction steps.",
-      "GitHub: Prefer opening this directly on GitHub when you can."
+      "Template",
+      "Title: <what broke>",
+      "Body: What happened? What did you expect? How can staff reproduce it? Include Akron version, logs, screenshots, or crash text when useful.",
+      "",
+      "Example",
+      "Title: StartPos export fails on Forsaken City",
+      "Body: On Akron 0.0.0, exporting a StartPos pack for Forsaken City creates no file. Expected a non-empty .akr export. Steps: open Chapter 1, add one StartPos marker, export StartPos."
     ]),
     feedbackExample("suggestions", "Suggestion", [
+      "Template",
+      "Title: <what should Akron add or change?>",
+      "Body: What problem does this solve? What behavior do you want? Add examples or mockups if useful.",
+      "",
+      "Example",
       "Title: Add a preview before publishing a capture",
-      "Body: Describe the problem, proposed behavior, and examples or mockups.",
-      "GitHub: Prefer opening this directly on GitHub when you can."
+      "Body: Before uploading a map capture, show a small preview so I can confirm StartPos markers and room context are visible."
     ])
   ];
 }
@@ -192,16 +183,30 @@ export function feedbackForumGuidelines(kind: "issue" | "suggestion"): string {
   ].join("\n");
 }
 
-function submissionExample(channelName: string, label: string, lines: string[]): ForumExampleSpec {
+function submissionExample(channelName: string, label: string, packType: string, includeCapture: boolean): ForumExampleSpec {
   return {
     channelName,
     settingKey: `thread.example.${channelName}.id`,
     threadTitle: `Example: ${label}`,
-    embed: buildExampleEmbed(label, [
-      "Use this shape for your own post. Replace the text and attach your real files.",
+    content: [
+      "Template",
+      "Title: <short pack name>",
+      "Level: <level or map name>",
+      "Map: <supported GameBanana map link for modded maps, or vanilla Celeste chapter name>",
+      "Description: <what the pack contains and when someone should use it>",
+      "Attachments: <one scoped .akr file>" + (includeCapture ? ", <optional capture image>" : ""),
       "",
-      ...lines
-    ])
+      "Example",
+      `Title: Forsaken City ${packType} Pack`,
+      "Level: Forsaken City (Chapter 1)",
+      "Map: Vanilla Celeste Chapter 1",
+      `Description: Example ${packType.toLowerCase()} data for practicing the first chapter of Celeste. Replace this with the rooms, markers, or settings your pack actually covers.`,
+      "Attachments: example-empty.akr" + (includeCapture ? ", forsaken-city-placeholder-capture.png" : ""),
+      "",
+      "The attached .akr is a non-empty placeholder only. Do not repost it as a real submission."
+    ].join("\n"),
+    includeAkr: true,
+    includeCapture
   };
 }
 
@@ -210,17 +215,8 @@ function feedbackExample(channelName: string, label: string, lines: string[]): F
     channelName,
     settingKey: `thread.example.${channelName}.id`,
     threadTitle: `Example: ${label}`,
-    embed: buildExampleEmbed(label, [
-      "Use one focused forum post. Keep follow-up details in the thread.",
-      "",
-      ...lines
-    ])
+    content: lines.join("\n"),
+    includeAkr: false,
+    includeCapture: false
   };
-}
-
-function buildExampleEmbed(label: string, lines: string[]): EmbedBuilder {
-  return new EmbedBuilder()
-    .setTitle(`Example ${label}`)
-    .setColor(akronYellow)
-    .setDescription(lines.join("\n"));
 }
