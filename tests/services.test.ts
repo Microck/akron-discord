@@ -172,6 +172,7 @@ describe("FAQ embed", () => {
     expect(fieldText).toContain("public Discord catalog only accepts scoped packs");
     expect(fieldText).toContain("The default overlay bind is `Tab`");
     expect(fieldText).toContain("Open the target map first, refresh the catalog");
+    expect(fieldText).not.toContain("Why is a feature blocked or marked?");
   });
 });
 

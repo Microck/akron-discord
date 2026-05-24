@@ -102,7 +102,6 @@ export function buildFaqEmbed(config?: AppConfig): EmbedBuilder {
       { name: "Can I post whole profiles?", value: "Akron can export and import whole `.akr` profiles for backup or direct sharing, but the public Discord catalog only accepts scoped packs such as StartPos, Auto Kill, Auto Deafen, Keybinds, HUD, Audio, and Recorder." },
       { name: "Where do community packs show up?", value: "Map-specific catalog packs appear in Akron's Community Packs browser for the current map. Discord-only pack forums stay in Discord unless staff publish them." },
       { name: "How do I open Akron?", value: "The default overlay bind is `Tab`. If it does not open, check Everest controls for Akron actions and look for bind conflicts with Celeste or other mods." },
-      { name: "Why is a feature blocked or marked?", value: "Akron follows the active ruleset. Check the ruleset stack and the feature's policy badge, then switch to `Practice` or `Sandbox` for room-lab tools that should mark attempts." },
       { name: "Why are Community Packs empty?", value: "Open the target map first, refresh the catalog, then check category filters, search text, catalog URL, and whether the pack's map SID matches the current map." },
       { name: "Why did my post get flagged?", value: "Staff can review locked flagged posts. The bot preserves the scanned file for evidence." }
     );
