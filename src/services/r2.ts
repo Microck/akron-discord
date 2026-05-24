@@ -72,7 +72,7 @@ export function publicAssetPath(key: string): string {
     return "/submissions/" + encodePathSegments(parts.slice(1).join("/"));
   }
 
-  return "/assets/" + encodePathSegments(key);
+  return "/r2-assets/" + encodePathSegments(key);
 }
 
 function encodePathSegments(path: string): string {

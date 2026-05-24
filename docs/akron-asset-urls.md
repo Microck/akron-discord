@@ -15,7 +15,7 @@ The Vercel website owns `akron.micr.dev`. Keep normal website routes in the webs
 /catalog/*
 /maps/*
 /submissions/*
-/assets/*
+/r2-assets/*
 ```
 
 ## Bot Config
@@ -75,7 +75,7 @@ Add rewrites to the future Akron website's `vercel.json`. Replace `<MINTLIFY_SUB
       "destination": "<R2_PUBLIC_BASE_URL>/submissions/:path*"
     },
     {
-      "source": "/assets/:path*",
+      "source": "/r2-assets/:path*",
       "destination": "<R2_PUBLIC_BASE_URL>/:path*"
     }
   ]
@@ -83,3 +83,5 @@ Add rewrites to the future Akron website's `vercel.json`. Replace `<MINTLIFY_SUB
 ```
 
 DNS cannot send `/docs` to Mintlify directly because DNS only routes hostnames. Vercel must receive `akron.micr.dev` first and rewrite `/docs` to Mintlify.
+
+Do not route `/assets/*` to R2. The Akron website uses that prefix for its own landing-page images and icons.

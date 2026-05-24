@@ -45,6 +45,8 @@ describe("public asset URLs", () => {
     expect(publicAssetPath("packs/spring-collab/my-pack.akr")).toBe("/maps/spring-collab/my-pack.akr");
     expect(publicAssetPath("captures/spring-collab/my-pack.webp")).toBe("/maps/spring-collab/my-pack/capture.webp");
     expect(publicAssetPath("submissions/startpos-packs/123/abc.akr")).toBe("/submissions/startpos-packs/123/abc.akr");
+    expect(publicAssetPath("catalog/backups/index-2026-05-20T12-34-56Z.json"))
+      .toBe("/r2-assets/catalog/backups/index-2026-05-20T12-34-56Z.json");
   });
 
   it("uses the Akron public asset base URL when configured", () => {
