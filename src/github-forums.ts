@@ -4,13 +4,25 @@ import {
   EmbedBuilder,
   type AnyThreadChannel,
   type ForumChannel,
+  type Message,
   type TextChannel
 } from "discord.js";
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
 import { githubLinks } from "./db/schema.js";
 import { logAudit } from "./services/audit.js";
-import { syncForumPostToGithub, type GithubIssueKind } from "./services/github-sync.js";
+import {
+  syncForumPostToGithub,
+  type GithubAttachment,
+  type GithubConversationMessage,
+  type GithubIssueKind
+} from "./services/github-sync.js";
+
+export type GithubForumSyncResult =
+  | { status: "created"; issueNumber: number; issueUrl: string }
+  | { status: "updated"; issueNumber: number; issueUrl: string }
+  | { status: "already-linked"; issueNumber: number; issueUrl: string }
+  | { status: "skipped"; reason: string };
 
 export function githubIssueKindForForum(name: string): GithubIssueKind | null {
   if (name === "issues") {
@@ -22,37 +34,49 @@ export function githubIssueKindForForum(name: string): GithubIssueKind | null {
   return null;
 }
 
+export function githubIssueKindForForumSync(name: string, allowUnsupportedForum: boolean): GithubIssueKind | null {
+  return githubIssueKindForForum(name) ?? (allowUnsupportedForum ? "issue" : null);
+}
+
 export async function syncGithubForumThread(input: {
   config: AppConfig;
   db: AkronDatabase;
   thread: AnyThreadChannel;
-}): Promise<void> {
-  if (input.thread.ownerId === input.thread.client.user.id) {
-    return;
+  allowBotAuthored?: boolean;
+  allowUnsupportedForum?: boolean;
+  updateExisting?: boolean;
+}): Promise<GithubForumSyncResult> {
+  if (!input.allowBotAuthored && input.thread.ownerId === input.thread.client.user.id) {
+    return { status: "skipped", reason: "automatic sync skips bot-authored forum posts" };
   }
 
   const parent = input.thread.parent;
   if (!parent || parent.type !== ChannelType.GuildForum) {
-    return;
+    return { status: "skipped", reason: "thread is not inside a forum channel" };
   }
 
-  const kind = githubIssueKindForForum(parent.name);
+  const kind = githubIssueKindForForumSync(parent.name, input.allowUnsupportedForum ?? false);
   if (!kind) {
-    return;
+    return { status: "skipped", reason: "parent forum is not `issues` or `suggestions`" };
   }
 
   const existing = await input.db.query.githubLinks.findFirst({ where: eq(githubLinks.discordThreadId, input.thread.id) });
-  if (existing) {
+  if (existing && !input.updateExisting) {
     await applyGithubTags(input.thread, parent);
-    return;
+    return {
+      status: "already-linked",
+      issueNumber: existing.githubIssueNumber,
+      issueUrl: existing.githubIssueUrl
+    };
   }
 
   const starter = await input.thread.fetchStarterMessage();
   if (!starter) {
     await input.thread.send({ embeds: [buildGithubSyncEmbed("Needs moderator review: could not fetch starter message.")] });
-    return;
+    return { status: "skipped", reason: "could not fetch starter message" };
   }
 
+  const threadContext = await collectGithubThreadContext(input.thread, starter);
   let result: { issueNumber: number; issueUrl: string };
   try {
     result = await syncForumPostToGithub(input.config, input.db, {
@@ -60,7 +84,10 @@ export async function syncGithubForumThread(input: {
       discordUrl: input.thread.url,
       kind,
       title: input.thread.name,
-      body: starter.content
+      body: starter.content,
+      attachments: threadContext.attachments,
+      conversation: threadContext.conversation,
+      updateExisting: input.updateExisting
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub sync failed.";
@@ -88,6 +115,40 @@ export async function syncGithubForumThread(input: {
     details: { issueNumber: result.issueNumber, issueUrl: result.issueUrl, kind }
   });
   await sendGithubLog(input.thread, `Synced ${kind} ${input.thread.url} to ${result.issueUrl}`);
+  return {
+    status: existing ? "updated" : "created",
+    issueNumber: result.issueNumber,
+    issueUrl: result.issueUrl
+  };
+}
+
+async function collectGithubThreadContext(
+  thread: AnyThreadChannel,
+  starter: Message
+): Promise<{ attachments: GithubAttachment[]; conversation: GithubConversationMessage[] }> {
+  const messages = await thread.messages.fetch({ after: starter.id, limit: 100 });
+  const conversation = Array.from(messages.values())
+    .filter(message => message.id !== starter.id && !message.author.bot)
+    .sort((left, right) => left.createdTimestamp - right.createdTimestamp)
+    .map(message => ({
+      author: message.member?.displayName ?? message.author.username,
+      createdUtc: message.createdAt.toISOString(),
+      body: message.cleanContent || message.content,
+      attachments: githubAttachmentsFromMessage(message)
+    }));
+
+  return {
+    attachments: githubAttachmentsFromMessage(starter),
+    conversation
+  };
+}
+
+function githubAttachmentsFromMessage(message: Message): GithubAttachment[] {
+  return Array.from(message.attachments.values()).map(attachment => ({
+    name: attachment.name ?? "attachment",
+    url: attachment.url,
+    contentType: attachment.contentType ?? ""
+  }));
 }
 
 export async function applyGithubTags(thread: AnyThreadChannel, parent: ForumChannel): Promise<void> {

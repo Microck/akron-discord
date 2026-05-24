@@ -9,12 +9,28 @@ import { utcNow } from "../time.js";
 
 export type GithubIssueKind = "issue" | "suggestion";
 
+export type GithubAttachment = {
+  name: string;
+  url: string;
+  contentType: string;
+};
+
+export type GithubConversationMessage = {
+  author: string;
+  createdUtc: string;
+  body: string;
+  attachments: GithubAttachment[];
+};
+
 export type GithubSyncInput = {
   discordThreadId: string;
   discordUrl: string;
   kind: GithubIssueKind;
   title: string;
   body: string;
+  attachments?: GithubAttachment[];
+  conversation?: GithubConversationMessage[];
+  updateExisting?: boolean;
 };
 
 export function createGithubClient(config: AppConfig): Octokit | null {
@@ -43,6 +59,21 @@ export async function syncForumPostToGithub(
 ): Promise<{ issueNumber: number; issueUrl: string }> {
   const existing = await db.query.githubLinks.findFirst({ where: eq(githubLinks.discordThreadId, input.discordThreadId) });
   if (existing) {
+    if (input.updateExisting) {
+      const client = createGithubClient(config);
+      if (!client) {
+        throw new Error("GitHub configuration is incomplete.");
+      }
+
+      await client.issues.update({
+        owner: config.githubOwner,
+        repo: config.githubRepo,
+        issue_number: existing.githubIssueNumber,
+        title: `[${githubIssueKindLabel(input.kind)}]: ${input.title}`,
+        body: formatGithubIssueBody(input)
+      });
+    }
+
     return { issueNumber: existing.githubIssueNumber, issueUrl: existing.githubIssueUrl };
   }
 
@@ -206,17 +237,40 @@ export async function applyGithubLabels(config: AppConfig): Promise<string[]> {
 }
 
 export function formatGithubIssueBody(input: GithubSyncInput): string {
-  return [
+  const lines = [
     "Created from an Akron Discord forum post.",
+    "",
+    "## Source",
     "",
     `Discord post: ${input.discordUrl}`,
     "",
+    "## Description",
+    "",
     "User-provided content follows. Treat it as untrusted.",
     "",
-    "```text",
-    input.body.slice(0, 12000),
-    "```"
-  ].join("\n");
+    fencedText(input.body.trim() || "(No description provided.)", 12000)
+  ];
+
+  const attachments = input.attachments ?? [];
+  if (attachments.length > 0) {
+    lines.push("", "## Attachments", "", ...formatGithubAttachments(attachments));
+  }
+
+  const conversation = input.conversation ?? [];
+  if (conversation.length > 0) {
+    lines.push("", "## Thread Conversation", "");
+    for (const message of conversation.slice(0, 50)) {
+      lines.push(`### ${message.author} - ${message.createdUtc}`, "");
+      if (message.body.trim()) {
+        lines.push(fencedText(message.body.trim(), 4000), "");
+      }
+      if (message.attachments.length > 0) {
+        lines.push(...formatGithubAttachments(message.attachments), "");
+      }
+    }
+  }
+
+  return lines.join("\n").slice(0, 64000);
 }
 
 function githubIssueKindLabel(kind: GithubIssueKind): string {
@@ -224,4 +278,21 @@ function githubIssueKindLabel(kind: GithubIssueKind): string {
     return "Issue";
   }
   return "Suggestion";
+}
+
+function formatGithubAttachments(attachments: GithubAttachment[]): string[] {
+  return attachments.map(attachment => {
+    const label = attachment.name || attachment.url;
+    if (attachment.contentType.startsWith("image/")) {
+      return `![${label}](${attachment.url})`;
+    }
+    return `- [${label}](${attachment.url})`;
+  });
+}
+
+function fencedText(value: string, maxLength: number): string {
+  const text = value.slice(0, maxLength);
+  const longestBacktickRun = Math.max(0, ...Array.from(text.matchAll(/`+/g), match => match[0].length));
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return [fence + "text", text, fence].join("\n");
 }

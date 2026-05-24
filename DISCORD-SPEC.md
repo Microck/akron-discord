@@ -385,6 +385,12 @@ Manual sync commands:
 
 These commands require `Moderator` or `Admin`.
 
+`/sync-issue` reports whether it created a GitHub issue, found an existing link, or skipped the post with a specific reason. Manual sync is allowed for bot-authored posts and any forum channel. Posts outside `issues` and `suggestions` sync as normal GitHub issues. Automatic background sync skips bot-authored posts and only syncs `issues` and `suggestions` to avoid creating issues from unrelated generated posts.
+
+GitHub issues created from Discord forum posts separate the forum post title from the starter description. The body includes the source Discord link, the starter message description, starter attachments, and up to the latest 100 non-bot thread replies in chronological order. Image attachments are embedded with Markdown image links; other attachments are linked by filename.
+
+Manual `/sync-issue` updates the linked GitHub issue body when a link already exists, so moderators can re-run it after a Discord conversation adds useful context.
+
 The first implementation should support Discord-to-GitHub creation and status embeds. GitHub issue sync is one-way for v1. If a GitHub issue is closed, labeled, or reopened directly on GitHub, the bot does not update Discord automatically. Moderators can update Discord tags manually or use the bot's admin commands.
 
 ## File Limits

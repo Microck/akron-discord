@@ -9,7 +9,12 @@ import {
 } from "discord.js";
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
-import { applyGithubTags, githubIssueKindForForum, syncGithubForumThread } from "./github-forums.js";
+import {
+  applyGithubTags,
+  githubIssueKindForForum,
+  syncGithubForumThread,
+  type GithubForumSyncResult
+} from "./github-forums.js";
 import { requireAdmin, requireModerator } from "./permissions.js";
 import { logAudit } from "./services/audit.js";
 import { applyGithubLabels, closeSyncedGithubIssue, linkGithubIssue, planGithubLabels, unlinkGithubIssue } from "./services/github-sync.js";
@@ -134,12 +139,19 @@ export async function handleCommand(input: {
     await interaction.deferReply({ ephemeral: true });
     const thread = await resolveThread(interaction, client);
     if (!thread) {
-      await interaction.editReply("Run this inside an issues/suggestions forum thread or pass `thread-id`.");
+      await interaction.editReply("Run this inside a forum thread or pass `thread-id`.");
       return;
     }
 
-    await syncGithubForumThread({ config, db, thread });
-    await interaction.editReply("GitHub sync completed.");
+    const result = await syncGithubForumThread({
+      config,
+      db,
+      thread,
+      allowBotAuthored: true,
+      allowUnsupportedForum: true,
+      updateExisting: true
+    });
+    await interaction.editReply(formatGithubForumSyncResult(result));
     return;
   }
 
@@ -284,6 +296,19 @@ function buildListEmbed(title: string, items: string[]): EmbedBuilder {
     .setTitle(title)
     .setColor(0xc42a30)
     .setDescription(items.map(item => `- ${item}`).join("\n").slice(0, 4000));
+}
+
+export function formatGithubForumSyncResult(result: GithubForumSyncResult): string {
+  if (result.status === "created") {
+    return `Created GitHub issue #${result.issueNumber}: ${result.issueUrl}`;
+  }
+  if (result.status === "updated") {
+    return `Updated GitHub issue #${result.issueNumber}: ${result.issueUrl}`;
+  }
+  if (result.status === "already-linked") {
+    return `Already linked to GitHub issue #${result.issueNumber}: ${result.issueUrl}`;
+  }
+  return `GitHub sync skipped: ${result.reason}.`;
 }
 
 async function applyClosedGithubTag(thread: AnyThreadChannel): Promise<void> {
