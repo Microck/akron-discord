@@ -3,7 +3,7 @@ import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
-import { githubIssuesMarkdownLink } from "../src/content.js";
+import { buildFaqEmbed, githubIssuesMarkdownLink } from "../src/content.js";
 import { githubIssueKindForForum, githubIssueKindForForumSync } from "../src/github-forums.js";
 import { formatGithubForumSyncResult } from "../src/commands.js";
 import type { AppConfig } from "../src/config.js";
@@ -158,6 +158,20 @@ describe("GitHub issue body", () => {
       status: "skipped",
       reason: "parent forum is not `issues` or `suggestions`"
     })).toBe("GitHub sync skipped: parent forum is not `issues` or `suggestions`.");
+  });
+});
+
+describe("FAQ embed", () => {
+  it("answers common Discord questions from current Akron docs", () => {
+    const faq = buildFaqEmbed(config({ githubOwner: "Microck", githubRepo: "akron" })).toJSON();
+    const fields = faq.fields ?? [];
+    const fieldText = fields.map(field => `${field.name}\n${field.value}`).join("\n\n");
+
+    expect(faq.description).toBeUndefined();
+    expect(fieldText).toContain("Akron can export and import whole `.akr` profiles");
+    expect(fieldText).toContain("public Discord catalog only accepts scoped packs");
+    expect(fieldText).toContain("The default overlay bind is `Tab`");
+    expect(fieldText).toContain("Open the target map first, refresh the catalog");
   });
 });
 
