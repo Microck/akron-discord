@@ -96,7 +96,6 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
   let scannedArchiveKey = "";
   let scannedArchiveUrl = "";
   let scannedArchiveSha256 = "";
-  let r2Client: S3Client | undefined;
 
   if (!attachmentPlan.akr) {
     status = "Needs Fix";
@@ -117,29 +116,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
   if (attachmentPlan.akr) {
     try {
       akrBytes = await downloadAttachment(attachmentPlan.akr, akrMaxBytes);
-      r2Client = input.r2Client ?? createR2Client(input.config);
-      try {
-        const scannedArchive = await archiveScannedAkr(input.config, r2Client, {
-          parentName: parent.name,
-          threadId: input.thread.id,
-          bytes: akrBytes
-        });
-        scannedArchiveKey = scannedArchive.key;
-        scannedArchiveUrl = scannedArchive.url;
-        scannedArchiveSha256 = scannedArchive.sha256;
-        r2PackKey = scannedArchiveKey;
-      } catch (error) {
-        status = "Needs Moderator Review";
-        const reason = error instanceof Error ? error.message : "Failed to archive scanned .akr to R2.";
-        reasons.push("Failed to archive scanned .akr to R2; publication is blocked until staff review.");
-        await logAudit(input.db, {
-          actorId: "bot",
-          action: "submission_archive_failed",
-          target: input.thread.id,
-          details: { threadUrl: input.thread.url, reason }
-        });
-        await sendLog(input.thread.guild, "bot-alerts", `Submission archive failed for ${input.thread.url}: ${reason}`);
-      }
+      scannedArchiveSha256 = hashAkrBytes(akrBytes);
       const archive = await validateAkrArchive(akrBytes);
       archiveSection = archive.section;
       archiveMapSid = archive.mapSid ?? "";
@@ -195,7 +172,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
               fileName: attachmentPlan.image.name
             })
           : undefined;
-        const result = await publishCatalogEntry(input.config, input.db, r2Client ?? input.r2Client ?? createR2Client(input.config), {
+        const result = await publishCatalogEntry(input.config, input.db, input.r2Client ?? createR2Client(input.config), {
           discordThreadId: input.thread.id,
           title: input.thread.name,
           description: parsed.description,
@@ -210,6 +187,8 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
         archiveMapSid = mapIdentity.mapSid;
         r2PackKey = result.packKey;
         r2ImageKey = result.imageKey;
+        scannedArchiveKey = result.packKey;
+        scannedArchiveUrl = result.entry.downloadUrl;
         catalogPublished = true;
       } catch (error) {
         status = "Needs Moderator Review";
@@ -223,6 +202,31 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
         await sendAuditLog(input.thread.guild, `Catalog publish failed for ${input.thread.url}: ${reasons.at(-1)}`);
         await sendLog(input.thread.guild, "bot-alerts", `Catalog publish failed for ${input.thread.url}: ${reasons.at(-1)}`);
       }
+    }
+  }
+
+  if (akrBytes && status === "Published" && !scannedArchiveUrl) {
+    try {
+      const scannedArchive = await archiveScannedAkr(input.config, input.r2Client ?? createR2Client(input.config), {
+        parentName: parent.name,
+        threadId: input.thread.id,
+        bytes: akrBytes
+      });
+      scannedArchiveKey = scannedArchive.key;
+      scannedArchiveUrl = scannedArchive.url;
+      scannedArchiveSha256 = scannedArchive.sha256;
+      r2PackKey = scannedArchiveKey;
+    } catch (error) {
+      status = "Needs Moderator Review";
+      const reason = error instanceof Error ? error.message : "Failed to archive approved .akr to R2.";
+      reasons.push("Failed to archive approved .akr to R2; publication is blocked until staff review.");
+      await logAudit(input.db, {
+        actorId: "bot",
+        action: "submission_archive_failed",
+        target: input.thread.id,
+        details: { threadUrl: input.thread.url, reason }
+      });
+      await sendLog(input.thread.guild, "bot-alerts", `Approved submission archive failed for ${input.thread.url}: ${reason}`);
     }
   }
 
@@ -550,7 +554,7 @@ export function buildScanEmbed(
   } else if (archive.scannedArchiveSha256 && status === "Flagged") {
     embed.addFields({
       name: "Scanned File",
-      value: "Backed up for staff review. SHA-256: `" + archive.scannedArchiveSha256 + "`"
+      value: "Not uploaded to public R2. SHA-256: `" + archive.scannedArchiveSha256 + "`"
     });
   }
 
@@ -586,7 +590,7 @@ function buildScanChecklist(
     `**Result:** ${scanValidityLabel(status)}`,
     "",
     `${checkbox(Boolean(archive.hasAkrAttachment))} `.concat("One `.akr` attachment found"),
-    `${checkbox(Boolean(archive.scannedArchiveSha256))} `.concat("Exact `.akr` archived before feedback"),
+    `${checkbox(Boolean(archive.scannedArchiveUrl))} `.concat("Approved public `.akr` stored"),
     mapRequired
       ? `${checkbox(Boolean(archive.mapUrl))} Supported map link included`
       : "[-] Map link not required for this forum",
@@ -698,7 +702,7 @@ async function archiveScannedAkr(
     bytes: Buffer;
   }
 ): Promise<{ key: string; url: string; sha256: string }> {
-  const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+  const sha256 = hashAkrBytes(input.bytes);
   const key = buildScannedArchiveKey(input.parentName, input.threadId, sha256);
   const url = await putR2Object(config, client, {
     key,
@@ -706,6 +710,10 @@ async function archiveScannedAkr(
     contentType: "application/octet-stream"
   });
   return { key, url, sha256 };
+}
+
+function hashAkrBytes(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export function buildScannedArchiveKey(parentName: string, threadId: string, sha256: string): string {

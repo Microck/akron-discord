@@ -77,7 +77,9 @@ Create one private bucket for catalog archives and optimized map captures. Enabl
 
 Set `AKRON_PUBLIC_ASSET_BASE_URL=https://akron.micr.dev` so Discord embeds and catalog entries use branded URLs. The Vercel website should proxy the reserved asset paths to R2 and rewrite `/docs` to Mintlify. See `docs/akron-asset-urls.md`.
 
-The bot uploads through the S3-compatible R2 API, so it also needs an R2 API token with Object Read & Write access scoped to that bucket. Copy the token's Access Key ID and Secret Access Key into the local deployment `.env`. Cloudflare only shows the secret once.
+The bot uploads through the S3-compatible R2 API, so it also needs an R2 API token with Object Read & Write access scoped to that bucket. Copy the token's Access Key ID and Secret Access Key into the local deployment `.env`. Cloudflare only shows the secret once. Do not expose this token to Discord users or the website; `akron.micr.dev` should be public-read only.
+
+Submitted `.akr` files are scanned in memory first. The bot only writes approved public downloads to R2. Flagged or review-blocked submissions stay in Discord and are not mirrored to the public bucket.
 
 ## Discord App Requirements
 

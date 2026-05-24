@@ -165,6 +165,7 @@ describe("submission scan classification", () => {
     expect(embed.thumbnail?.url).toBe("attachment://akronleaf.png");
     expect(embed.description).toContain("**Result:** Valid");
     expect(embed.description).toContain("[x] One `.akr` attachment found");
+    expect(embed.description).toContain("[x] Approved public `.akr` stored");
     expect(embed.description).toContain("[x] Published to the Akron catalog");
     expect(embed.fields?.some(field => field.name === "Scanned File")).toBe(true);
   });
@@ -185,11 +186,15 @@ describe("submission scan classification", () => {
   it("uses the flagged leaf and red color for flagged scan feedback", () => {
     const embed = buildScanEmbed("Flagged", "StartPos", ["Archive contains an unsafe path."], {
       hasAkrAttachment: true,
+      scannedArchiveSha256: "b".repeat(64),
       isMapCatalogSubmission: true
     }).toJSON();
 
     expect(embed.color).toBe(0xcf222e);
     expect(embed.thumbnail?.url).toBe("attachment://akronleaf-flagged.png");
+    expect(embed.description).toContain("[ ] Approved public `.akr` stored");
+    expect(embed.fields?.find(field => field.name === "Scanned File")?.value)
+      .toContain("Not uploaded to public R2.");
   });
 
   it("keeps AI review issues under the generic attention label", () => {
