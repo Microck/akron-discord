@@ -376,6 +376,7 @@ Manual sync commands:
 
 ```text
 /sync-issue
+/solved
 /close-synced-issue
 /link-issue
 /unlink-issue
@@ -384,6 +385,8 @@ Manual sync commands:
 ```
 
 These commands require `Moderator` or `Admin`.
+
+`/solved` is the exception: the thread author can also run it. The command applies the forum's completion tag, such as `Solved`, `Answered`, `GitHub Closed`, or `Published`, then archives the forum thread.
 
 `/sync-issue` reports whether it created a GitHub issue, found an existing link, or skipped the post with a specific reason. Manual sync is allowed for bot-authored posts and any forum channel. Posts outside `issues` and `suggestions` sync as normal GitHub issues. Automatic background sync skips bot-authored posts and only syncs `issues` and `suggestions` to avoid creating issues from unrelated generated posts.
 

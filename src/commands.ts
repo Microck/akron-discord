@@ -1,11 +1,13 @@
 import {
   ChannelType,
   EmbedBuilder,
+  PermissionFlagsBits,
   SlashCommandBuilder,
   type AnyThreadChannel,
   type ChatInputCommandInteraction,
   type Client,
-  type ForumChannel
+  type ForumChannel,
+  type GuildMember
 } from "discord.js";
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
@@ -15,7 +17,7 @@ import {
   syncGithubForumThread,
   type GithubForumSyncResult
 } from "./github-forums.js";
-import { requireAdmin, requireModerator } from "./permissions.js";
+import { isModerator, requireAdmin, requireModerator } from "./permissions.js";
 import { logAudit } from "./services/audit.js";
 import { applyGithubLabels, closeSyncedGithubIssue, linkGithubIssue, planGithubLabels, unlinkGithubIssue } from "./services/github-sync.js";
 import { upsertMapMapping } from "./services/map-resolver.js";
@@ -43,6 +45,12 @@ export const commandDefinitions = [
   new SlashCommandBuilder()
     .setName("sync-issue")
     .setDescription("Sync the current issues or suggestions forum post to GitHub.")
+    .addStringOption(option =>
+      option.setName("thread-id").setDescription("Optional Discord thread ID. Defaults to the current thread.")
+    ),
+  new SlashCommandBuilder()
+    .setName("solved")
+    .setDescription("Mark a forum post solved and archive it.")
     .addStringOption(option =>
       option.setName("thread-id").setDescription("Optional Discord thread ID. Defaults to the current thread.")
     ),
@@ -152,6 +160,40 @@ export async function handleCommand(input: {
       updateExisting: true
     });
     await interaction.editReply(formatGithubForumSyncResult(result));
+    return;
+  }
+
+  if (interaction.commandName === "solved") {
+    await interaction.deferReply({ ephemeral: true });
+    const thread = await resolveThread(interaction, client);
+    const parent = thread?.parent;
+    if (!thread || !parent || parent.type !== ChannelType.GuildForum) {
+      await interaction.editReply("Run this inside a forum thread or pass `thread-id`.");
+      return;
+    }
+
+    if (!canMarkSolved(interaction, config, thread)) {
+      await interaction.editReply("Only the thread author or staff can mark this post solved.");
+      return;
+    }
+
+    const solvedTag = findSolvedTag(parent);
+    if (!solvedTag) {
+      await interaction.editReply("This forum needs a completion tag named `Solved`, `Complete`, `Answered`, `GitHub Closed`, or `Published` before `/solved` can close posts.");
+      return;
+    }
+
+    const botMember = interaction.guild?.members.me ?? await interaction.guild?.members.fetchMe();
+    if (!botMember || !thread.permissionsFor(botMember)?.has(PermissionFlagsBits.ManageThreads)) {
+      await interaction.editReply("I need Manage Threads in this forum before I can tag and archive posts.");
+      return;
+    }
+
+    await applySolvedTag(thread, parent, solvedTag.id);
+    if (!thread.archived) {
+      await thread.setArchived(true, "Akron forum post marked solved");
+    }
+    await interaction.editReply(`Marked this post as ${solvedTag.name} and archived the thread.`);
     return;
   }
 
@@ -289,6 +331,49 @@ async function resolveThread(interaction: ChatInputCommandInteraction, client: C
   }
 
   return interaction.channel?.isThread() ? interaction.channel : null;
+}
+
+const solvedTagNames = [
+  "Solved",
+  "Complete",
+  "Completed",
+  "Resolved",
+  "Answered",
+  "GitHub Closed",
+  "Published",
+  "Done",
+  "Fixed"
+];
+
+function canMarkSolved(interaction: ChatInputCommandInteraction, config: AppConfig, thread: AnyThreadChannel): boolean {
+  const member = interaction.member instanceof Object && "roles" in interaction.member
+    ? (interaction.member as GuildMember)
+    : null;
+  return interaction.user.id === thread.ownerId || Boolean(member && isModerator(member, config));
+}
+
+function findSolvedTag(parent: ForumChannel): { id: string; name: string } | undefined {
+  const tagByNormalizedName = new Map(parent.availableTags.map(tag => [normalizeTagName(tag.name), tag]));
+  for (const tagName of solvedTagNames) {
+    const tag = tagByNormalizedName.get(normalizeTagName(tagName));
+    if (tag) {
+      return { id: tag.id, name: tag.name };
+    }
+  }
+  return undefined;
+}
+
+function normalizeTagName(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function applySolvedTag(thread: AnyThreadChannel, parent: ForumChannel, solvedTagId: string): Promise<void> {
+  const solvedTagIds = new Set(parent.availableTags
+    .filter(tag => solvedTagNames.some(name => normalizeTagName(name) === normalizeTagName(tag.name)))
+    .map(tag => tag.id));
+  const next = thread.appliedTags.filter(tagId => !solvedTagIds.has(tagId));
+  next.push(solvedTagId);
+  await thread.setAppliedTags(next, "Akron forum post marked solved");
 }
 
 function buildListEmbed(title: string, items: string[]): EmbedBuilder {

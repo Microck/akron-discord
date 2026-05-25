@@ -158,6 +158,7 @@ Manual commands:
 
 ```text
 /sync-issue
+/solved
 /link-issue
 /unlink-issue
 /close-synced-issue
@@ -169,6 +170,8 @@ Manual commands:
 Created GitHub issues include the forum post title, source Discord link, starter description, starter attachments, and up to 100 recent non-bot thread replies. Image attachments render inline in GitHub; other attachments are linked.
 
 Re-run `/sync-issue` on an already-linked thread to refresh the GitHub issue title/body with the current Discord description, attachments, and conversation.
+
+Use `/solved` in any forum post to apply the forum's completion tag and archive the thread. The thread author, moderators, and admins can run it.
 
 Use `/set-map-mapping` to connect a supported GameBanana map URL to the canonical Celeste map SID, then run `/rescan` on affected `Needs Moderator Review` submissions.
 
