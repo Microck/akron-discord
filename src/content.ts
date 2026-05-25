@@ -51,7 +51,7 @@ export function buildPlaytestingEmbed(): EmbedBuilder {
       "",
       "Applications are private. Staff review each request and may deny it with a reason. Accepted users receive the Tester role automatically.",
       "",
-      "Tester activity is checked across beta releases. Users accepted through this flow may lose Tester after missing 3 consecutive beta releases unless staff gives them the Beta role."
+      "Tester activity is checked across beta releases. Users accepted through this flow may lose Tester after missing 3 consecutive beta releases."
     ].join("\n"))
     .setColor(0xff66c4);
 }
