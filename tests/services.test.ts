@@ -8,6 +8,7 @@ import { githubIssueKindForForum, githubIssueKindForForumSync } from "../src/git
 import { formatGithubForumSyncResult } from "../src/commands.js";
 import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
+import { playtestWindowIsActive } from "../src/services/playtesting.js";
 
 describe("map resolver helpers", () => {
   it("creates stable map SID slugs for R2 object paths", () => {
@@ -173,6 +174,14 @@ describe("FAQ embed", () => {
     expect(fieldText).toContain("The default overlay bind is `Tab`");
     expect(fieldText).toContain("Open the target map first, refresh the catalog");
     expect(fieldText).not.toContain("Why is a feature blocked or marked?");
+  });
+});
+
+describe("playtester activity thresholds", () => {
+  it("counts forum feedback or at least 3 chat messages as active", () => {
+    expect(playtestWindowIsActive({ forumCount: 1, chatCount: 0 })).toBe(true);
+    expect(playtestWindowIsActive({ forumCount: 0, chatCount: 3 })).toBe(true);
+    expect(playtestWindowIsActive({ forumCount: 0, chatCount: 2 })).toBe(false);
   });
 });
 

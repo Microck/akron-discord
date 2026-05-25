@@ -7,7 +7,8 @@ describe("server sync permission policy", () => {
   const roles = new Map([
     ["admin", "admin-role"],
     ["moderator", "mod-role"],
-    ["member", "member-role"]
+    ["member", "member-role"],
+    ["tester", "tester-role"]
   ]);
 
   it("keeps rules and verify read-only for members", () => {
@@ -45,6 +46,21 @@ describe("server sync permission policy", () => {
 
     expect(hasFlag(forum.allow, PermissionsBitField.Flags.SendMessages)).toBe(true);
     expect(hasFlag(forum.allow, PermissionsBitField.Flags.CreatePublicThreads)).toBe(true);
+  });
+
+  it("keeps playtester channels gated to Tester", () => {
+    const overwrites = buildPermissionOverwrites("guild", roles, channelSpec({
+      name: "chat",
+      category: "playtesters",
+      visibility: "tester",
+      type: ChannelType.GuildText
+    }));
+    const everyone = overwriteFor("guild", overwrites);
+    const tester = overwriteFor("tester-role", overwrites);
+
+    expect(hasFlag(everyone.deny, PermissionsBitField.Flags.ViewChannel)).toBe(true);
+    expect(hasFlag(tester.allow, PermissionsBitField.Flags.ViewChannel)).toBe(true);
+    expect(hasFlag(tester.allow, PermissionsBitField.Flags.SendMessages)).toBe(true);
   });
 });
 

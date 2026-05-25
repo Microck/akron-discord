@@ -5,6 +5,7 @@ export const roleSpecs = [
   { key: "moderator", name: "Moderator", color: 0x9b59b6 },
   { key: "member", name: "Member", color: 0x57f287 },
   { key: "tester", name: "Tester", color: 0x5dade2 },
+  { key: "beta", name: "Beta", color: 0xff66c4 },
   { key: "bot", name: "Bot", color: 0xfee75c }
 ] as const;
 
@@ -13,8 +14,8 @@ export type RoleKey = (typeof roleSpecs)[number]["key"];
 export type ChannelSpec = {
   name: string;
   type: ChannelType.GuildText | ChannelType.GuildForum;
-  category?: "info" | "feedback" | "map-catalog" | "general-packs" | "staff";
-  visibility: "public" | "member" | "staff" | "admin";
+  category?: "info" | "feedback" | "map-catalog" | "general-packs" | "playtesters" | "staff";
+  visibility: "public" | "member" | "tester" | "staff" | "admin";
   topic?: string;
   forumTags?: string[];
 };
@@ -24,6 +25,7 @@ export const categorySpecs = [
   { key: "feedback", name: "Feedback" },
   { key: "map-catalog", name: "Map Catalog" },
   { key: "general-packs", name: "General Packs" },
+  { key: "playtesters", name: "playtesters" },
   { key: "staff", name: "Staff" }
 ] as const;
 
@@ -91,6 +93,13 @@ export const channelSpecs: ChannelSpec[] = [
     visibility: "member",
     topic: "Ask one Akron question per post.",
     forumTags: ["Akron Setup", ".akr Packs", "Map Catalog", "Bug Help", "Answered", "Needs Staff"]
+  },
+  {
+    name: "playtesting",
+    type: ChannelType.GuildText,
+    category: "feedback",
+    visibility: "member",
+    topic: "Apply to help test Akron beta builds."
   },
   {
     name: "issues",
@@ -165,6 +174,36 @@ export const channelSpecs: ChannelSpec[] = [
     forumTags: statusForumTags
   },
   {
+    name: "announcements",
+    type: ChannelType.GuildText,
+    category: "playtesters",
+    visibility: "tester",
+    topic: "Playtester build announcements and beta downloads."
+  },
+  {
+    name: "chat",
+    type: ChannelType.GuildText,
+    category: "playtesters",
+    visibility: "tester",
+    topic: "Playtester discussion."
+  },
+  {
+    name: "tester-feedback",
+    type: ChannelType.GuildForum,
+    category: "playtesters",
+    visibility: "tester",
+    topic: "Playtester feedback for beta builds.",
+    forumTags: ["UI/UX", "Ruleset", "Docs", "Performance", "Answered"]
+  },
+  {
+    name: "tester-bugs-n-issues",
+    type: ChannelType.GuildForum,
+    category: "playtesters",
+    visibility: "tester",
+    topic: "Playtester bug reports for beta builds.",
+    forumTags: ["Needs Info", "Reproduced", "Fixed", "Duplicate", "Invalid"]
+  },
+  {
     name: "staff-chat",
     type: ChannelType.GuildText,
     category: "staff",
@@ -205,6 +244,14 @@ export const channelSpecs: ChannelSpec[] = [
     category: "staff",
     visibility: "staff",
     topic: "Manual map-link to map SID mappings."
+  },
+  {
+    name: "playtester-applications",
+    type: ChannelType.GuildForum,
+    category: "staff",
+    visibility: "staff",
+    topic: "Private staff review queue for playtester applications.",
+    forumTags: ["Open", "Accepted", "Denied"]
   },
   {
     name: "github-sync-log",

@@ -3,6 +3,7 @@ import type { AppConfig } from "./config.js";
 import { embedAssets, embedAssetUrl } from "./embed-assets.js";
 
 export const verifyButtonCustomId = "akron:verify";
+export const playtesterApplyButtonCustomId = "akron:playtester:apply";
 const akronYellow = 0xfee75c;
 
 export function buildVerifyEmbed(): EmbedBuilder {
@@ -35,6 +36,32 @@ export function buildVerifyComponents(): ActionRowBuilder<ButtonBuilder>[] {
       new ButtonBuilder()
         .setCustomId(verifyButtonCustomId)
         .setLabel("Verify Me")
+        .setStyle(ButtonStyle.Primary)
+    )
+  ];
+}
+
+export function buildPlaytestingEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setTitle("Apply to Playtest Akron")
+    .setDescription([
+      "Playtesters get access to beta builds before public release.",
+      "",
+      "Good playtesting means trying new builds and sending useful feedback: bugs, confusing UI, awkward workflows, unclear text, performance issues, or suggestions for behavior that should change.",
+      "",
+      "Applications are private. Staff review each request and may deny it with a reason. Accepted users receive the Tester role automatically.",
+      "",
+      "Tester activity is checked across beta releases. Users accepted through this flow may lose Tester after missing 3 consecutive beta releases unless staff gives them the Beta role."
+    ].join("\n"))
+    .setColor(0xff66c4);
+}
+
+export function buildPlaytestingComponents(): ActionRowBuilder<ButtonBuilder>[] {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(playtesterApplyButtonCustomId)
+        .setLabel("Apply")
         .setStyle(ButtonStyle.Primary)
     )
   ];

@@ -92,5 +92,49 @@ function runMigrations(sqlite: Database.Database): void {
       kind TEXT NOT NULL,
       created_utc TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS playtester_applications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      status TEXT NOT NULL,
+      review_thread_id TEXT NOT NULL DEFAULT '',
+      why TEXT NOT NULL,
+      contribution TEXT NOT NULL,
+      availability TEXT NOT NULL,
+      denial_reason TEXT NOT NULL DEFAULT '',
+      created_utc TEXT NOT NULL,
+      decided_utc TEXT,
+      decided_by TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS tracked_playtesters (
+      user_id TEXT PRIMARY KEY,
+      accepted_application_id INTEGER NOT NULL,
+      accepted_utc TEXT NOT NULL,
+      missed_releases INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS playtest_releases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      attachment_name TEXT NOT NULL,
+      created_utc TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS playtest_releases_message_idx
+      ON playtest_releases(message_id);
+
+    CREATE TABLE IF NOT EXISTS playtest_activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      release_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      updated_utc TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS playtest_activity_user_release_kind_idx
+      ON playtest_activity(user_id, release_id, kind);
   `);
 }

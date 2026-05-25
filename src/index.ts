@@ -18,6 +18,7 @@ import { buildVerifyComponents, buildVerifyEmbed, verifyButtonCustomId } from ".
 import { createDatabase } from "./db/database.js";
 import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
+import { handlePlaytestingInteraction, handlePlaytestingMessage } from "./services/playtesting.js";
 import { handleScanButtonInteraction, scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
 
@@ -52,6 +53,10 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
+    if (await handlePlaytestingInteraction({ interaction, config, db: database.db })) {
+      return;
+    }
+
     if (interaction.isChatInputCommand() && client.isReady()) {
       await handleCommand({ interaction, client, config, db: database.db });
     }
@@ -71,9 +76,18 @@ client.on(Events.ThreadCreate, thread => {
   }
 });
 
-client.on(Events.MessageCreate, message => {
-  if (message.guildId === config.discordGuildId && isForumStarterMessage(message)) {
-    scheduleForumThread(message.channel as AnyThreadChannel);
+client.on(Events.MessageCreate, async message => {
+  try {
+    if (message.guildId !== config.discordGuildId) {
+      return;
+    }
+
+    await handlePlaytestingMessage({ message, config, db: database.db });
+    if (isForumStarterMessage(message)) {
+      scheduleForumThread(message.channel as AnyThreadChannel);
+    }
+  } catch (error) {
+    await reportRuntimeError(error);
   }
 });
 

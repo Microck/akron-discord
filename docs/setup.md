@@ -179,6 +179,14 @@ Use `/set-map-mapping` to connect a supported GameBanana map URL to the canonica
 
 The `verify` channel contains a persistent `Verify Me` button. Clicking it grants the configured `Member` role and writes a verification log row to SQLite.
 
+## Playtesting
+
+The `playtesting` channel contains the public playtester application embed. Members click `Apply`, answer the private modal, and the bot creates a staff-only application thread in `playtester-applications`.
+
+Staff can accept or deny from the application thread. Accepting grants `Tester` and starts inactivity tracking. Denying requires a reason, DMs the applicant, archives the review thread, and starts a 14-day reapply cooldown.
+
+The bot records a playtest release when a message in the playtester `announcements` channel has a `.zip` attachment. For each release window, a tracked tester is active if they post in `tester-feedback` or `tester-bugs-n-issues`, or send at least 3 messages in playtester `chat`. After 3 consecutive missed releases, the bot removes `Tester` and logs the removal in `staff-chat`. Staff-managed `Beta` exempts a tester from inactivity removal.
+
 ## Checks
 
 ```sh

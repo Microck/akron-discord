@@ -84,3 +84,59 @@ export const githubLinks = sqliteTable(
     issueNumberIdx: uniqueIndex("github_links_issue_number_idx").on(table.githubIssueNumber)
   })
 );
+
+export const playtesterApplications = sqliteTable("playtester_applications", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull(),
+  username: text("username").notNull(),
+  status: text("status").notNull(),
+  reviewThreadId: text("review_thread_id").notNull().default(""),
+  why: text("why").notNull(),
+  contribution: text("contribution").notNull(),
+  availability: text("availability").notNull(),
+  denialReason: text("denial_reason").notNull().default(""),
+  createdUtc: text("created_utc").notNull(),
+  decidedUtc: text("decided_utc"),
+  decidedBy: text("decided_by").notNull().default("")
+});
+
+export const trackedPlaytesters = sqliteTable("tracked_playtesters", {
+  userId: text("user_id").primaryKey(),
+  acceptedApplicationId: integer("accepted_application_id").notNull(),
+  acceptedUtc: text("accepted_utc").notNull(),
+  missedReleases: integer("missed_releases").notNull().default(0),
+  active: integer("active").notNull().default(1)
+});
+
+export const playtestReleases = sqliteTable(
+  "playtest_releases",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    messageId: text("message_id").notNull(),
+    channelId: text("channel_id").notNull(),
+    attachmentName: text("attachment_name").notNull(),
+    createdUtc: text("created_utc").notNull()
+  },
+  table => ({
+    messageIdx: uniqueIndex("playtest_releases_message_idx").on(table.messageId)
+  })
+);
+
+export const playtestActivity = sqliteTable(
+  "playtest_activity",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id").notNull(),
+    releaseId: integer("release_id").notNull(),
+    kind: text("kind").notNull(),
+    count: integer("count").notNull().default(0),
+    updatedUtc: text("updated_utc").notNull()
+  },
+  table => ({
+    userReleaseKindIdx: uniqueIndex("playtest_activity_user_release_kind_idx").on(
+      table.userId,
+      table.releaseId,
+      table.kind
+    )
+  })
+);

@@ -18,6 +18,8 @@ import { categorySpecs, channelSpecs, roleSpecs, submissionChannelScopes, type C
 import {
   buildFaqEmbed,
   buildForumExampleSpecs,
+  buildPlaytestingComponents,
+  buildPlaytestingEmbed,
   buildRulesEmbed,
   buildSubmissionGuideEmbed,
   buildVerifyComponents,
@@ -58,7 +60,7 @@ export async function planServerSync(guild: Guild, config?: AppConfig): Promise<
   }
 
   for (const channel of channelSpecs) {
-    const existing = findAccessibleNamedChannel(guild, channel.name);
+    const existing = findAccessibleChannelForSpec(guild, channel);
     if (!existing) {
       changes.push(`create ${describeChannelType(channel.type)} channel ${channel.name}`);
       continue;
@@ -146,9 +148,10 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase, config?: 
     const hasInaccessibleSameType = guild.channels.cache.some(channel =>
       channel.name === channelSpec.name &&
       channel.type === channelSpec.type &&
+      expectedParentMatches(channel, channelSpec) &&
       !isChannelAccessible(channel)
     );
-    const existing = findAccessibleNamedChannel(guild, channelSpec.name);
+    const existing = findAccessibleChannelForSpec(guild, channelSpec);
     if (existing && existing.type !== channelSpec.type) {
       changes.push(`skipped ${channelSpec.name}: existing channel has incompatible type`);
       continue;
@@ -183,8 +186,9 @@ export async function applyServerSync(guild: Guild, db: AkronDatabase, config?: 
   await runContentSync(changes, "rules", () => ensureRulesMessage(guild, db));
   await runContentSync(changes, "welcome", () => ensureWelcomeMessage(guild, db));
   await runContentSync(changes, "faq", () => ensureFaqMessage(guild, db, config));
-  await runContentSync(changes, "links", () => removeStoredMessage(guild, db, "links", "message.links.id"));
-  await runContentSync(changes, "announcements", () => removeStoredMessage(guild, db, "announcements", "message.announcements.id"));
+  await runContentSync(changes, "playtesting", () => ensurePlaytestingMessage(guild, db));
+  await runContentSync(changes, "links", () => removeStoredMessage(guild, db, "links", "message.links.id", "Info"));
+  await runContentSync(changes, "announcements", () => removeStoredMessage(guild, db, "announcements", "message.announcements.id", "Info"));
   await runContentSync(changes, "submission-guide", () => ensureSubmissionGuideMessage(guild, db, config));
   await runContentSync(changes, "forum examples", () => ensureForumExampleThreads(guild, db));
 
@@ -231,6 +235,7 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
   const admin = roles.get("admin") ?? "";
   const moderator = roles.get("moderator") ?? "";
   const member = roles.get("member") ?? "";
+  const tester = roles.get("tester") ?? "";
   const everyoneDeny = {
     id: guildId,
     deny: [PermissionsBitField.Flags.ViewChannel]
@@ -290,6 +295,16 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
         ]
       }]
     : [];
+  const testerPostAllow = {
+    id: tester,
+    allow: [
+      PermissionsBitField.Flags.ViewChannel,
+      PermissionsBitField.Flags.ReadMessageHistory,
+      PermissionsBitField.Flags.SendMessages,
+      PermissionsBitField.Flags.SendMessagesInThreads,
+      PermissionsBitField.Flags.CreatePublicThreads
+    ]
+  };
 
   if (spec.name === "verify" || spec.name === "rules") {
     return [
@@ -317,6 +332,10 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
     return [everyoneDeny, memberPostAllow, moderatorAllow, adminAllow, ...botAllow];
   }
 
+  if (spec.visibility === "tester") {
+    return [everyoneDeny, testerPostAllow, moderatorAllow, adminAllow, ...botAllow];
+  }
+
   if (spec.visibility === "staff") {
     return [everyoneDeny, moderatorAllow, adminAllow, ...botAllow];
   }
@@ -331,7 +350,7 @@ function buildForumTags(spec: ChannelSpec): GuildForumTagData[] | undefined {
 
   return (spec.forumTags ?? []).map(name => ({
     name,
-    moderated: ["Published", "Flagged", "Needs Moderator Review", "GitHub Closed", "Duplicate", "Invalid", "Not Planned"].includes(name)
+    moderated: ["Published", "Flagged", "Needs Moderator Review", "GitHub Closed", "Duplicate", "Invalid", "Not Planned", "Accepted", "Denied"].includes(name)
   }));
 }
 
@@ -469,19 +488,39 @@ async function ensureFaqMessage(guild: Guild, db: AkronDatabase, config?: AppCon
   await ensureStoredEmbedMessage(db, channel, "message.faq.id", buildFaqEmbed(config));
 }
 
-async function ensureStoredEmbedMessage(db: AkronDatabase, channel: TextChannel, settingKey: string, embed: ReturnType<typeof buildRulesEmbed>): Promise<void> {
+async function ensurePlaytestingMessage(guild: Guild, db: AkronDatabase): Promise<void> {
+  const channel = findAccessibleTextChannel(guild, "playtesting", "Feedback");
+  if (!channel) {
+    return;
+  }
+  await ensureStoredEmbedMessage(
+    db,
+    channel,
+    "message.playtesting.id",
+    buildPlaytestingEmbed(),
+    buildPlaytestingComponents()
+  );
+}
+
+async function ensureStoredEmbedMessage(
+  db: AkronDatabase,
+  channel: TextChannel,
+  settingKey: string,
+  embed: ReturnType<typeof buildRulesEmbed>,
+  components?: ReturnType<typeof buildPlaytestingComponents>
+): Promise<void> {
   const setting = await db.query.botSettings.findFirst({ where: eq(botSettings.key, settingKey) });
   if (setting) {
     try {
       const message = await channel.messages.fetch(setting.value);
-      await message.edit({ embeds: [embed] });
+      await message.edit({ embeds: [embed], components: components ?? [] });
       return;
     } catch {
       // The stored message was deleted or moved. Recreate it below.
     }
   }
 
-  const message = await channel.send({ embeds: [embed] });
+  const message = await channel.send({ embeds: [embed], components: components ?? [] });
   await upsertSetting(db, settingKey, message.id);
 }
 
@@ -497,13 +536,19 @@ function embedEditOptions(embed: ReturnType<typeof buildRulesEmbed>, asset?: Emb
     : { embeds: [embed] };
 }
 
-async function removeStoredMessage(guild: Guild, db: AkronDatabase, channelName: string, settingKey: string): Promise<void> {
+async function removeStoredMessage(
+  guild: Guild,
+  db: AkronDatabase,
+  channelName: string,
+  settingKey: string,
+  parentName?: string
+): Promise<void> {
   const setting = await db.query.botSettings.findFirst({ where: eq(botSettings.key, settingKey) });
   if (!setting) {
     return;
   }
 
-  const channel = findAccessibleTextChannel(guild, channelName);
+  const channel = findAccessibleTextChannel(guild, channelName, parentName);
   if (channel) {
     try {
       const message = await channel.messages.fetch(setting.value);
@@ -789,14 +834,29 @@ function describeChannelType(type: ChannelType): string {
   }
 }
 
-function findAccessibleNamedChannel(guild: Guild, name: string): GuildBasedChannel | undefined {
-  return guild.channels.cache.find(channel => channel.name === name && isChannelAccessible(channel));
+function findAccessibleChannelForSpec(guild: Guild, spec: ChannelSpec): GuildBasedChannel | undefined {
+  const exact = guild.channels.cache.find(channel =>
+    channel.name === spec.name &&
+    channel.type === spec.type &&
+    expectedParentMatches(channel, spec) &&
+    isChannelAccessible(channel)
+  );
+  if (exact || channelNameIsAmbiguous(spec.name)) {
+    return exact;
+  }
+
+  return guild.channels.cache.find(channel =>
+    channel.name === spec.name &&
+    channel.type === spec.type &&
+    isChannelAccessible(channel)
+  );
 }
 
-function findAccessibleTextChannel(guild: Guild, name: string): TextChannel | undefined {
+function findAccessibleTextChannel(guild: Guild, name: string, parentName?: string): TextChannel | undefined {
   return guild.channels.cache.find(channel =>
     channel.name === name &&
     channel.type === ChannelType.GuildText &&
+    (!parentName || channel.parent?.name === parentName) &&
     isChannelAccessible(channel)
   ) as TextChannel | undefined;
 }
@@ -811,6 +871,17 @@ function findAccessibleForumChannel(guild: Guild, name: string): ForumChannel | 
 
 function isChannelAccessible(channel: GuildBasedChannel): boolean {
   return !("viewable" in channel) || channel.viewable;
+}
+
+function expectedParentMatches(channel: GuildBasedChannel, spec: ChannelSpec): boolean {
+  const expectedParentName = spec.category
+    ? categorySpecs.find(category => category.key === spec.category)?.name
+    : null;
+  return (channel.parent?.name ?? null) === expectedParentName;
+}
+
+function channelNameIsAmbiguous(name: string): boolean {
+  return channelSpecs.filter(spec => spec.name === name).length > 1;
 }
 
 async function assignBotRole(guild: Guild, roles: Map<string, string>, changes: string[]): Promise<void> {

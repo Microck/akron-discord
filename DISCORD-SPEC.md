@@ -691,6 +691,20 @@ nvidia/llama-3.3-nemotron-super-49b-v1.5
 
 The GitHub repository name must be configured explicitly for the deployment. The public config contract must not default to an operator-owned repository.
 
+## Playtester Applications
+
+The public `playtesting` channel contains a bot-managed application embed with an `Apply` button. The button opens a private modal with three required fields:
+
+- Why do you want to be a playtester?
+- What kind of feedback can you contribute?
+- How often do you expect to test new builds?
+
+Each application creates a staff-only `playtester-applications` forum thread with `Accept` and `Deny` buttons. Accepting grants `Tester`, records the user as tracked from that point forward, tags the review thread `Accepted`, and archives it. Denying requires a staff reason, DMs the applicant when possible, tags the review thread `Denied`, archives it, and applies a 14-day reapply cooldown.
+
+Playtest releases are detected from `.zip` attachments posted in the playtester `announcements` channel. A tracked tester is active for a release window when they post in `tester-feedback` or `tester-bugs-n-issues`, or send at least 3 messages in playtester `chat`. After 3 consecutive missed releases, the bot removes `Tester` and logs the removal in `staff-chat`.
+
+`Beta` is a staff-managed pink role. Users with `Beta` are exempt from automatic Tester removal.
+
 ## Open Decisions
 
 No blocking product decisions remain before initial scaffolding.
