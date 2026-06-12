@@ -7,4 +7,6 @@ services:
     user: "${AKRON_DOCKER_UID:-1000}:${AKRON_DOCKER_GID:-1000}"
     volumes:
       - ./data:/app/data
+    ports:
+      - "${GITHUB_WEBHOOK_PORT:-3005}:${GITHUB_WEBHOOK_PORT:-3005}"
     restart: unless-stopped

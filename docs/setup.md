@@ -35,7 +35,7 @@ GITHUB_TOKEN=
 GITHUB_OWNER=
 GITHUB_REPO=
 GITHUB_WEBHOOK_SECRET=
-GITHUB_WEBHOOK_PORT=3000
+GITHUB_WEBHOOK_PORT=3005
 ```
 
 Recommended NIM model:
@@ -160,7 +160,7 @@ Set the same random value in GitHub and `GITHUB_WEBHOOK_SECRET`. Subscribe to th
 - Issues
 - Issue comments
 
-The webhook listener defaults to `GITHUB_WEBHOOK_PORT=3000`. GitHub issue comments post back into the linked Discord thread. GitHub closes apply `GitHub Closed`, lock the thread, and archive it. GitHub reopens apply `GitHub Open`, unlock the thread, and unarchive it.
+The webhook listener defaults to `GITHUB_WEBHOOK_PORT=3005`. GitHub issue comments post back into the linked Discord thread. GitHub closes apply `GitHub Closed`, lock the thread, and archive it. GitHub reopens apply `GitHub Open`, unlock the thread, and unarchive it.
 
 Manage labels:
 

@@ -26,7 +26,7 @@ const configSchema = z.object({
   githubOwner: optionalId,
   githubRepo: optionalId,
   githubWebhookSecret: optionalId,
-  githubWebhookPort: z.coerce.number().int().positive().default(3000),
+  githubWebhookPort: z.coerce.number().int().positive().default(3005),
   databasePath: z.string().trim().default("data/akron-discord.sqlite")
 });
 

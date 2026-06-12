@@ -259,7 +259,7 @@ function config(overrides: Partial<AppConfig>): AppConfig {
     githubOwner: "",
     githubRepo: "",
     githubWebhookSecret: "",
-    githubWebhookPort: 3000,
+    githubWebhookPort: 3005,
     databasePath: "data/test.sqlite",
     ...overrides
   };
