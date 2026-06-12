@@ -18,6 +18,7 @@ import { buildVerifyComponents, buildVerifyEmbed, verifyButtonCustomId } from ".
 import { createDatabase } from "./db/database.js";
 import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
+import { startGithubWebhookServer } from "./github-webhook.js";
 import { handlePlaytestingInteraction, handlePlaytestingMessage } from "./services/playtesting.js";
 import { handleScanButtonInteraction, scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
@@ -25,6 +26,7 @@ import { utcNow } from "./time.js";
 const config = loadConfig();
 const database = createDatabase(config.databasePath);
 const scanTimers = new Map<string, NodeJS.Timeout>();
+let githubWebhookServer: ReturnType<typeof startGithubWebhookServer> = null;
 
 const client = new Client({
   intents: [
@@ -110,6 +112,12 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 await client.login(config.discordToken);
+githubWebhookServer = startGithubWebhookServer({
+  client,
+  config,
+  db: database.db,
+  onError: reportRuntimeError
+});
 
 async function handleVerifyButton(member: GuildMember | null): Promise<void> {
   if (!member) {
@@ -183,6 +191,7 @@ async function shutdown(): Promise<void> {
   for (const timer of scanTimers.values()) {
     clearTimeout(timer);
   }
+  githubWebhookServer?.close();
   client.destroy();
   database.sqlite.close();
   process.exit(0);

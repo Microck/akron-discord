@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createHmac } from "node:crypto";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
 import { buildFaqEmbed, githubIssuesMarkdownLink } from "../src/content.js";
 import { githubIssueKindForForum, githubIssueKindForForumSync } from "../src/github-forums.js";
+import { verifyGithubWebhookSignature } from "../src/github-webhook.js";
 import { formatGithubForumSyncResult } from "../src/commands.js";
 import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
@@ -122,6 +124,25 @@ describe("GitHub issue body", () => {
     expect(body).toContain("- [repro.akr](https://cdn.discordapp.com/attachments/1/repro.akr)");
   });
 
+  it("labels videos and states when a large attachment set is truncated", () => {
+    const body = formatGithubIssueBody({
+      discordThreadId: "123",
+      discordUrl: "https://discord.com/channels/1/2",
+      kind: "issue",
+      title: "Video repro",
+      body: "The starter post description.",
+      attachments: Array.from({ length: 27 }, (_, index) => ({
+        name: index === 0 ? "repro.mp4" : `file-${index}.txt`,
+        url: `https://cdn.discordapp.com/attachments/1/file-${index}`,
+        contentType: index === 0 ? "video/mp4" : "text/plain",
+        sizeBytes: index === 0 ? 3_145_728 : 512
+      }))
+    });
+
+    expect(body).toContain("- Video: [repro.mp4](https://cdn.discordapp.com/attachments/1/file-0) (video/mp4, 3.0 MB)");
+    expect(body).toContain("- 2 more attachments omitted from this section.");
+  });
+
   it("formats the configured GitHub issues page as a masked Discord link", () => {
     expect(githubIssuesMarkdownLink(config({ githubOwner: "Microck", githubRepo: "akron" })))
       .toBe("[the GitHub issues page](https://github.com/Microck/akron/issues)");
@@ -159,6 +180,16 @@ describe("GitHub issue body", () => {
       status: "skipped",
       reason: "parent forum is not `issues` or `suggestions`"
     })).toBe("GitHub sync skipped: parent forum is not `issues` or `suggestions`.");
+  });
+});
+
+describe("GitHub webhook verification", () => {
+  it("accepts valid sha256 signatures and rejects invalid signatures", () => {
+    const body = Buffer.from(JSON.stringify({ action: "created" }));
+    const signature = `sha256=${createHmac("sha256", "secret").update(body).digest("hex")}`;
+
+    expect(verifyGithubWebhookSignature("secret", body, signature)).toBe(true);
+    expect(verifyGithubWebhookSignature("secret", body, "sha256=bad")).toBe(false);
   });
 });
 
@@ -227,6 +258,8 @@ function config(overrides: Partial<AppConfig>): AppConfig {
     githubToken: "",
     githubOwner: "",
     githubRepo: "",
+    githubWebhookSecret: "",
+    githubWebhookPort: 3000,
     databasePath: "data/test.sqlite",
     ...overrides
   };

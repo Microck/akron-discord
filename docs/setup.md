@@ -34,6 +34,8 @@ GITHUB_APP_INSTALLATION_ID=
 GITHUB_TOKEN=
 GITHUB_OWNER=
 GITHUB_REPO=
+GITHUB_WEBHOOK_SECRET=
+GITHUB_WEBHOOK_PORT=3000
 ```
 
 Recommended NIM model:
@@ -133,7 +135,7 @@ The deployment image must include ImageMagick's `magick` binary for `optimo` ima
 
 ## GitHub Sync
 
-`issues` and `suggestions` forum posts sync one-way to the configured GitHub repo. The GitHub issue body includes a source Discord link and quotes user text as untrusted content.
+`issues` and `suggestions` forum posts sync to the configured GitHub repo. The GitHub issue body includes a source Discord link and quotes user text as untrusted content.
 
 Use either `GITHUB_TOKEN` or the GitHub App fields. Fine-grained token minimum repository permissions:
 
@@ -146,6 +148,19 @@ GitHub App minimum repository permissions:
 - Contents: read
 - Issues: read and write
 - Metadata: read
+
+Configure a GitHub webhook that points at:
+
+```text
+https://<bot-host>/github/webhook
+```
+
+Set the same random value in GitHub and `GITHUB_WEBHOOK_SECRET`. Subscribe to these repository events:
+
+- Issues
+- Issue comments
+
+The webhook listener defaults to `GITHUB_WEBHOOK_PORT=3000`. GitHub issue comments post back into the linked Discord thread. GitHub closes apply `GitHub Closed`, lock the thread, and archive it. GitHub reopens apply `GitHub Open`, unlock the thread, and unarchive it.
 
 Manage labels:
 
@@ -167,7 +182,7 @@ Manual commands:
 
 `/sync-issue` reports the concrete outcome: created, already linked, or skipped with the reason. Manual sync can sync bot-authored posts from any forum channel; posts outside `issues` and `suggestions` sync as normal GitHub issues. Automatic background sync skips bot-authored posts and only syncs `issues` and `suggestions`.
 
-Created GitHub issues include the forum post title, source Discord link, starter description, starter attachments, and up to 100 recent non-bot thread replies. Image attachments render inline in GitHub; other attachments are linked.
+Created GitHub issues include the forum post title, source Discord link, starter description, starter attachments, and up to 100 recent non-bot thread replies. Image attachments render inline in GitHub. Video attachments and other files are linked with content type and size metadata.
 
 Re-run `/sync-issue` on an already-linked thread to refresh the GitHub issue title/body with the current Discord description, attachments, and conversation.
 

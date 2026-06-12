@@ -106,7 +106,7 @@ export const channelSpecs: ChannelSpec[] = [
     type: ChannelType.GuildForum,
     category: "feedback",
     visibility: "member",
-    topic: "Bug reports synced one-way to GitHub.",
+    topic: "Bug reports synced with GitHub.",
     forumTags: ["Needs Info", "Synced", "GitHub Open", "GitHub Closed", "Duplicate", "Invalid", "Not Planned"]
   },
   {
@@ -114,7 +114,7 @@ export const channelSpecs: ChannelSpec[] = [
     type: ChannelType.GuildForum,
     category: "feedback",
     visibility: "member",
-    topic: "Feature suggestions synced one-way to GitHub.",
+    topic: "Feature suggestions synced with GitHub.",
     forumTags: ["Needs Info", "Synced", "GitHub Open", "GitHub Closed", "Duplicate", "Invalid", "Not Planned"]
   },
   {

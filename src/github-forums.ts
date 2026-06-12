@@ -147,13 +147,19 @@ function githubAttachmentsFromMessage(message: Message): GithubAttachment[] {
   return Array.from(message.attachments.values()).map(attachment => ({
     name: attachment.name ?? "attachment",
     url: attachment.url,
-    contentType: attachment.contentType ?? ""
+    contentType: attachment.contentType ?? "",
+    sizeBytes: attachment.size
   }));
 }
 
 export async function applyGithubTags(thread: AnyThreadChannel, parent: ForumChannel): Promise<void> {
+  await applyGithubOpenTag(thread, parent);
+}
+
+export async function applyGithubOpenTag(thread: AnyThreadChannel, parent: ForumChannel): Promise<void> {
   const tagByName = new Map(parent.availableTags.map(tag => [tag.name, tag.id]));
-  const next = [...thread.appliedTags];
+  const closedId = tagByName.get("GitHub Closed");
+  const next = thread.appliedTags.filter(tag => tag !== closedId);
   for (const name of ["Synced", "GitHub Open"]) {
     const tagId = tagByName.get(name);
     if (tagId && !next.includes(tagId)) {
@@ -163,6 +169,24 @@ export async function applyGithubTags(thread: AnyThreadChannel, parent: ForumCha
 
   if (typeof thread.setAppliedTags === "function") {
     await thread.setAppliedTags(next, "Akron GitHub sync status update");
+  }
+}
+
+export async function applyGithubClosedTag(thread: AnyThreadChannel): Promise<void> {
+  const parent = thread.parent;
+  if (!parent || parent.type !== ChannelType.GuildForum) {
+    return;
+  }
+
+  const tagByName = new Map(parent.availableTags.map(tag => [tag.name, tag.id]));
+  const openId = tagByName.get("GitHub Open");
+  const closedId = tagByName.get("GitHub Closed");
+  const next = thread.appliedTags.filter(tag => tag !== openId);
+  if (closedId && !next.includes(closedId)) {
+    next.push(closedId);
+  }
+  if (typeof thread.setAppliedTags === "function") {
+    await thread.setAppliedTags(next, "Akron GitHub close status update");
   }
 }
 

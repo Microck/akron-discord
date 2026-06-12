@@ -57,15 +57,15 @@ SQLite stores:
 
 This bot targets one official server, so SQLite is the simplest correct default. Move to Postgres only if the deployment later needs multiple writer processes or stronger remote operational tooling.
 
-Use Octokit REST for one-way GitHub issue sync. Prefer a GitHub App for long-running production, but support a fine-grained `GITHUB_TOKEN` for private setup and early operation.
+Use Octokit REST for Discord-to-GitHub issue sync and a signed GitHub webhook endpoint for GitHub-to-Discord updates. Prefer a GitHub App for long-running production, but support a fine-grained `GITHUB_TOKEN` for private setup and early operation.
 
 Reasons:
 
 - GitHub Apps use repo-scoped permissions and short-lived installation tokens.
 - Octokit REST maps directly to issue creation, labels, comments, and state changes.
-- Probot is not needed unless the bot later needs a full GitHub webhook framework.
+- Probot is not needed because the bot only needs repository `issues` and `issue_comment` webhook events.
 - Fine-grained PATs are simple to configure, but they must be explicitly scoped to the configured repository.
-- One-way sync keeps v1 simple: Discord creates and links GitHub issues, but GitHub webhooks do not update Discord automatically.
+- GitHub comments post into the linked Discord thread. GitHub closes tag, lock, and archive the thread. GitHub reopens unarchive, unlock, and mark the thread open.
 
 ## Server Sync
 
@@ -390,11 +390,11 @@ These commands require `Moderator` or `Admin`.
 
 `/sync-issue` reports whether it created a GitHub issue, found an existing link, or skipped the post with a specific reason. Manual sync is allowed for bot-authored posts and any forum channel. Posts outside `issues` and `suggestions` sync as normal GitHub issues. Automatic background sync skips bot-authored posts and only syncs `issues` and `suggestions` to avoid creating issues from unrelated generated posts.
 
-GitHub issues created from Discord forum posts separate the forum post title from the starter description. The body includes the source Discord link, the starter message description, starter attachments, and up to the latest 100 non-bot thread replies in chronological order. Image attachments are embedded with Markdown image links; other attachments are linked by filename.
+GitHub issues created from Discord forum posts separate the forum post title from the starter description. The body includes the source Discord link, the starter message description, starter attachments, and up to the latest 100 non-bot thread replies in chronological order. Image attachments are embedded with Markdown image links; video and other attachments are linked by filename with content type and size metadata.
 
 Manual `/sync-issue` updates the linked GitHub issue body when a link already exists, so moderators can re-run it after a Discord conversation adds useful context.
 
-The first implementation should support Discord-to-GitHub creation and status embeds. GitHub issue sync is one-way for v1. If a GitHub issue is closed, labeled, or reopened directly on GitHub, the bot does not update Discord automatically. Moderators can update Discord tags manually or use the bot's admin commands.
+GitHub issue comments created on GitHub should post into the linked Discord forum thread. GitHub issue closes should apply `GitHub Closed`, lock the thread, and archive it. GitHub issue reopens should apply `GitHub Open`, unlock the thread, and unarchive it.
 
 ## File Limits
 
@@ -681,6 +681,8 @@ GITHUB_APP_PRIVATE_KEY=
 GITHUB_APP_INSTALLATION_ID=
 GITHUB_OWNER=
 GITHUB_REPO=
+GITHUB_WEBHOOK_SECRET=
+GITHUB_WEBHOOK_PORT=3000
 ```
 
 Recommended NIM model:

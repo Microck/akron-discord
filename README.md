@@ -1,3 +1,3 @@
 # Akron Discord
 
-Official Discord bot for Akron's single community server. It manages server setup, verification, `.akr` submission scanning, R2 catalog publishing, and one-way Discord forum to GitHub issue sync.
+Official Discord bot for Akron's single community server. It manages server setup, verification, `.akr` submission scanning, R2 catalog publishing, and Discord forum to GitHub issue sync.

@@ -25,6 +25,8 @@ const configSchema = z.object({
   githubToken: optionalId,
   githubOwner: optionalId,
   githubRepo: optionalId,
+  githubWebhookSecret: optionalId,
+  githubWebhookPort: z.coerce.number().int().positive().default(3000),
   databasePath: z.string().trim().default("data/akron-discord.sqlite")
 });
 
@@ -58,6 +60,8 @@ export function loadConfig(): AppConfig {
     githubToken: envValue("GITHUB_TOKEN"),
     githubOwner: envValue("GITHUB_OWNER"),
     githubRepo: envValue("GITHUB_REPO"),
+    githubWebhookSecret: envValue("GITHUB_WEBHOOK_SECRET"),
+    githubWebhookPort: envValue("GITHUB_WEBHOOK_PORT"),
     databasePath: envValue("DATABASE_PATH")
   });
 }

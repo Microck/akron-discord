@@ -12,6 +12,7 @@ import {
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
 import {
+  applyGithubClosedTag,
   applyGithubTags,
   githubIssueKindForForum,
   syncGithubForumThread,
@@ -219,7 +220,7 @@ export async function handleCommand(input: {
       target: thread.id,
       details: { issueNumber: result.issueNumber, issueUrl: result.issueUrl }
     });
-    await applyClosedGithubTag(thread);
+    await applyGithubClosedTag(thread);
     await interaction.editReply(`Closed GitHub issue #${result.issueNumber}: ${result.issueUrl}`);
     return;
   }
@@ -394,21 +395,4 @@ export function formatGithubForumSyncResult(result: GithubForumSyncResult): stri
     return `Already linked to GitHub issue #${result.issueNumber}: ${result.issueUrl}`;
   }
   return `GitHub sync skipped: ${result.reason}.`;
-}
-
-async function applyClosedGithubTag(thread: AnyThreadChannel): Promise<void> {
-  const parent = thread.parent;
-  if (!parent || parent.type !== ChannelType.GuildForum) {
-    return;
-  }
-
-  const forum = parent as ForumChannel;
-  const tagByName = new Map(forum.availableTags.map(tag => [tag.name, tag.id]));
-  const openId = tagByName.get("GitHub Open");
-  const closedId = tagByName.get("GitHub Closed");
-  const next = thread.appliedTags.filter(tag => tag !== openId);
-  if (closedId && !next.includes(closedId)) {
-    next.push(closedId);
-  }
-  await thread.setAppliedTags(next, "Akron GitHub close status update");
 }
