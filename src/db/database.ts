@@ -93,6 +93,12 @@ function runMigrations(sqlite: Database.Database): void {
       created_utc TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS github_webhook_deliveries (
+      delivery_id TEXT PRIMARY KEY,
+      event_name TEXT NOT NULL,
+      received_utc TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS playtester_applications (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,

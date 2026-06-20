@@ -213,7 +213,7 @@ function findSuspiciousValues(source: unknown): string[] {
     }
 
     if (typeof value === "string" && dangerous.test(value)) {
-      reasons.push("Config contains suspicious text: " + value.slice(0, 80));
+      reasons.push("Config contains suspicious secret-like, command-like, or non-GameBanana URL text.");
       return;
     }
 

@@ -85,6 +85,12 @@ export const githubLinks = sqliteTable(
   })
 );
 
+export const githubWebhookDeliveries = sqliteTable("github_webhook_deliveries", {
+  deliveryId: text("delivery_id").primaryKey(),
+  eventName: text("event_name").notNull(),
+  receivedUtc: text("received_utc").notNull()
+});
+
 export const playtesterApplications = sqliteTable("playtester_applications", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id").notNull(),

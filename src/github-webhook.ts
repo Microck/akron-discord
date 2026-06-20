@@ -4,11 +4,15 @@ import { eq } from "drizzle-orm";
 import { ChannelType, type AnyThreadChannel, type Client } from "discord.js";
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
-import { githubLinks } from "./db/schema.js";
+import { githubLinks, githubWebhookDeliveries } from "./db/schema.js";
 import { applyGithubClosedTag, applyGithubOpenTag } from "./github-forums.js";
+import { utcNow } from "./time.js";
 
 type GithubIssuePayload = {
   action: string;
+  repository?: {
+    full_name?: string;
+  };
   issue: {
     number: number;
     html_url: string;
@@ -21,6 +25,9 @@ type GithubIssuePayload = {
 
 type GithubIssueCommentPayload = {
   action: string;
+  repository?: {
+    full_name?: string;
+  };
   issue: {
     number: number;
     html_url: string;
@@ -83,11 +90,35 @@ async function handleGithubWebhookRequest(
   }
 
   const eventName = request.headers["x-github-event"];
+  const deliveryId = request.headers["x-github-delivery"];
+  if (typeof eventName !== "string" || typeof deliveryId !== "string") {
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "missing github webhook headers" }));
+    return;
+  }
+
   const payload = JSON.parse(body.toString("utf8")) as unknown;
-  if (eventName === "issues") {
-    await handleGithubIssuesWebhook(input, payload as GithubIssuePayload);
-  } else if (eventName === "issue_comment") {
-    await handleGithubIssueCommentWebhook(input, payload as GithubIssueCommentPayload);
+  if (!matchesConfiguredRepository(input.config, payload)) {
+    response.writeHead(403, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "repository mismatch" }));
+    return;
+  }
+
+  if (!await claimGithubDelivery(input.db, deliveryId, eventName)) {
+    response.writeHead(202, { "content-type": "application/json" });
+    response.end(JSON.stringify({ ok: true, duplicate: true }));
+    return;
+  }
+
+  try {
+    if (eventName === "issues") {
+      await handleGithubIssuesWebhook(input, payload as GithubIssuePayload);
+    } else if (eventName === "issue_comment") {
+      await handleGithubIssueCommentWebhook(input, payload as GithubIssueCommentPayload);
+    }
+  } catch (error) {
+    await releaseGithubDelivery(input.db, deliveryId);
+    throw error;
   }
 
   response.writeHead(202, { "content-type": "application/json" });
@@ -135,7 +166,8 @@ async function handleGithubIssueCommentWebhook(
       payload.comment.html_url,
       "",
       payload.comment.body.trim() || "(No comment body.)"
-    ].join("\n"))
+    ].join("\n")),
+    allowedMentions: { parse: [] }
   });
   if (wasLocked) {
     await thread.setLocked(true, "Akron GitHub comment sync");
@@ -167,7 +199,8 @@ async function handleGithubIssuesWebhook(
     }
     await applyGithubClosedTag(thread);
     await thread.send({
-      content: truncateDiscordMessage(`GitHub issue #${payload.issue.number} was closed by ${payload.sender?.login ?? "unknown"}: ${payload.issue.html_url}`)
+      content: truncateDiscordMessage(`GitHub issue #${payload.issue.number} was closed by ${payload.sender?.login ?? "unknown"}: ${payload.issue.html_url}`),
+      allowedMentions: { parse: [] }
     });
     if (!thread.locked) {
       await thread.setLocked(true, "Akron GitHub issue closed");
@@ -189,8 +222,36 @@ async function handleGithubIssuesWebhook(
     await applyGithubOpenTag(thread, parent);
   }
   await thread.send({
-    content: truncateDiscordMessage(`GitHub issue #${payload.issue.number} was reopened by ${payload.sender?.login ?? "unknown"}: ${payload.issue.html_url}`)
+    content: truncateDiscordMessage(`GitHub issue #${payload.issue.number} was reopened by ${payload.sender?.login ?? "unknown"}: ${payload.issue.html_url}`),
+    allowedMentions: { parse: [] }
   });
+}
+
+function matchesConfiguredRepository(config: AppConfig, payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") {
+    return false;
+  }
+  const repository = (payload as { repository?: unknown }).repository;
+  if (!repository || typeof repository !== "object") {
+    return false;
+  }
+
+  const fullName = (repository as { full_name?: unknown }).full_name;
+  const expected = `${config.githubOwner}/${config.githubRepo}`.toLowerCase();
+  return typeof fullName === "string" && fullName.toLowerCase() === expected;
+}
+
+async function claimGithubDelivery(db: AkronDatabase, deliveryId: string, eventName: string): Promise<boolean> {
+  const rows = await db
+    .insert(githubWebhookDeliveries)
+    .values({ deliveryId, eventName, receivedUtc: utcNow() })
+    .onConflictDoNothing()
+    .returning({ deliveryId: githubWebhookDeliveries.deliveryId });
+  return rows.length > 0;
+}
+
+async function releaseGithubDelivery(db: AkronDatabase, deliveryId: string): Promise<void> {
+  await db.delete(githubWebhookDeliveries).where(eq(githubWebhookDeliveries.deliveryId, deliveryId));
 }
 
 async function fetchLinkedThread(

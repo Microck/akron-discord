@@ -82,7 +82,8 @@ describe("archive validation", () => {
     }));
 
     expect(result.ok).toBe(false);
-    expect(result.reasons.some(reason => reason.startsWith("Config contains suspicious text:"))).toBe(true);
+    expect(result.reasons).toContain("Config contains suspicious secret-like, command-like, or non-GameBanana URL text.");
+    expect(result.reasons.join("\n")).not.toContain("powershell");
   });
 
   it("rejects extra file count and oversized text values", async () => {

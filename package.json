@@ -32,6 +32,12 @@
     "@types/yauzl": "^2.10.3",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.6"
+  },
+  "overrides": {
+    "undici": "6.27.0",
+    "ws": "8.21.0",
+    "vite": "7.3.5",
+    "esbuild": "0.28.1"
   }
 }
