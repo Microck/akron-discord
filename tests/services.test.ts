@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { ChannelType } from "discord.js";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
@@ -14,6 +15,13 @@ import { formatCatalogBackupTimestamp } from "../src/time.js";
 import { playtestWindowIsActive } from "../src/services/playtesting.js";
 import { optimizeCatalogImage } from "../src/services/image-optimizer.js";
 import { catalogImageMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
+import { createUploadWorkerClient, hasUploadWorkerConfig } from "../src/services/upload-worker-client.js";
+import {
+  buildUploadModerationComponents,
+  buildUploadModerationEmbed,
+  pollUploadModerationQueue,
+  uploadModerationButtonId
+} from "../src/services/upload-moderation.js";
 
 describe("map resolver helpers", () => {
   it("creates stable map SID slugs for R2 object paths", () => {
@@ -217,7 +225,7 @@ describe("catalog image optimization", () => {
       bytes: Buffer.allocUnsafe(imageSourceMaxBytes + 1),
       contentType: "image/png",
       fileName: "capture.png"
-    })).rejects.toThrow("Map capture exceeds 64 MiB.");
+    })).rejects.toThrow(`Map capture exceeds ${imageSourceMaxBytes / 1024 / 1024} MiB.`);
   });
 
   it("optimizes capture images with the catalog size resize target", async () => {
@@ -237,6 +245,290 @@ describe("catalog image optimization", () => {
   }, 15_000);
 });
 
+describe("upload worker client", () => {
+  it("detects whether signed upload worker integration is configured", () => {
+    expect(hasUploadWorkerConfig(config({ uploadWorkerUrl: "", uploadWorkerBotSecret: "secret" }))).toBe(false);
+    expect(hasUploadWorkerConfig(config({ uploadWorkerUrl: "https://uploads.example", uploadWorkerBotSecret: "" }))).toBe(false);
+    expect(hasUploadWorkerConfig(config({ uploadWorkerUrl: "https://uploads.example", uploadWorkerBotSecret: "secret" }))).toBe(true);
+  });
+
+  it("signs bot job claim requests for the upload worker", async () => {
+    const requests: Request[] = [];
+    const client = createUploadWorkerClient(
+      config({
+        uploadWorkerUrl: "https://uploads.example.test/api/",
+        uploadWorkerBotSecret: "secret"
+      }),
+      async (request, init) => {
+        requests.push(request instanceof Request ? new Request(request, init) : new Request(request, init));
+        return Response.json({
+          jobs: [{
+            batchId: "batch",
+            submissionId: "submission",
+            section: "StartPos",
+            mapSid: "Map/Sid",
+            title: "Title",
+            description: "Description",
+            attribution: { mode: "anonymous", label: "Anonymous" },
+            status: "queued",
+            validationReasons: []
+          }]
+        });
+      }
+    );
+
+    const jobs = await client.claimJobs(3);
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.submissionId).toBe("submission");
+    const request = requests[0];
+    expect(request?.url).toBe("https://uploads.example.test/bot/jobs/claim");
+    expect(request?.headers.get("x-akron-timestamp")).toBeTruthy();
+    expect(request?.headers.get("x-akron-nonce")).toBeTruthy();
+    expect(request?.headers.get("x-akron-signature")).toMatch(/^[a-f0-9]{64}$/);
+    expect(await request?.text()).toBe("{\"limit\":3}");
+  });
+});
+
+describe("upload moderation messages", () => {
+  it("builds staff review embeds and stable button IDs", () => {
+    const job = {
+      batchId: "batch",
+      submissionId: "submission",
+      section: "StartPos",
+      mapSid: "Map/Sid",
+      title: "Map StartPos Pack",
+      description: "Start positions.",
+      attribution: { mode: "anonymous", label: "Anonymous" },
+      status: "reviewing",
+      validationReasons: []
+    };
+
+    const embed = buildUploadModerationEmbed(job).toJSON();
+    const components = buildUploadModerationComponents(job)[0]?.toJSON();
+
+    expect(embed.title).toBe("Map StartPos Pack");
+    expect(embed.description).toBe("Start positions.");
+    expect(embed.fields?.map(field => field.name)).toContain("Submission ID");
+    expect(components?.components.map(component => "custom_id" in component ? component.custom_id : "")).toEqual([
+      uploadModerationButtonId("approve", "submission"),
+      uploadModerationButtonId("changes", "submission"),
+      uploadModerationButtonId("reject", "submission")
+    ]);
+  });
+
+  it("builds attribution confirmation buttons for pending Discord claims", () => {
+    const job = {
+      batchId: "batch",
+      submissionId: "submission",
+      section: "StartPos",
+      mapSid: "Map/Sid",
+      title: "Map StartPos Pack",
+      description: "Start positions.",
+      attribution: { mode: "discord", label: "Discord confirmation pending", confirmed: false },
+      status: "reviewing",
+      validationReasons: []
+    };
+
+    const components = buildUploadModerationComponents(job)[0]?.toJSON();
+
+    expect(components?.components.map(component => "custom_id" in component ? component.custom_id : "")).toEqual([
+      uploadModerationButtonId("confirm", "submission")
+    ]);
+  });
+
+  it("bounds long Map SID values in moderation embeds", () => {
+    const job = {
+      batchId: "batch",
+      submissionId: "submission",
+      section: "StartPos",
+      mapSid: "x".repeat(2_000),
+      title: "Map StartPos Pack",
+      description: "Start positions.",
+      attribution: { mode: "anonymous", label: "Anonymous" },
+      status: "reviewing",
+      validationReasons: []
+    };
+
+    const embed = buildUploadModerationEmbed(job).toJSON();
+    const mapSid = embed.fields?.find(field => field.name === "Map SID")?.value ?? "";
+
+    expect(mapSid).toHaveLength(1024);
+    expect(mapSid.endsWith("...")).toBe(true);
+  });
+
+  it("reports requeue failures without hiding the Discord delivery failure", async () => {
+    const deliveryError = new Error("Discord send failed.");
+    const errors: unknown[] = [];
+    const requeueBodies: unknown[] = [];
+    const deliveredBodies: unknown[] = [];
+    const previousFetch = globalThis.fetch;
+    let sendAttempts = 0;
+    const channel = {
+      name: "scan-log",
+      type: ChannelType.GuildText,
+      async send(): Promise<void> {
+        sendAttempts += 1;
+        if (sendAttempts === 1) {
+          throw deliveryError;
+        }
+      }
+    };
+    const client = {
+      guilds: {
+        async fetch(): Promise<unknown> {
+          return {
+            channels: {
+              async fetch(): Promise<unknown> {
+                return {
+                  find(predicate: (candidate: typeof channel) => boolean): typeof channel | null {
+                    return predicate(channel) ? channel : null;
+                  }
+                };
+              }
+            }
+          };
+        }
+      }
+    };
+
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (request.url === "https://uploads.example.test/bot/jobs/claim") {
+        return Response.json({
+          jobs: [
+            uploadModerationJob("submission-a"),
+            uploadModerationJob("submission-b")
+          ]
+        });
+      }
+      if (request.url === "https://uploads.example.test/bot/jobs/requeue") {
+        requeueBodies.push(await request.json());
+        return Response.json({ error: "requeue_failed" }, { status: 500 });
+      }
+      if (request.url === "https://uploads.example.test/bot/jobs/delivered") {
+        deliveredBodies.push(await request.json());
+        return Response.json({ ok: true });
+      }
+      return Response.json({ error: "unexpected_request" }, { status: 404 });
+    };
+
+    try {
+      await pollUploadModerationQueue({
+        client: client as never,
+        config: config({
+          discordGuildId: "guild",
+          uploadWorkerUrl: "https://uploads.example.test",
+          uploadWorkerBotSecret: "secret"
+        }),
+        async onError(error: unknown): Promise<void> {
+          errors.push(error);
+        }
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+
+    expect(requeueBodies).toEqual([{ submissionIds: ["submission-a"] }]);
+    expect(deliveredBodies).toEqual([{ submissionIds: ["submission-b"] }]);
+    expect(errors.map(error => error instanceof Error ? error.message : String(error))).toEqual([
+      "Upload Worker request failed with HTTP 500.",
+      "Discord send failed."
+    ]);
+  });
+
+  it("backs off failed attribution DM delivery without immediate requeue", async () => {
+    const deliveryError = new Error("Discord DM failed.");
+    const errors: unknown[] = [];
+    const requeueBodies: unknown[] = [];
+    const deliveredBodies: unknown[] = [];
+    const previousFetch = globalThis.fetch;
+    const channel = {
+      name: "scan-log",
+      type: ChannelType.GuildText,
+      async send(): Promise<void> {
+        throw new Error("Attribution jobs should use DMs.");
+      }
+    };
+    const client = {
+      users: {
+        async fetch(discordUserId: string): Promise<unknown> {
+          expect(discordUserId).toBe("123456789012345678");
+          return {
+            async send(): Promise<void> {
+              throw deliveryError;
+            }
+          };
+        }
+      },
+      guilds: {
+        async fetch(): Promise<unknown> {
+          return {
+            channels: {
+              async fetch(): Promise<unknown> {
+                return {
+                  find(predicate: (candidate: typeof channel) => boolean): typeof channel | null {
+                    return predicate(channel) ? channel : null;
+                  }
+                };
+              }
+            }
+          };
+        }
+      }
+    };
+
+    globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (request.url === "https://uploads.example.test/bot/jobs/claim") {
+        return Response.json({
+          jobs: [
+            uploadModerationJob("submission-a", {
+              attribution: {
+                mode: "discord",
+                label: "Discord confirmation pending",
+                confirmed: false,
+                discordUserId: "123456789012345678"
+              },
+              status: "awaiting_attribution"
+            })
+          ]
+        });
+      }
+      if (request.url === "https://uploads.example.test/bot/jobs/requeue") {
+        requeueBodies.push(await request.json());
+        return Response.json({ ok: true });
+      }
+      if (request.url === "https://uploads.example.test/bot/jobs/delivered") {
+        deliveredBodies.push(await request.json());
+        return Response.json({ ok: true });
+      }
+      return Response.json({ error: "unexpected_request" }, { status: 404 });
+    };
+
+    try {
+      await pollUploadModerationQueue({
+        client: client as never,
+        config: config({
+          discordGuildId: "guild",
+          uploadWorkerUrl: "https://uploads.example.test",
+          uploadWorkerBotSecret: "secret"
+        }),
+        async onError(error: unknown): Promise<void> {
+          errors.push(error);
+        }
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+
+    expect(requeueBodies).toEqual([]);
+    expect(deliveredBodies).toEqual([]);
+    expect(errors.map(error => error instanceof Error ? error.message : String(error))).toEqual([
+      "Discord DM failed."
+    ]);
+  });
+});
 describe("playtester activity thresholds", () => {
   it("counts forum feedback or at least 3 chat messages as active", () => {
     expect(playtestWindowIsActive({ forumCount: 1, chatCount: 0 })).toBe(true);
@@ -260,6 +552,36 @@ function pack(overrides: Partial<CatalogPack>): CatalogPack {
     downloadCount: 0,
     updatedUtc: "2026-05-20T00:00:00.000Z",
     tags: ["startpos"],
+    ...overrides
+  };
+}
+
+type TestUploadModerationJob = {
+  batchId: string;
+  submissionId: string;
+  section: string;
+  mapSid: string;
+  title: string;
+  description: string;
+  attribution: { mode: string; label: string; confirmed?: boolean; discordUserId?: string };
+  status: string;
+  validationReasons: string[];
+};
+
+function uploadModerationJob(
+  submissionId: string,
+  overrides: Partial<TestUploadModerationJob> = {}
+): TestUploadModerationJob {
+  return {
+    batchId: "batch",
+    submissionId,
+    section: "StartPos",
+    mapSid: "Map/Sid",
+    title: "Map StartPos Pack",
+    description: "Start positions.",
+    attribution: { mode: "anonymous", label: "Anonymous" },
+    status: "reviewing",
+    validationReasons: [],
     ...overrides
   };
 }
@@ -289,6 +611,8 @@ function config(overrides: Partial<AppConfig>): AppConfig {
     githubRepo: "",
     githubWebhookSecret: "",
     githubWebhookPort: 3005,
+    uploadWorkerUrl: "",
+    uploadWorkerBotSecret: "",
     databasePath: "data/test.sqlite",
     ...overrides
   };

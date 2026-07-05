@@ -401,7 +401,7 @@ GitHub issue comments created on GitHub should post into the linked Discord foru
 Default upload limits:
 
 - `.akr` max size: 4 MiB.
-- Map capture source max size: 64 MiB before optimization.
+- Map capture source max size: 100 MiB before optimization.
 - Optimized stored map capture target and hard cap: 4 MiB.
 - Allowed map capture formats: PNG, JPEG, and WebP.
 - One `.akr` attachment is required per `.akr` submission.
@@ -409,6 +409,7 @@ Default upload limits:
 - Map captures are optional but heavily recommended for map-specific catalog posts.
 
 The 4 MiB `.akr` limit matches Akron's current in-game community pack download guardrail.
+Automated in-game uploads currently accept `StartPos` only. Auto Kill and Auto Deafen forum posts can still be handled through moderator-reviewed catalog workflows, but the upload Worker must not publish those sections until their area data carries explicit map scope.
 
 ## Image Optimization
 
@@ -628,6 +629,8 @@ captures/{mapSidSlug}/{packId}.webp
 ```
 
 The bot should update SQLite and R2 in an order that makes recovery practical. If a catalog write fails after assets upload, the post should stay out of `Published` and the failure should be logged to `audit-log` and `bot-alerts`.
+
+Direct in-game uploads must keep quarantine and public storage separate. The Upload Worker writes unreviewed client uploads only to a private quarantine R2 bucket, then copies approved packs, approved captures, and `catalog/index.json` to the public catalog bucket. Public R2 domains must never expose the `quarantine/uploads/...` prefix.
 
 Catalog entries must match Akron's current in-game contract:
 
