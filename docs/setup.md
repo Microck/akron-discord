@@ -83,6 +83,8 @@ The bot uploads through the S3-compatible R2 API, so it also needs an R2 API tok
 
 Submitted `.akr` files are scanned in memory first. The bot only writes approved public downloads to R2. Flagged or review-blocked submissions stay in Discord and are not mirrored to the public bucket.
 
+The public catalog accepts the current Akron setup archive contract only: each `.akr` must contain exactly `manifest.json` and `setup.json`, the manifest `Kind` must be `setup`, and `setup.json` must use `akron-setup-v1`. Legacy `profile.json` packs are rejected instead of migrated.
+
 ## Discord App Requirements
 
 Enable these bot gateway intents in the Discord developer portal:
@@ -129,9 +131,19 @@ General pack forums are scanned but stay Discord-only:
 - `audio-packs`
 - `recorder-packs`
 
-Map captures are optional but strongly recommended. If present, the bot validates the image, optimizes it through `optimo`, converts to WebP, and uploads only the optimized image to R2.
+Map captures are optional but strongly recommended. If present, the bot validates the image, optimizes it through `optimo`, converts it to WebP, and uploads only the optimized image to R2.
 
 The deployment image must include ImageMagick's `magick` binary for `optimo` image conversion. If image optimization fails, the bot keeps the post out of the catalog and marks it `Needs Moderator Review`.
+
+Current limits:
+
+- `.akr` attachment: 4 MiB.
+- Optional capture image source before optimization: 64 MiB.
+- Optimized capture stored in R2: 4 MiB.
+- Catalog index read by Akron: 1 MiB.
+- Pack download read by Akron: 4 MiB.
+
+Cloudflare R2 Standard storage currently includes 10 GB-month, 1 million Class A operations, 10 million Class B operations, and free Internet egress each month. Publishing writes are Class A operations. Catalog refreshes and pack downloads are Class B operations. Large source captures only live in Discord; the bot stores the optimized WebP in R2.
 
 ## GitHub Sync
 

@@ -35,14 +35,14 @@ describe("archive validation", () => {
   it("accepts a minimal scoped map-specific .akr archive", async () => {
     const buffer = zipJson({
       "manifest.json": {
-        Kind: "profile",
+        Format: "akron-archive",
+        Kind: "setup",
         Target: { MapSid: "SpringCollab2020/1-Beginner" }
       },
-      "profile.json": {
-        Format: "akron-profile-v1",
+      "setup.json": {
+        Format: "akron-setup-v1",
         Name: "Beginner StartPos",
-        Section: "StartPos",
-        Target: { MapSid: "SpringCollab2020/1-Beginner" }
+        Section: "StartPos"
       }
     });
 
@@ -54,6 +54,53 @@ describe("archive validation", () => {
     expect(result.reasons).toEqual([]);
   });
 
+  it("derives StartPos map identity from current setup pack slots", async () => {
+    const buffer = zipJson({
+      "manifest.json": {
+        Format: "akron-archive",
+        Kind: "setup"
+      },
+      "setup.json": {
+        Format: "akron-setup-v1",
+        Name: "Beginner StartPos",
+        Section: "StartPos",
+        StartPositions: {
+          "1": { Room: "a-00", AreaSid: "SpringCollab2020/1-Beginner" },
+          "2": { Room: "a-01", AreaSid: "SpringCollab2020/1-Beginner" }
+        }
+      }
+    });
+
+    const result = await validateAkrArchive(buffer);
+
+    expect(result.ok).toBe(true);
+    expect(result.mapSid).toBe("SpringCollab2020/1-Beginner");
+  });
+
+  it("does not accept the removed profile archive contract", async () => {
+    const result = await validateAkrArchive(zipJson({
+      "manifest.json": { Kind: "profile" },
+      "profile.json": { Format: "akron-profile-v1", Section: "StartPos" }
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("Archive contains unexpected file: profile.json");
+    expect(result.reasons).toContain("Missing setup.json.");
+    expect(result.reasons).toContain("manifest.format must be akron-archive.");
+    expect(result.reasons).toContain("manifest.kind must be setup.");
+  });
+
+  it("requires current archive and setup format markers", async () => {
+    const result = await validateAkrArchive(zipJson({
+      "manifest.json": { Kind: "setup" },
+      "setup.json": { Section: "StartPos" }
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("manifest.format must be akron-archive.");
+    expect(result.reasons).toContain("setup.json format must be akron-setup-v1.");
+  });
+
   it("rejects unsafe archive paths", async () => {
     const result = await validateAkrArchive(zipJson({ "/evil.json": { bad: true } }));
 
@@ -61,21 +108,50 @@ describe("archive validation", () => {
     expect(result.reasons).toContain("Archive contains an unsafe path.");
   });
 
-  it("rejects Whole profile packs", async () => {
+  it("rejects traversal archive paths", async () => {
+    const result = await validateAkrArchive(zipJson({ "../evil.json": { bad: true } }));
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("Archive contains an unsafe path.");
+  });
+
+  it("rejects nested relative archive entries as unsupported layout", async () => {
+    const forwardSlash = await validateAkrArchive(zipJson({ "folder/setup.json": { bad: true } }));
+    const backslash = await validateAkrArchive(zipJson({ "folder\\setup.json": { bad: true } }));
+
+    expect(forwardSlash.ok).toBe(false);
+    expect(forwardSlash.reasons).toContain("Archive contains unexpected file: folder/setup.json");
+    expect(forwardSlash.reasons).not.toContain("Archive contains an unsafe path.");
+    expect(backslash.ok).toBe(false);
+    expect(backslash.reasons.some(reason => reason.startsWith("Archive contains unexpected file: "))).toBe(true);
+    expect(backslash.reasons).not.toContain("Archive contains an unsafe path.");
+  });
+
+  it("requires map-specific setup packs to declare a target map", async () => {
     const result = await validateAkrArchive(zipJson({
-      "manifest.json": { Kind: "profile" },
-      "profile.json": { Format: "akron-profile-v1", Section: "Whole" }
+      "manifest.json": { Format: "akron-archive", Kind: "setup" },
+      "setup.json": { Format: "akron-setup-v1", Section: "AutoKill" }
     }));
 
     expect(result.ok).toBe(false);
-    expect(result.reasons).toContain("Whole profile packs are not accepted publicly yet.");
+    expect(result.reasons).toContain("Map-specific pack is missing a target map SID.");
   });
 
-  it("flags suspicious values in profile content", async () => {
+  it("rejects Whole setup packs", async () => {
     const result = await validateAkrArchive(zipJson({
-      "manifest.json": { Kind: "profile" },
-      "profile.json": {
-        Format: "akron-profile-v1",
+      "manifest.json": { Format: "akron-archive", Kind: "setup" },
+      "setup.json": { Format: "akron-setup-v1", Section: "Whole" }
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("Whole setup packs are not accepted publicly yet.");
+  });
+
+  it("flags suspicious values in setup content", async () => {
+    const result = await validateAkrArchive(zipJson({
+      "manifest.json": { Format: "akron-archive", Kind: "setup" },
+      "setup.json": {
+        Format: "akron-setup-v1",
         Section: "Hud",
         Note: "run powershell -enc bad"
       }
@@ -88,9 +164,9 @@ describe("archive validation", () => {
 
   it("rejects extra file count and oversized text values", async () => {
     const result = await validateAkrArchive(zipJson({
-      "manifest.json": { Kind: "profile" },
-      "profile.json": {
-        Format: "akron-profile-v1",
+      "manifest.json": { Format: "akron-archive", Kind: "setup" },
+      "setup.json": {
+        Format: "akron-setup-v1",
         Section: "Hud",
         Note: "x".repeat(10_001)
       },
@@ -101,6 +177,16 @@ describe("archive validation", () => {
     expect(result.reasons).toContain("Archive contains too many files.");
     expect(result.reasons).toContain("Archive contains unexpected file: extra.json");
     expect(result.reasons).toContain("Config contains an unusually large text value.");
+  });
+
+  it("rejects unsupported setup payload formats", async () => {
+    const result = await validateAkrArchive(zipJson({
+      "manifest.json": { Format: "akron-archive", Kind: "setup" },
+      "setup.json": { Format: "unknown-format", Section: "Hud" }
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("setup.json format must be akron-setup-v1.");
   });
 });
 
@@ -114,7 +200,7 @@ describe("submission scan classification", () => {
   it("only treats malware-like archive findings as flagged reasons", () => {
     expect(hasMalwareArchiveReason([
       "Archive contains too many files.",
-      "Archive JSON payload is too large: profile.json"
+      "Archive JSON payload is too large: setup.json"
     ])).toBe(false);
     expect(hasMalwareArchiveReason([
       "Config contains suspicious text: powershell -enc bad"

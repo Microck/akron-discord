@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHmac } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
@@ -11,6 +12,8 @@ import { formatGithubForumSyncResult } from "../src/commands.js";
 import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
 import { playtestWindowIsActive } from "../src/services/playtesting.js";
+import { optimizeCatalogImage } from "../src/services/image-optimizer.js";
+import { catalogImageMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
 
 describe("map resolver helpers", () => {
   it("creates stable map SID slugs for R2 object paths", () => {
@@ -200,12 +203,38 @@ describe("FAQ embed", () => {
     const fieldText = fields.map(field => `${field.name}\n${field.value}`).join("\n\n");
 
     expect(faq.description).toBeUndefined();
-    expect(fieldText).toContain("Akron can export and import whole `.akr` profiles");
+    expect(fieldText).toContain("Akron can export and import whole `.akr` setup packs");
     expect(fieldText).toContain("public Discord catalog only accepts scoped packs");
     expect(fieldText).toContain("The default overlay bind is `Tab`");
     expect(fieldText).toContain("Open the target map first, refresh the catalog");
     expect(fieldText).not.toContain("Why is a feature blocked or marked?");
   });
+});
+
+describe("catalog image optimization", () => {
+  it("rejects capture sources above the upload budget before decoding", async () => {
+    await expect(optimizeCatalogImage({
+      bytes: Buffer.allocUnsafe(imageSourceMaxBytes + 1),
+      contentType: "image/png",
+      fileName: "capture.png"
+    })).rejects.toThrow("Map capture exceeds 64 MiB.");
+  });
+
+  it("optimizes capture images with the catalog size resize target", async () => {
+    const source = await readFile(new URL("../assets/akronleaf.png", import.meta.url));
+    const optimized = await optimizeCatalogImage({
+      bytes: source,
+      contentType: "image/png",
+      fileName: "capture.png"
+    });
+
+    expect(optimized.contentType).toBe("image/webp");
+    expect(optimized.extension).toBe("webp");
+    expect(optimized.bytes.length).toBeGreaterThan(0);
+    expect(optimized.bytes.length).toBeLessThanOrEqual(catalogImageMaxBytes);
+    expect(optimized.bytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(optimized.bytes.subarray(8, 12).toString("ascii")).toBe("WEBP");
+  }, 15_000);
 });
 
 describe("playtester activity thresholds", () => {

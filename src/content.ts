@@ -81,7 +81,7 @@ export function buildSubmissionGuideEmbed(config?: AppConfig): EmbedBuilder {
       },
       {
         name: "2. Export one scoped pack",
-        value: "In Akron, export only the matching section. Do not post whole profiles yet."
+        value: "In Akron, export only the matching section. Do not post whole setup packs yet."
       },
       {
         name: "3. Add the map link",
@@ -126,7 +126,7 @@ export function buildFaqEmbed(config?: AppConfig): EmbedBuilder {
     .addFields(
       { name: "How do I get access?", value: "Click the button in #verify." },
       { name: "Where do I report bugs?", value: `Prefer ${githubIssues}. Discord \`issues\` posts are synced with GitHub when needed.` },
-      { name: "Can I post whole profiles?", value: "Akron can export and import whole `.akr` profiles for backup or direct sharing, but the public Discord catalog only accepts scoped packs such as StartPos, Auto Kill, Auto Deafen, Keybinds, HUD, Audio, and Recorder." },
+      { name: "Can I post whole setup packs?", value: "Akron can export and import whole `.akr` setup packs for backup or direct sharing, but the public Discord catalog only accepts scoped packs such as StartPos, Auto Kill, Auto Deafen, Keybinds, HUD, Audio, and Recorder." },
       { name: "Where do community packs show up?", value: "Map-specific catalog packs appear in Akron's Community Packs browser for the current map. Discord-only pack forums stay in Discord unless staff publish them." },
       { name: "How do I open Akron?", value: "The default overlay bind is `Tab`. If it does not open, check Everest controls for Akron actions and look for bind conflicts with Celeste or other mods." },
       { name: "Why are Community Packs empty?", value: "Open the target map first, refresh the catalog, then check category filters, search text, catalog URL, and whether the pack's map SID matches the current map." },
@@ -156,7 +156,7 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
     feedbackExample("questions", "Question", [
       "**Example**",
       "`Title:` How do I export only StartPos?",
-      "`Body:` I am practicing *Glyph*. I can export a profile, but I only want the StartPos section. Which export option should I use?"
+      "`Body:` I am practicing *Glyph*. I can export a setup pack, but I only want the StartPos section. Which export option should I use?"
     ]),
     feedbackExample("issues", "Issue report", [
       "**Example**",
@@ -187,7 +187,7 @@ export function forumGuidelines(scope: string): string {
     "",
     "Requirements",
     "- Attach exactly one scoped .akr file.",
-    needsMap ? "- Include a supported map link or vanilla chapter name." : "- Do not attach whole profile exports yet.",
+    needsMap ? "- Include a supported map link or vanilla chapter name." : "- Do not attach whole setup exports yet.",
     "- Add a short description.",
     "- Add a room or map capture when it helps show the contents."
   ].join("\n");

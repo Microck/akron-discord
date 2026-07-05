@@ -2,7 +2,10 @@ import yauzl from "yauzl";
 import { akrMaxBytes, type AkrArchiveValidation, type AkronProfileSection } from "./types.js";
 import { normalizeSection } from "./sections.js";
 
-const allowedArchiveNames = new Set(["manifest.json", "profile.json"]);
+const archiveFormat = "akron-archive";
+const setupKind = "setup";
+const setupFormat = "akron-setup-v1";
+const allowedArchiveNames = new Set(["manifest.json", "setup.json"]);
 const maxCompressionRatio = 100;
 const maxJsonFileBytes = 1024 * 1024;
 const maxStringValueLength = 10_000;
@@ -10,49 +13,58 @@ const maxStringValueLength = 10_000;
 export async function validateAkrArchive(buffer: Buffer): Promise<AkrArchiveValidation> {
   const reasons: string[] = [];
   if (buffer.length > akrMaxBytes) {
-    reasons.push("Archive exceeds 4 MB.");
+    reasons.push("Archive exceeds 4 MiB.");
   }
 
   const files = await readZipJsonFiles(buffer, reasons);
   const manifest = files.get("manifest.json");
-  const profile = files.get("profile.json");
+  const setup = files.get("setup.json");
   if (!manifest) {
     reasons.push("Missing manifest.json.");
   } else if (!isPlainObject(manifest)) {
     reasons.push("manifest.json must be a JSON object.");
   }
-  if (!profile) {
-    reasons.push("Missing profile.json.");
-  } else if (!isPlainObject(profile)) {
-    reasons.push("profile.json must be a JSON object.");
+  if (!setup) {
+    reasons.push("Missing setup.json.");
+  } else if (!isPlainObject(setup)) {
+    reasons.push("setup.json must be a JSON object.");
   }
 
+  const manifestFormat = readString(manifest, ["format", "Format"]);
+  if (isPlainObject(manifest) && manifestFormat !== archiveFormat) {
+    reasons.push("manifest.format must be akron-archive.");
+  }
   const manifestKind = readString(manifest, ["kind", "Kind"]);
-  if (manifest && manifestKind && manifestKind !== "profile") {
-    reasons.push("manifest.kind must be profile.");
+  if (isPlainObject(manifest) && manifestKind !== setupKind) {
+    reasons.push("manifest.kind must be setup.");
+  }
+  const setupFormatValue = readString(setup, ["format", "Format"]);
+  if (isPlainObject(setup) && setupFormatValue !== setupFormat) {
+    reasons.push("setup.json format must be akron-setup-v1.");
   }
 
   const manifestSection = normalizeSection(readString(manifest, ["section", "Section"]));
-  const profileSection = normalizeSection(readString(profile, ["section", "Section"]));
-  const section = profileSection ?? manifestSection;
+  const setupSection = normalizeSection(readString(setup, ["section", "Section"]));
+  const section = setupSection ?? manifestSection;
   if (!section) {
-    reasons.push("Profile section is missing or unsupported.");
+    reasons.push("Setup section is missing or unsupported.");
   }
-  if (manifestSection && profileSection && manifestSection !== profileSection) {
-    reasons.push("Manifest/profile scope mismatch.");
+  if (manifestSection && setupSection && manifestSection !== setupSection) {
+    reasons.push("Manifest/setup scope mismatch.");
   }
   if (section === "Whole") {
-    reasons.push("Whole profile packs are not accepted publicly yet.");
+    reasons.push("Whole setup packs are not accepted publicly yet.");
   }
 
   const manifestMapSid = readNestedString(manifest, [["target", "Target"], ["mapSid", "MapSid"]]);
-  const profileMapSid = readNestedString(profile, [["target", "Target"], ["mapSid", "MapSid"]]);
-  const mapSid = profileMapSid || manifestMapSid || "";
-  if (isMapSpecific(section) && !mapSid) {
+  const setupMapSid = readNestedString(setup, [["target", "Target"], ["mapSid", "MapSid"]]);
+  const startPosMapSid = readStartPosMapSid(setup);
+  const mapSid = setupMapSid || manifestMapSid || startPosMapSid || "";
+  if (isMapSpecificSection(section) && !mapSid) {
     reasons.push("Map-specific pack is missing a target map SID.");
   }
 
-  const suspicious = findSuspiciousValues({ manifest, profile });
+  const suspicious = findSuspiciousValues({ manifest, setup });
   reasons.push(...suspicious);
 
   return {
@@ -60,20 +72,17 @@ export async function validateAkrArchive(buffer: Buffer): Promise<AkrArchiveVali
     section,
     mapSid,
     manifest,
-    profile,
+    setup,
     normalizedFacts: {
       section,
       mapSid,
+      manifestFormat,
       manifestKind,
-      profileName: readString(profile, ["name", "Name"]),
-      profileFormat: readString(profile, ["format", "Format"])
+      setupName: readString(setup, ["name", "Name"]),
+      setupFormat: setupFormatValue
     },
     reasons
   };
-}
-
-function isMapSpecific(section: AkronProfileSection | undefined): boolean {
-  return section === "StartPos" || section === "AutoKill" || section === "AutoDeafen";
 }
 
 function readZipJsonFiles(buffer: Buffer, reasons: string[]): Promise<Map<string, unknown>> {
@@ -105,7 +114,7 @@ function readZipJsonFiles(buffer: Buffer, reasons: string[]): Promise<Map<string
         }
 
         const name = entry.fileName;
-        if (name.includes("..") || name.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(name)) {
+        if (isUnsafeArchiveEntryName(name)) {
           reasons.push("Archive contains an unsafe path.");
           zip.close();
           resolve(files);
@@ -164,6 +173,14 @@ function readZipJsonFiles(buffer: Buffer, reasons: string[]): Promise<Map<string
   });
 }
 
+function isUnsafeArchiveEntryName(name: string): boolean {
+  if (name.startsWith("/") || name.startsWith("\\") || /^[a-zA-Z]:[\\/]/.test(name)) {
+    return true;
+  }
+
+  return name.split(/[\\/]+/).includes("..");
+}
+
 function describeZipOpenError(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   if (/path|absolute|relative|invalid/i.test(message)) {
@@ -200,6 +217,35 @@ function readNestedString(source: unknown, pathOptions: string[][]): string {
     current = keys.map(key => record[key]).find(Boolean);
   }
   return typeof current === "string" ? current : "";
+}
+
+function readStartPosMapSid(setup: unknown): string {
+  if (!setup || typeof setup !== "object") {
+    return "";
+  }
+
+  const startPositions = (setup as Record<string, unknown>).StartPositions ?? (setup as Record<string, unknown>).startPositions;
+  if (!startPositions || typeof startPositions !== "object" || Array.isArray(startPositions)) {
+    return "";
+  }
+
+  const areaSids = new Set<string>();
+  for (const value of Object.values(startPositions)) {
+    if (!value || typeof value !== "object") {
+      continue;
+    }
+
+    const areaSid = readString(value, ["areaSid", "AreaSid"]);
+    if (areaSid) {
+      areaSids.add(areaSid);
+    }
+  }
+
+  return areaSids.size === 1 ? [...areaSids][0] : "";
+}
+
+function isMapSpecificSection(section: AkronProfileSection | undefined): boolean {
+  return section === "StartPos" || section === "AutoKill" || section === "AutoDeafen";
 }
 
 function findSuspiciousValues(source: unknown): string[] {

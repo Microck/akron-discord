@@ -1,5 +1,7 @@
 export const akrMaxBytes = 4 * 1024 * 1024;
-export const imageMaxBytes = 8 * 1024 * 1024;
+export const imageSourceMaxBytes = 64 * 1024 * 1024;
+export const catalogImageMaxBytes = 4 * 1024 * 1024;
+export const catalogImageResizeTarget = "4MB";
 
 export type AkronProfileSection =
   | "Whole"
@@ -29,7 +31,7 @@ export type AkrArchiveValidation = {
   section?: AkronProfileSection;
   mapSid?: string;
   manifest: unknown;
-  profile: unknown;
+  setup: unknown;
   normalizedFacts: Record<string, unknown>;
   reasons: string[];
 };
