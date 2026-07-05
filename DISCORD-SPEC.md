@@ -215,7 +215,7 @@ These are Discord-only after scanning. They do not enter the in-game map catalog
 | `audio-packs` | Shared audio settings. | `Audio` |
 | `recorder-packs` | Shared recorder settings. | `Recorder` |
 
-`Whole` profile packs are not allowed for public posting in the first version.
+`Whole` setup packs are not allowed for public posting in the first version.
 
 Each general pack forum must have Post Guidelines that link to `submission-guide` and include the copy-paste submission template.
 
@@ -400,14 +400,15 @@ GitHub issue comments created on GitHub should post into the linked Discord foru
 
 Default upload limits:
 
-- `.akr` max size: 4 MB.
-- Map capture max size: 8 MB before optimization.
+- `.akr` max size: 4 MiB.
+- Map capture source max size: 64 MiB before optimization.
+- Optimized stored map capture target and hard cap: 4 MiB.
 - Allowed map capture formats: PNG, JPEG, and WebP.
 - One `.akr` attachment is required per `.akr` submission.
 - At most one map capture image is used as the catalog preview.
 - Map captures are optional but heavily recommended for map-specific catalog posts.
 
-The 4 MB `.akr` limit matches Akron's current in-game community pack download guardrail.
+The 4 MiB `.akr` limit matches Akron's current in-game community pack download guardrail.
 
 ## Image Optimization
 
@@ -418,14 +419,14 @@ Pipeline:
 1. Download the Discord image attachment to a temporary working directory.
 2. Validate MIME type and decoded dimensions.
 3. Run `optimo` with metadata stripping.
-4. Resize large captures to a catalog-friendly width.
+4. Resize large captures to the catalog storage budget.
 5. Upload only the optimized output to R2.
 6. Store the optimized R2 URL as `imageUrl` in `index.json`.
 
 Recommended first settings:
 
 - Convert map captures to WebP for catalog images.
-- Resize to `w1280` unless the source is smaller.
+- Resize to the 4 MiB storage budget so large captures keep as much detail as possible.
 - Strip EXIF metadata.
 - Keep the original Discord attachment only as part of the user-authored forum post, not as the catalog image.
 
@@ -440,7 +441,7 @@ The guide should cover:
 - Which forum channel to use for each `.akr` scope.
 - Which `.akr` scopes are allowed in the in-game catalog.
 - Which `.akr` scopes are Discord-only.
-- Why `Whole` profile packs are not allowed yet.
+- Why `Whole` setup packs are not allowed yet.
 - Step-by-step posting instructions: choose the forum, export one scoped `.akr`, add the map link, write the description, add the capture, attach the file, and wait for bot feedback.
 - That map capture images are optional but heavily recommended because Akron can already generate them easily.
 - How to read bot feedback when a post is `Needs Fix` or `Flagged`.
@@ -541,10 +542,10 @@ The scan pipeline must run deterministic validation first:
 1. Download the Discord attachment.
 2. Enforce file size limits.
 3. Open the `.akr` as a zip without extracting to the filesystem.
-4. Require exactly the expected archive files for the current Akron profile format.
+4. Require exactly the expected archive files for the current Akron setup format.
 5. Reject path traversal and absolute paths.
 6. Parse `manifest.json`.
-7. Parse `profile.json`.
+7. Parse `setup.json`.
 8. Validate scope, map SID, and schema.
 9. Normalize the extracted facts for AI review.
 
@@ -568,7 +569,7 @@ The implementation must schema-validate NIM output. NIM must never decide storag
 
 Prompt-injection protection:
 
-- Treat titles, descriptions, filenames, and profile JSON as untrusted data.
+- Treat titles, descriptions, filenames, and setup JSON as untrusted data.
 - Never include user content in system or developer instructions.
 - Delimit user content clearly.
 - Ask NIM for strict JSON only.
@@ -579,7 +580,7 @@ Prompt-injection protection:
 
 Map-specific catalog submissions require strict map identity validation.
 
-The post must include a supported map link. The bot reads the Celeste `mapSid` from the uploaded `.akr` manifest/profile target and uses that as the catalog identity.
+The post must include a supported map link. The bot reads the Celeste `mapSid` from the uploaded `.akr` manifest target or setup payload when present and uses that as the catalog identity.
 
 If the map link uses an unsupported domain or is malformed, the post is `Needs Fix`.
 

@@ -32,7 +32,7 @@ import { utcNow } from "../time.js";
 import { validateAkrArchive } from "./archive.js";
 import { formatSection } from "./sections.js";
 import { isSupportedMapUrl, parseSubmissionPost } from "./post-parser.js";
-import { akrMaxBytes, imageMaxBytes, type AkronProfileSection, type ScanStatus } from "./types.js";
+import { akrMaxBytes, imageSourceMaxBytes, type AkronProfileSection, type ScanStatus } from "./types.js";
 
 type ScanThreadInput = {
   config: AppConfig;
@@ -126,7 +126,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
         reasons.push(`This forum accepts ${formatSection(scope)} packs, but the archive contains ${formatSection(archive.section)}.`);
       }
       if (archive.section === "Whole") {
-        reasons.push("Whole profile packs are not accepted publicly yet.");
+        reasons.push("Whole setup packs are not accepted publicly yet.");
       }
 
       if (hasMalwareArchiveReason(archive.reasons)) {
@@ -167,7 +167,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
       try {
         const optimizedImage = attachmentPlan.image
           ? await optimizeCatalogImage({
-              bytes: await downloadAttachment(attachmentPlan.image, imageMaxBytes),
+              bytes: await downloadAttachment(attachmentPlan.image, imageSourceMaxBytes),
               contentType: attachmentPlan.image.contentType ?? "",
               fileName: attachmentPlan.image.name
             })
