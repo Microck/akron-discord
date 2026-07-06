@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { akrMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
+import { catalogCaptureTransformAttempts } from "../src/upload-worker-cloudflare.js";
 import {
   createUploadWorker,
   InMemoryUploadStore,
@@ -18,6 +19,18 @@ const installId = "install-123";
 const mapSid = "SpringCollab2020/1-Beginner";
 
 describe("upload worker", () => {
+  it("tries progressively smaller public capture transforms", () => {
+    expect(catalogCaptureTransformAttempts[0]).toEqual({ width: 4096, quality: 82 });
+    expect(catalogCaptureTransformAttempts.length).toBeGreaterThan(1);
+
+    for (let index = 1; index < catalogCaptureTransformAttempts.length; index++) {
+      const previous = catalogCaptureTransformAttempts[index - 1];
+      const current = catalogCaptureTransformAttempts[index];
+      expect(current.width).toBeLessThan(previous.width);
+      expect(current.quality).toBeLessThan(previous.quality);
+    }
+  });
+
   it("exposes upload caps and supported sections", async () => {
     const worker = testWorker();
 

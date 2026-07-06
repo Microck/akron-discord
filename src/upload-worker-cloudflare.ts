@@ -78,6 +78,15 @@ type ImageTransformInit = RequestInit & {
   };
 };
 
+export const catalogCaptureTransformAttempts = [
+  { width: 4096, quality: 82 },
+  { width: 3584, quality: 78 },
+  { width: 3072, quality: 74 },
+  { width: 2560, quality: 70 },
+  { width: 2048, quality: 66 },
+  { width: 1536, quality: 62 }
+] as const;
+
 type BatchRow = {
   payload_json: string;
 };
@@ -569,32 +578,38 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       return input.capture;
     }
 
-    const response = await fetch(input.captureSourceUrl, {
-      cf: {
-        image: {
-          fit: "scale-down",
-          width: 4096,
-          format: "webp",
-          quality: 82,
-          metadata: "none"
+    let smallestBytes = Number.POSITIVE_INFINITY;
+    for (const attempt of catalogCaptureTransformAttempts) {
+      const response = await fetch(input.captureSourceUrl, {
+        cf: {
+          image: {
+            fit: "scale-down",
+            width: attempt.width,
+            format: "webp",
+            quality: attempt.quality,
+            metadata: "none"
+          }
         }
+      } as ImageTransformInit);
+      if (!response.ok) {
+        throw new Error("Cloudflare image transform failed with HTTP " + response.status + ".");
       }
-    } as ImageTransformInit);
-    if (!response.ok) {
-      throw new Error("Cloudflare image transform failed with HTTP " + response.status + ".");
+
+      const bytes = Buffer.from(await response.arrayBuffer());
+      smallestBytes = Math.min(smallestBytes, bytes.length);
+      if (bytes.length > catalogImageMaxBytes) {
+        continue;
+      }
+
+      return {
+        ...input.capture,
+        bytes,
+        uploadedBytes: bytes.length,
+        contentType: "image/webp"
+      };
     }
 
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > catalogImageMaxBytes) {
-      throw new Error("Optimized map capture exceeds 4 MiB.");
-    }
-
-    return {
-      ...input.capture,
-      bytes,
-      uploadedBytes: bytes.length,
-      contentType: "image/webp"
-    };
+    throw new Error("Optimized map capture exceeds 4 MiB after downscaling; smallest result was " + smallestBytes + " bytes.");
   }
 }
 
