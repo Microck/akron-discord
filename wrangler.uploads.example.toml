@@ -1,0 +1,25 @@
+name = "akron-upload-worker"
+main = "src/upload-worker-cloudflare.ts"
+compatibility_date = "2026-07-06"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+UPLOAD_TERMS_VERSION = "1"
+UPLOAD_PUBLIC_BASE_URL = "https://akron.micr.dev"
+
+[[d1_databases]]
+binding = "UPLOAD_DB"
+database_name = "akron-uploads"
+database_id = "replace-with-cloudflare-d1-database-id"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "UPLOAD_QUARANTINE_BUCKET"
+bucket_name = "akron-upload-quarantine"
+
+[[r2_buckets]]
+binding = "UPLOAD_PUBLIC_BUCKET"
+bucket_name = "akron-community-packs"
+
+# Secrets:
+# wrangler secret put BOT_HMAC_SECRET

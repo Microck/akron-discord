@@ -36,6 +36,8 @@ GITHUB_OWNER=
 GITHUB_REPO=
 GITHUB_WEBHOOK_SECRET=
 GITHUB_WEBHOOK_PORT=3005
+UPLOAD_WORKER_URL=
+UPLOAD_WORKER_BOT_SECRET=
 ```
 
 Recommended NIM model:
@@ -82,6 +84,8 @@ Set `AKRON_PUBLIC_ASSET_BASE_URL=https://akron.micr.dev` so Discord embeds and c
 The bot uploads through the S3-compatible R2 API, so it also needs an R2 API token with Object Read & Write access scoped to that bucket. Copy the token's Access Key ID and Secret Access Key into the local deployment `.env`. Cloudflare only shows the secret once. Do not expose this token to Discord users or the website; `akron.micr.dev` should be public-read only.
 
 Submitted `.akr` files are scanned in memory first. The bot only writes approved public downloads to R2. Flagged or review-blocked submissions stay in Discord and are not mirrored to the public bucket.
+
+The Upload Worker uses two R2 bindings. `UPLOAD_QUARANTINE_BUCKET` must be private and stores unreviewed direct uploads under `quarantine/uploads/...`; do not enable public `r2.dev` access or a public custom domain on this bucket. `UPLOAD_PUBLIC_BUCKET` stores approved packs, approved capture images, and `catalog/index.json`, and may be exposed through the public Akron asset domain.
 
 The public catalog accepts the current Akron setup archive contract only: each `.akr` must contain exactly `manifest.json` and `setup.json`, the manifest `Kind` must be `setup`, and `setup.json` must use `akron-setup-v1`. Legacy `profile.json` packs are rejected instead of migrated.
 
@@ -135,10 +139,12 @@ Map captures are optional but strongly recommended. If present, the bot validate
 
 The deployment image must include ImageMagick's `magick` binary for `optimo` image conversion. If image optimization fails, the bot keeps the post out of the catalog and marks it `Needs Moderator Review`.
 
+In-game uploads use the Cloudflare upload Worker instead of Discord attachments. The Worker accepts source captures up to 100 MiB, keeps them in quarantine while moderation and attribution checks run, then uses Cloudflare Image Transformations to publish one canonical WebP capture capped at 4 MiB. Cloudflare Images Free includes 5,000 unique transformations per month for images stored outside Cloudflare Images, so this path stays free as long as approved uploaded captures stay below that monthly volume.
+
 Current limits:
 
 - `.akr` attachment: 4 MiB.
-- Optional capture image source before optimization: 64 MiB.
+- Optional capture image source before optimization: 100 MiB.
 - Optimized capture stored in R2: 4 MiB.
 - Catalog index read by Akron: 1 MiB.
 - Pack download read by Akron: 4 MiB.

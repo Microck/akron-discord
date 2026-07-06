@@ -1,5 +1,7 @@
-import { PermissionFlagsBits, type ChatInputCommandInteraction, type GuildMember } from "discord.js";
+import { PermissionFlagsBits, type ButtonInteraction, type ChatInputCommandInteraction, type GuildMember } from "discord.js";
 import type { AppConfig } from "./config.js";
+
+type PermissionInteraction = ChatInputCommandInteraction | ButtonInteraction;
 
 export function hasConfiguredRole(member: GuildMember, roleId: string): boolean {
   return Boolean(roleId && member.roles.cache.has(roleId));
@@ -16,7 +18,7 @@ export function isModerator(member: GuildMember, config: AppConfig): boolean {
   return isAdmin(member, config) || hasConfiguredRole(member, config.akronModRoleId);
 }
 
-export async function requireAdmin(interaction: ChatInputCommandInteraction, config: AppConfig): Promise<boolean> {
+export async function requireAdmin(interaction: PermissionInteraction, config: AppConfig): Promise<boolean> {
   const member = interaction.member instanceof Object && "roles" in interaction.member
     ? (interaction.member as GuildMember)
     : null;
@@ -28,7 +30,7 @@ export async function requireAdmin(interaction: ChatInputCommandInteraction, con
   return false;
 }
 
-export async function requireModerator(interaction: ChatInputCommandInteraction, config: AppConfig): Promise<boolean> {
+export async function requireModerator(interaction: PermissionInteraction, config: AppConfig): Promise<boolean> {
   const member = interaction.member instanceof Object && "roles" in interaction.member
     ? (interaction.member as GuildMember)
     : null;

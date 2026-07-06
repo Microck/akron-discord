@@ -20,12 +20,14 @@ import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
 import { startGithubWebhookServer } from "./github-webhook.js";
 import { handlePlaytestingInteraction, handlePlaytestingMessage } from "./services/playtesting.js";
+import { handleUploadModerationInteraction, pollUploadModerationQueue } from "./services/upload-moderation.js";
 import { handleScanButtonInteraction, scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
 
 const config = loadConfig();
 const database = createDatabase(config.databasePath);
 const scanTimers = new Map<string, NodeJS.Timeout>();
+let uploadModerationTimer: NodeJS.Timeout | null = null;
 let githubWebhookServer: ReturnType<typeof startGithubWebhookServer> = null;
 
 const client = new Client({
@@ -41,6 +43,10 @@ const client = new Client({
 client.once(Events.ClientReady, readyClient => {
   readyClient.user.setActivity("akron.micr.dev", { type: ActivityType.Watching });
   console.log(`Akron Discord bot ready as ${readyClient.user.tag}`);
+  uploadModerationTimer = setInterval(() => {
+    void pollUploadModerationQueue({ client: readyClient, config, onError: reportRuntimeError });
+  }, 30_000);
+  void pollUploadModerationQueue({ client: readyClient, config, onError: reportRuntimeError });
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -52,6 +58,10 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (interaction.isButton() && await handleScanButtonInteraction({ interaction, config, db: database.db })) {
+      return;
+    }
+
+    if (interaction.isButton() && await handleUploadModerationInteraction({ interaction, config })) {
       return;
     }
 
@@ -190,6 +200,9 @@ async function reportRuntimeError(error: unknown): Promise<void> {
 async function shutdown(): Promise<void> {
   for (const timer of scanTimers.values()) {
     clearTimeout(timer);
+  }
+  if (uploadModerationTimer) {
+    clearInterval(uploadModerationTimer);
   }
   githubWebhookServer?.close();
   client.destroy();

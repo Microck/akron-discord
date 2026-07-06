@@ -22,7 +22,7 @@ export async function optimizeCatalogImage(input: {
   fileName: string;
 }): Promise<{ bytes: Buffer; contentType: string; extension: "webp" }> {
   if (input.bytes.length > imageSourceMaxBytes) {
-    throw new Error("Map capture exceeds 64 MiB.");
+    throw new Error(`Map capture exceeds ${imageSourceMaxBytes / 1024 / 1024} MiB.`);
   }
 
   const extension = allowedImageTypes.get(input.contentType);

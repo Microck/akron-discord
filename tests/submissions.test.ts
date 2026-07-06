@@ -3,6 +3,7 @@ import { validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
 import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasMalwareArchiveReason, resolveCatalogMapIdentity } from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
+import { archiveValidationFixtures, zipJson } from "./archive-fixtures.js";
 
 describe("submission post parsing", () => {
   it("extracts and normalizes supported GameBanana map links", () => {
@@ -32,6 +33,21 @@ describe("section normalization", () => {
 });
 
 describe("archive validation", () => {
+  it.each(archiveValidationFixtures)("matches the shared archive contract: $name", async fixture => {
+    const result = await validateAkrArchive(zipJson(fixture.entries));
+
+    expect(result.ok).toBe(fixture.ok);
+    if (fixture.section) {
+      expect(result.section).toBe(fixture.section);
+    }
+    if (fixture.mapSid) {
+      expect(result.mapSid).toBe(fixture.mapSid);
+    }
+    for (const reason of fixture.reasons ?? []) {
+      expect(result.reasons).toContain(reason);
+    }
+  });
+
   it("accepts a minimal scoped map-specific .akr archive", async () => {
     const buffer = zipJson({
       "manifest.json": {
@@ -305,78 +321,3 @@ describe("submission scan classification", () => {
     expect(buildScanComponents("Published", true)).toEqual([]);
   });
 });
-
-function zipJson(entries: Record<string, unknown>): Buffer {
-  const fileRecords: Array<{ name: Buffer; body: Buffer; crc: number; offset: number }> = [];
-  const localParts: Buffer[] = [];
-  let offset = 0;
-
-  for (const [nameText, value] of Object.entries(entries)) {
-    const name = Buffer.from(nameText);
-    const body = Buffer.from(JSON.stringify(value), "utf8");
-    const crc = crc32(body);
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(0, 8);
-    local.writeUInt16LE(0, 10);
-    local.writeUInt16LE(0, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(body.length, 18);
-    local.writeUInt32LE(body.length, 22);
-    local.writeUInt16LE(name.length, 26);
-    local.writeUInt16LE(0, 28);
-    localParts.push(local, name, body);
-    fileRecords.push({ name, body, crc, offset });
-    offset += local.length + name.length + body.length;
-  }
-
-  const centralParts: Buffer[] = [];
-  let centralSize = 0;
-  for (const record of fileRecords) {
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(0, 10);
-    central.writeUInt16LE(0, 12);
-    central.writeUInt16LE(0, 14);
-    central.writeUInt32LE(record.crc, 16);
-    central.writeUInt32LE(record.body.length, 20);
-    central.writeUInt32LE(record.body.length, 24);
-    central.writeUInt16LE(record.name.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0, 38);
-    central.writeUInt32LE(record.offset, 42);
-    centralParts.push(central, record.name);
-    centralSize += central.length + record.name.length;
-  }
-
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(fileRecords.length, 8);
-  end.writeUInt16LE(fileRecords.length, 10);
-  end.writeUInt32LE(centralSize, 12);
-  end.writeUInt32LE(offset, 16);
-  end.writeUInt16LE(0, 20);
-
-  return Buffer.concat([...localParts, ...centralParts, end]);
-}
-
-function crc32(buffer: Buffer): number {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}

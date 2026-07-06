@@ -1,5 +1,5 @@
 export const akrMaxBytes = 4 * 1024 * 1024;
-export const imageSourceMaxBytes = 64 * 1024 * 1024;
+export const imageSourceMaxBytes = 100 * 1024 * 1024;
 export const catalogImageMaxBytes = 4 * 1024 * 1024;
 export const catalogImageResizeTarget = "4MB";
 
