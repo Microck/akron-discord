@@ -438,9 +438,6 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
     const publicCapture = input.capture ? await this.optimizePublicCapture({ ...input, capture: input.capture }) : undefined;
     const publicCaptureBytes = publicCapture?.bytes;
-    if (input.capture && !publicCaptureBytes) {
-      throw new Error("Cannot publish missing optimized capture.");
-    }
     const publication = buildPublication(input.submission, publicCapture, input.now, this.publicBaseUrl);
     await this.publicBucket.put(publication.packKey, packBytes, {
       httpMetadata: { contentType: "application/octet-stream" }
@@ -573,7 +570,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return parsed;
   }
 
-  private async optimizePublicCapture(input: PublishCatalogEntryInput & { capture: UploadObjectRecord }): Promise<UploadObjectRecord> {
+  private async optimizePublicCapture(input: PublishCatalogEntryInput & { capture: UploadObjectRecord }): Promise<UploadObjectRecord | undefined> {
     if (!input.captureSourceUrl) {
       return input.capture;
     }
@@ -609,7 +606,8 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       };
     }
 
-    throw new Error("Optimized map capture exceeds 4 MiB after downscaling; smallest result was " + smallestBytes + " bytes.");
+    console.warn("Skipping public capture because optimized map capture exceeds 4 MiB after downscaling; smallest result was " + smallestBytes + " bytes.");
+    return undefined;
   }
 }
 
