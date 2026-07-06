@@ -4,7 +4,7 @@ import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js
 import { sectionTag } from "./submissions/sections.js";
 import { akrMaxBytes, imageSourceMaxBytes, type AkronProfileSection } from "./submissions/types.js";
 
-export type UploadSection = Extract<AkronProfileSection, "StartPos">;
+export type UploadSection = Extract<AkronProfileSection, "StartPos" | "AutoKill" | "AutoDeafen">;
 export type UploadStatus =
   | "prepared"
   | "queued"
@@ -125,7 +125,7 @@ export type PreparedObject = {
   maxBytes: number;
 };
 
-const allowedUploadSections = new Set<UploadSection>(["StartPos"]);
+const allowedUploadSections = new Set<UploadSection>(["StartPos", "AutoKill", "AutoDeafen"]);
 const defaultTermsVersion = 1;
 const preparedUploadTtlMs = 30 * 60 * 1000;
 const attributionTtlMs = 24 * 60 * 60 * 1000;

@@ -27,7 +27,7 @@ describe("upload worker", () => {
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
       termsVersion: 1,
-      acceptedSections: ["StartPos"],
+      acceptedSections: ["StartPos", "AutoKill", "AutoDeafen"],
       limits: {
         packMaxBytes: akrMaxBytes,
         captureMaxBytes: imageSourceMaxBytes,
@@ -188,6 +188,32 @@ describe("upload worker", () => {
       status: "queued",
       validationReasons: []
     });
+  });
+
+  it("accepts the map-scoped area sections used by Akron uploads", async () => {
+    const worker = testWorker();
+
+    for (const section of ["AutoKill", "AutoDeafen"]) {
+      const prepared = await prepareAndUpload(worker, {
+        pack: validArchive(section),
+        section,
+        attribution: { mode: "anonymous" }
+      });
+      const completeResponse = await postJson(worker, "/uploads/complete", {
+        installId,
+        batchId: prepared.batchId
+      });
+      const complete = await completeResponse.json() as UploadStatusBody;
+
+      expect(completeResponse.status).toBe(200);
+      expect(complete.status).toBe("queued");
+      expect(complete.submissions[0]).toMatchObject({
+        section,
+        mapSid,
+        status: "queued",
+        validationReasons: []
+      });
+    }
   });
 
   it("keeps completion retryable when uploaded pack bytes are temporarily unavailable", async () => {

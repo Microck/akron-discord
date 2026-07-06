@@ -409,7 +409,7 @@ Default upload limits:
 - Map captures are optional but heavily recommended for map-specific catalog posts.
 
 The 4 MiB `.akr` limit matches Akron's current in-game community pack download guardrail.
-Automated in-game uploads currently accept `StartPos` only. Auto Kill and Auto Deafen forum posts can still be handled through moderator-reviewed catalog workflows, but the upload Worker must not publish those sections until their area data carries explicit map scope.
+Automated in-game uploads accept `StartPos`, `AutoKill`, and `AutoDeafen`. The upload Worker and in-game exporter must keep this section contract in sync.
 
 ## Image Optimization
 
