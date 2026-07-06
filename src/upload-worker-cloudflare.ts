@@ -27,6 +27,7 @@ export type CloudflareUploadEnv = {
   BOT_HMAC_SECRET: string;
   UPLOAD_TERMS_VERSION?: string;
   UPLOAD_PUBLIC_BASE_URL?: string;
+  UPLOAD_PUBLIC_UPLOAD_BASE_URL?: string;
 };
 
 type D1Database = {
@@ -58,6 +59,11 @@ type R2ObjectBody = {
     contentType?: string;
   };
   arrayBuffer(): Promise<ArrayBuffer>;
+};
+
+type FixedLengthStreamConstructor = new (expectedLength: number) => {
+  readable: ReadableStream<Uint8Array>;
+  writable: WritableStream<Uint8Array>;
 };
 
 type ImageTransformInit = RequestInit & {
@@ -99,6 +105,7 @@ export default {
     const worker = createUploadWorker({
       store: new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL),
       botSecret: env.BOT_HMAC_SECRET,
+      publicUploadBaseUrl: env.UPLOAD_PUBLIC_UPLOAD_BASE_URL,
       termsVersion: readTermsVersion(env.UPLOAD_TERMS_VERSION)
     });
     return worker.fetch(request);
@@ -390,9 +397,11 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     let cappedUpload: ReturnType<typeof capUploadBodyStream> | undefined;
     try {
       cappedUpload = capUploadBodyStream(upload.body, row.max_bytes);
-      await this.quarantineBucket.put(row.r2_key, cappedUpload.body, {
+      const knownLengthBody = await bodyWithKnownLength(cappedUpload.body, upload.declaredBytes);
+      await this.quarantineBucket.put(row.r2_key, knownLengthBody.body, {
         httpMetadata: { contentType: upload.contentType }
       });
+      await knownLengthBody.completed;
       const uploadedBytes = await cappedUpload.uploadedBytes;
       await this.db
         .prepare("UPDATE upload_objects SET uploaded_bytes = ?, content_type = ? WHERE id = ? AND uploaded_bytes = -1")
@@ -595,6 +604,29 @@ function readTermsVersion(value: string | undefined): number {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+async function bodyWithKnownLength(
+  body: Buffer | ReadableStream<Uint8Array>,
+  declaredBytes: number
+): Promise<{ body: Buffer | ReadableStream<Uint8Array>; completed: Promise<void> }> {
+  if (Buffer.isBuffer(body)) {
+    return { body, completed: Promise.resolve() };
+  }
+
+  const fixedLengthStream = (globalThis as typeof globalThis & {
+    FixedLengthStream?: FixedLengthStreamConstructor;
+  }).FixedLengthStream;
+  if (!fixedLengthStream) {
+    const bytes = Buffer.from(await new Response(body).arrayBuffer());
+    return { body: bytes, completed: Promise.resolve() };
+  }
+
+  const fixed = new fixedLengthStream(declaredBytes);
+  return {
+    body: fixed.readable,
+    completed: body.pipeTo(fixed.writable)
+  };
 }
 
 function sleep(ms: number): Promise<void> {

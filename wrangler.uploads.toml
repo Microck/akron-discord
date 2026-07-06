@@ -2,6 +2,9 @@ name = "akron-upload-worker"
 main = "src/upload-worker-cloudflare.ts"
 compatibility_date = "2026-07-06"
 compatibility_flags = ["nodejs_compat"]
+account_id = "3bf786cef8d90ef18cad43350a9ed35c"
+workers_dev = true
+preview_urls = false
 
 [vars]
 UPLOAD_TERMS_VERSION = "1"
@@ -11,7 +14,7 @@ UPLOAD_PUBLIC_UPLOAD_BASE_URL = "https://akron.micr.dev"
 [[d1_databases]]
 binding = "UPLOAD_DB"
 database_name = "akron-uploads"
-database_id = "replace-with-cloudflare-d1-database-id"
+database_id = "2bd889d9-f2bc-4879-9302-aa361abde32e"
 migrations_dir = "migrations"
 
 [[r2_buckets]]
@@ -23,4 +26,4 @@ binding = "UPLOAD_PUBLIC_BUCKET"
 bucket_name = "akron-community-packs"
 
 # Secrets:
-# wrangler secret put BOT_HMAC_SECRET
+# wrangler secret put BOT_HMAC_SECRET --config wrangler.uploads.toml

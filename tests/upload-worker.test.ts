@@ -50,6 +50,7 @@ describe("upload worker", () => {
     expect(workerSource).toContain("moderation_delivered_utc = excluded.moderation_delivered_utc");
     expect(workerSource).toContain("UPLOAD_QUARANTINE_BUCKET");
     expect(workerSource).toContain("UPLOAD_PUBLIC_BUCKET");
+    expect(workerSource).toContain("UPLOAD_PUBLIC_UPLOAD_BASE_URL");
     expect(workerSource).toContain("this.quarantineBucket.put");
     expect(workerSource).toContain("this.publicBucket.put");
     expect(workerSource).toContain("acquireCatalogLock");
@@ -57,6 +58,7 @@ describe("upload worker", () => {
     expect(migrationSource).toContain("CREATE TABLE IF NOT EXISTS upload_catalog_locks");
     expect(wranglerSource).toContain("binding = \"UPLOAD_QUARANTINE_BUCKET\"");
     expect(wranglerSource).toContain("binding = \"UPLOAD_PUBLIC_BUCKET\"");
+    expect(wranglerSource).toContain("UPLOAD_PUBLIC_UPLOAD_BASE_URL");
   });
 
   it("rejects unsupported sections before allocating uploads", async () => {
@@ -91,6 +93,34 @@ describe("upload worker", () => {
     const response = await prepare(worker);
 
     expect(response.status).toBe(201);
+  });
+
+  it("returns canonical public upload URLs when the worker is behind a rewrite", async () => {
+    const worker = createUploadWorker({
+      store: new InMemoryUploadStore(),
+      botSecret,
+      publicUploadBaseUrl: "https://akron.micr.dev/uploads",
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+
+    const response = await worker.fetch(new Request("https://akron-upload-worker.example.workers.dev/uploads/prepare", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        installId,
+        termsVersion: 1,
+        capture: { sizeBytes: 128, contentType: "image/png" },
+        submissions: [submissionInput()]
+      })
+    }));
+    const body = await response.json() as {
+      capture: { uploadUrl: string };
+      submissions: Array<{ pack: { uploadUrl: string } }>;
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.capture.uploadUrl).toMatch(/^https:\/\/akron\.micr\.dev\/uploads\/objects\//);
+    expect(body.submissions[0]?.pack.uploadUrl).toMatch(/^https:\/\/akron\.micr\.dev\/uploads\/objects\//);
   });
 
   it("rejects packs and captures above the upload budget", async () => {

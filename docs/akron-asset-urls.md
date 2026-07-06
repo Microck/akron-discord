@@ -11,14 +11,20 @@ https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
 
 These routes are public-read only. Discord users never receive R2 write credentials, and the bot only writes approved public downloads after a submission passes scanning.
 
-The Vercel website owns `akron.micr.dev`. Keep normal website routes in the website app. Route `/docs` to Mintlify from Vercel, and route only the reserved asset prefixes to R2:
+The Vercel website owns `akron.micr.dev`. Keep normal website routes in the website app. Route `/docs` to Mintlify from Vercel, route only the reserved public asset prefixes to R2, and route upload worker requests to the Cloudflare Upload Worker:
 
 ```text
 /catalog/*
 /maps/*
 /submissions/*
 /r2-assets/*
+/uploads/*
+/bot/*
 ```
+
+`/uploads/*` and `/bot/*` are not public-read asset prefixes. They are Vercel external rewrites to the Upload Worker because the `micr.dev` zone is not hosted on Cloudflare. `/bot/*` endpoints are public only in the network sense; every request still requires the bot HMAC signature. Do not attach a Cloudflare Worker custom domain for `akron.micr.dev` unless the zone is moved to Cloudflare.
+
+Set the Upload Worker's `UPLOAD_PUBLIC_UPLOAD_BASE_URL` to `https://akron.micr.dev`. The Worker uses this public origin when it returns prepared object upload URLs and signed source URLs, even though Vercel forwards the request to the underlying `workers.dev` origin.
 
 ## Bot Config
 
@@ -63,6 +69,14 @@ Add rewrites to the future Akron website's `vercel.json`. Replace `<MINTLIFY_SUB
     {
       "source": "/catalog/:path*",
       "destination": "<R2_PUBLIC_BASE_URL>/catalog/:path*"
+    },
+    {
+      "source": "/uploads/:path*",
+      "destination": "<UPLOAD_WORKER_URL>/uploads/:path*"
+    },
+    {
+      "source": "/bot/:path*",
+      "destination": "<UPLOAD_WORKER_URL>/bot/:path*"
     },
     {
       "source": "/maps/:map/:pack.akr",

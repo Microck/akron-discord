@@ -114,6 +114,7 @@ export type PublishCatalogEntryInput = {
 export type UploadWorkerOptions = {
   store: UploadWorkerStore;
   botSecret: string;
+  publicUploadBaseUrl?: string;
   termsVersion?: number;
   now?: () => Date;
   id?: () => string;
@@ -144,10 +145,12 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
   const now = options.now ?? (() => new Date());
   const id = options.id ?? randomUUID;
   const termsVersion = options.termsVersion ?? defaultTermsVersion;
+  const publicUploadOrigin = options.publicUploadBaseUrl ? new URL(options.publicUploadBaseUrl).origin : undefined;
 
   return {
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
+      const uploadOrigin = publicUploadOrigin ?? url.origin;
       try {
         if (request.method === "GET" && url.pathname === "/uploads/challenge") {
           return json({
@@ -166,7 +169,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
         }
 
         if (request.method === "POST" && url.pathname === "/uploads/prepare") {
-          return await prepareUpload({ request, origin: url.origin, store: options.store, now, id, termsVersion });
+          return await prepareUpload({ request, origin: uploadOrigin, store: options.store, now, id, termsVersion });
         }
 
         const objectMatch = url.pathname.match(/^\/uploads\/objects\/([^/]+)$/);
@@ -272,7 +275,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             body,
             store: options.store,
             now,
-            origin: url.origin,
+            origin: uploadOrigin,
             botSecret: options.botSecret
           });
         }
