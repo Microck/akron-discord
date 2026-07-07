@@ -24,11 +24,8 @@ ENV DATABASE_PATH=/app/data/akron-discord.sqlite
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates imagemagick ffmpeg libjpeg-turbo-progs gifsicle \
+  && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
-  && npm install -g svgo@4.0.1 \
-  && printf '%s\n' '#!/bin/sh' 'if [ "$1" = "identify" ]; then' '  shift' '  exec identify "$@"' 'fi' 'exec convert "$@"' > /usr/local/bin/magick \
-  && chmod +x /usr/local/bin/magick \
   && groupadd --system akron \
   && useradd --system --gid akron --home /app --shell /usr/sbin/nologin akron \
   && mkdir -p /app/data \

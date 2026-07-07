@@ -1,20 +1,23 @@
 import { imageSize } from "image-size";
-import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, parse } from "node:path";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { catalogImageMaxBytes, catalogImageResizeTarget, imageSourceMaxBytes } from "../submissions/types.js";
+import sharp from "sharp";
+import { catalogImageMaxBytes, imageSourceMaxBytes } from "../submissions/types.js";
 
 const maxDecodedImageDimension = 32768;
-const maxDecodedImagePixels = 80_000_000;
+const maxDecodedImagePixels = 500_000_000;
 
 const allowedImageTypes = new Map<string, string>([
   ["image/png", "png"],
   ["image/jpeg", "jpg"],
   ["image/webp", "webp"]
 ]);
+
+const resizeAttempts = [
+  { size: 4096, quality: 80 },
+  { size: 3584, quality: 76 },
+  { size: 3072, quality: 72 },
+  { size: 2560, quality: 68 },
+  { size: 2048, quality: 64 }
+] as const;
 
 export async function optimizeCatalogImage(input: {
   bytes: Buffer;
@@ -41,60 +44,28 @@ export async function optimizeCatalogImage(input: {
     throw new Error("Map capture pixel count is too large.");
   }
 
-  const directory = await mkdtemp(join(tmpdir(), "akron-image-"));
-  try {
-    const source = join(directory, "source." + extension);
-    await writeFile(source, input.bytes);
-    await runOptimo(source);
-    const output = join(directory, "source.webp");
-    const optimized = await readFile(output);
-    if (optimized.length > catalogImageMaxBytes) {
-      throw new Error("Optimized map capture exceeds 4 MiB.");
-    }
+  for (const attempt of resizeAttempts) {
+    const optimized = await sharp(input.bytes, {
+      limitInputPixels: maxDecodedImagePixels,
+      failOn: "error"
+    })
+      .rotate()
+      .resize({
+        width: attempt.size,
+        height: attempt.size,
+        fit: "inside",
+        withoutEnlargement: true
+      })
+      .webp({
+        quality: attempt.quality,
+        effort: 3
+      })
+      .toBuffer();
 
-    return { bytes: optimized, contentType: "image/webp", extension: "webp" };
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+    if (optimized.length <= catalogImageMaxBytes) {
+      return { bytes: optimized, contentType: "image/webp", extension: "webp" };
+    }
   }
-}
 
-function runOptimo(path: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const optimoBin = resolveLocalOptimoBin();
-    const child = spawn(
-      optimoBin,
-      [path, "--format", "webp", "--lossy", "--resize", catalogImageResizeTarget],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
-    const stderr: Buffer[] = [];
-    child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
-    child.on("error", reject);
-    child.on("close", code => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(new Error("optimo failed: " + Buffer.concat(stderr).toString("utf8")));
-    });
-  });
-}
-
-function resolveLocalOptimoBin(): string {
-  const binaryName = process.platform === "win32" ? "optimo.cmd" : "optimo";
-  let current = dirname(fileURLToPath(import.meta.url));
-  const root = parse(current).root;
-
-  while (true) {
-    const candidate = join(current, "node_modules", ".bin", binaryName);
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-
-    if (current === root) {
-      throw new Error("Local optimo binary not found. Run npm install before scanning catalog images.");
-    }
-
-    current = dirname(current);
-  }
+  throw new Error("Optimized map capture exceeds 4 MiB.");
 }
