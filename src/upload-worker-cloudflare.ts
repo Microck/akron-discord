@@ -12,6 +12,8 @@ import {
   type DeleteSubmissionInput,
   type PendingUploadedObjectBody,
   type PublishCatalogEntryInput,
+  type PutOptimizedCaptureInput,
+  type RecordAiReviewInput,
   type RecordDiscordMessageInput,
   type UploadBatchRecord,
   type UploadObjectRecord,
@@ -112,6 +114,7 @@ type CatalogEntryRow = {
 };
 
 const uploadObjectPrefix = "quarantine/uploads";
+const optimizedCapturePrefix = "quarantine/optimized-captures";
 
 export default {
   async fetch(request: Request, env: CloudflareUploadEnv): Promise<Response> {
@@ -440,7 +443,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       throw new Error("Cannot publish missing upload objects.");
     }
 
-    const publicCapture = input.capture ? await this.optimizePublicCapture({ ...input, capture: input.capture }) : undefined;
+    const publicCapture = await this.publicCaptureForPublication(input);
     const publicCaptureBytes = publicCapture?.bytes;
     const publication = buildPublication(input.submission, publicCapture, input.now, this.publicBaseUrl);
     await this.publicBucket.put(publication.packKey, packBytes, {
@@ -470,6 +473,42 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       await releaseCatalogLock();
     }
     return publication;
+  }
+
+  async recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined> {
+    const found = await this.findSubmission(input.submissionId);
+    if (!found) {
+      return undefined;
+    }
+
+    found.submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
+    found.batch.updatedUtc = input.now.toISOString();
+    await this.putBatchPayload(found.batch);
+    return found.submission;
+  }
+
+  async putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined> {
+    const found = await this.findSubmission(input.submissionId);
+    if (!found) {
+      return undefined;
+    }
+
+    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}.webp`;
+    await this.quarantineBucket.put(r2Key, input.bytes, {
+      httpMetadata: { contentType: input.contentType }
+    });
+    found.submission.optimizedCapture = {
+      r2Key,
+      contentType: input.contentType,
+      uploadedBytes: input.bytes.length,
+      extension: "webp"
+    };
+    if (found.submission.publication) {
+      await this.publishOptimizedCaptureForPublishedSubmission(found.submission, input.bytes, input.now);
+    }
+    found.batch.updatedUtc = input.now.toISOString();
+    await this.putBatchPayload(found.batch);
+    return found.submission;
   }
 
   async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
@@ -613,6 +652,9 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
   private async deleteQuarantineObjectsForSubmission(batch: UploadBatchRecord, submission: UploadSubmissionRecord): Promise<void> {
     await this.deleteQuarantineObject(submission.packObjectId);
+    if (submission.optimizedCapture?.r2Key) {
+      await this.quarantineBucket.delete(submission.optimizedCapture.r2Key);
+    }
     if (!submission.captureObjectId) {
       return;
     }
@@ -735,6 +777,79 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
     console.warn("Skipping public capture because optimized map capture exceeds 4 MiB after downscaling; smallest result was " + smallestBytes + " bytes.");
     return undefined;
+  }
+
+  private async publicCaptureForPublication(input: PublishCatalogEntryInput): Promise<UploadObjectRecord | undefined> {
+    if (input.submission.optimizedCapture) {
+      const bytes = await this.readOptimizedCaptureBytes(input.submission.optimizedCapture.r2Key);
+      if (bytes) {
+        return {
+          ...(input.capture ?? {
+            id: `${input.submission.id}-optimized-capture`,
+            tokenHash: "",
+            kind: "capture" as const,
+            batchId: input.submission.batchId,
+            maxBytes: catalogImageMaxBytes
+          }),
+          bytes,
+          uploadedBytes: bytes.length,
+          contentType: input.submission.optimizedCapture.contentType
+        };
+      }
+    }
+
+    return input.capture ? await this.optimizePublicCapture({ ...input, capture: input.capture }) : undefined;
+  }
+
+  private async readOptimizedCaptureBytes(r2Key: string | undefined): Promise<Buffer | undefined> {
+    if (!r2Key) {
+      return undefined;
+    }
+    const stored = await this.quarantineBucket.get(r2Key);
+    return stored ? Buffer.from(await stored.arrayBuffer()) : undefined;
+  }
+
+  private async publishOptimizedCaptureForPublishedSubmission(
+    submission: UploadSubmissionRecord,
+    bytes: Buffer,
+    now: Date
+  ): Promise<void> {
+    if (!submission.publication) {
+      return;
+    }
+
+    const capture: UploadObjectRecord = {
+      id: `${submission.id}-optimized-capture`,
+      tokenHash: "",
+      kind: "capture",
+      batchId: submission.batchId,
+      submissionId: submission.id,
+      maxBytes: catalogImageMaxBytes,
+      contentType: "image/webp",
+      uploadedBytes: bytes.length,
+      bytes
+    };
+    const publication = buildPublication(submission, capture, now, this.publicBaseUrl);
+    const previousPublication = submission.publication;
+    submission.publication = {
+      ...previousPublication,
+      imageKey: publication.imageKey,
+      imageUrl: publication.imageUrl
+    };
+    await this.publicBucket.put(publication.imageKey, bytes, {
+      httpMetadata: { contentType: "image/webp" }
+    });
+
+    const releaseCatalogLock = await this.acquireCatalogLock();
+    try {
+      const entry = await this.fillCatalogMapUrl(buildCatalogPack(submission, submission.publication, now));
+      const nextIndex = await this.upsertCatalogEntry(entry);
+      await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
+        httpMetadata: { contentType: "application/json" }
+      });
+    } finally {
+      await releaseCatalogLock();
+    }
   }
 }
 

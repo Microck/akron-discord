@@ -12,13 +12,17 @@ import {
 } from "discord.js";
 import type { AppConfig } from "../config.js";
 import { requireModerator } from "../permissions.js";
+import { optimizeCatalogImage } from "./image-optimizer.js";
+import { reviewWithNim } from "./nim-review.js";
 import {
   createUploadWorkerClient,
   hasUploadWorkerConfig,
+  type UploadWorkerClient,
   type UploadWorkerJob,
   type UploadWorkerStatusBody,
   type UploadWorkerStatusSubmission
 } from "./upload-worker-client.js";
+import type { UploadAiReview } from "../upload-worker.js";
 
 const customIdPrefix = "upload-review";
 
@@ -29,7 +33,7 @@ export function uploadModerationButtonId(action: UploadModerationAction, submiss
 }
 
 export function buildUploadModerationEmbed(job: UploadWorkerJob): EmbedBuilder {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setTitle(job.title)
     .setDescription(job.description || "No description provided.")
     .setColor(job.status === "awaiting_attribution" ? 0xfee75c : 0x5865f2)
@@ -39,6 +43,10 @@ export function buildUploadModerationEmbed(job: UploadWorkerJob): EmbedBuilder {
       { name: "Attribution", value: job.attribution.label, inline: true },
       { name: "Submission ID", value: job.submissionId, inline: false }
     );
+  if (job.aiReview) {
+    embed.addFields({ name: "AI Review", value: formatAiReview(job.aiReview), inline: false });
+  }
+  return embed;
 }
 
 function discordFieldValue(value: string): string {
@@ -108,11 +116,16 @@ export async function pollUploadModerationQueue(input: {
             components: buildUploadModerationComponents(job)
           });
         } else {
-          const message = await channel.send({
-            embeds: [buildUploadModerationEmbed(job)],
-            components: buildUploadModerationComponents(job)
+          const reviewedJob = await prepareUploadReviewJob({
+            config: input.config,
+            worker,
+            job
           });
-          await recordReviewMessage({ worker, config: input.config, job, message, onError: input.onError });
+          const message = await channel.send({
+            embeds: [buildUploadModerationEmbed(reviewedJob)],
+            components: buildUploadModerationComponents(reviewedJob)
+          });
+          await recordReviewMessage({ worker, config: input.config, job: reviewedJob, message, onError: input.onError });
         }
         try {
           await worker.acknowledgeDelivered([job.submissionId]);
@@ -166,6 +179,11 @@ export async function handleUploadModerationInteraction(input: {
     if (parsed.action === "confirm") {
       await worker.confirmAttribution(parsed.submissionId, input.interaction.user.id);
     } else if (parsed.action === "approve") {
+      await prepareUploadReviewJob({
+        config: input.config,
+        worker,
+        job: await worker.getSubmissionContext(parsed.submissionId)
+      });
       const approved = await worker.approve(parsed.submissionId);
       uploadWasApproved = true;
       await publishApprovedUploadToDiscord({
@@ -197,6 +215,57 @@ export async function handleUploadModerationInteraction(input: {
     components: []
   });
   return true;
+}
+
+async function prepareUploadReviewJob(input: {
+  config: AppConfig;
+  worker: UploadWorkerClient;
+  job: UploadWorkerJob;
+}): Promise<UploadWorkerJob> {
+  let job = input.job;
+  if (!job.aiReview) {
+    const aiReview = await reviewWithNim(input.config, {
+      title: job.title,
+      body: job.description,
+      archiveFacts: job.archiveFacts ?? {}
+    });
+    await input.worker.recordAiReview(job.submissionId, aiReview);
+    job = { ...job, aiReview: { ...aiReview, reviewedUtc: new Date().toISOString() } };
+  }
+
+  if (job.captureSourceUrl && !job.hasOptimizedCapture) {
+    const capture = await fetchCaptureForOptimization(job.captureSourceUrl);
+    const optimized = await optimizeCatalogImage({
+      bytes: capture.bytes,
+      contentType: capture.contentType,
+      fileName: "akron-map-capture"
+    });
+    await input.worker.putOptimizedCapture(job.submissionId, {
+      bytes: optimized.bytes,
+      contentType: "image/webp"
+    });
+    job = { ...job, hasOptimizedCapture: true };
+  }
+
+  return job;
+}
+
+async function fetchCaptureForOptimization(url: string): Promise<{ bytes: Buffer; contentType: string }> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Capture download failed with HTTP " + response.status + ".");
+  }
+  return {
+    bytes: Buffer.from(await response.arrayBuffer()),
+    contentType: response.headers.get("content-type") ?? ""
+  };
+}
+
+function formatAiReview(review: UploadAiReview): string {
+  const reasons = review.reasons.length > 0
+    ? review.reasons.map(reason => `- ${reason}`).join("\n")
+    : "- No issues reported.";
+  return [`Decision: ${review.decision}`, `Severity: ${review.severity}`, reasons].join("\n").slice(0, 1024);
 }
 
 export async function publishApprovedUploadToDiscord(input: {

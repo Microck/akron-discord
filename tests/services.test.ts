@@ -354,17 +354,7 @@ describe("upload worker client", () => {
 
 describe("upload moderation messages", () => {
   it("builds staff review embeds and stable button IDs", () => {
-    const job = {
-      batchId: "batch",
-      submissionId: "submission",
-      section: "StartPos",
-      mapSid: "Map/Sid",
-      title: "Map StartPos Pack",
-      description: "Start positions.",
-      attribution: { mode: "anonymous", label: "Anonymous" },
-      status: "reviewing",
-      validationReasons: []
-    };
+    const job = uploadModerationJob("submission");
 
     const embed = buildUploadModerationEmbed(job).toJSON();
     const components = buildUploadModerationComponents(job)[0]?.toJSON();
@@ -380,17 +370,9 @@ describe("upload moderation messages", () => {
   });
 
   it("builds attribution confirmation buttons for pending Discord claims", () => {
-    const job = {
-      batchId: "batch",
-      submissionId: "submission",
-      section: "StartPos",
-      mapSid: "Map/Sid",
-      title: "Map StartPos Pack",
-      description: "Start positions.",
-      attribution: { mode: "discord", label: "Discord confirmation pending", confirmed: false },
-      status: "reviewing",
-      validationReasons: []
-    };
+    const job = uploadModerationJob("submission", {
+      attribution: { mode: "discord", label: "Discord confirmation pending", confirmed: false }
+    });
 
     const components = buildUploadModerationComponents(job)[0]?.toJSON();
 
@@ -400,17 +382,7 @@ describe("upload moderation messages", () => {
   });
 
   it("bounds long Map SID values in moderation embeds", () => {
-    const job = {
-      batchId: "batch",
-      submissionId: "submission",
-      section: "StartPos",
-      mapSid: "x".repeat(2_000),
-      title: "Map StartPos Pack",
-      description: "Start positions.",
-      attribution: { mode: "anonymous", label: "Anonymous" },
-      status: "reviewing",
-      validationReasons: []
-    };
+    const job = uploadModerationJob("submission", { mapSid: "x".repeat(2_000) });
 
     const embed = buildUploadModerationEmbed(job).toJSON();
     const mapSid = embed.fields?.find(field => field.name === "Map SID")?.value ?? "";
@@ -463,6 +435,9 @@ describe("upload moderation messages", () => {
             uploadModerationJob("submission-b")
           ]
         });
+      }
+      if (request.url.startsWith("https://uploads.example.test/bot/reviews/")) {
+        return Response.json({ ok: true });
       }
       if (request.url === "https://uploads.example.test/bot/jobs/requeue") {
         requeueBodies.push(await request.json());
@@ -717,6 +692,9 @@ type TestUploadModerationJob = {
   attribution: { mode: string; label: string; confirmed?: boolean; discordUserId?: string };
   status: string;
   validationReasons: string[];
+  archiveFacts: Record<string, unknown>;
+  captureSourceUrl: string;
+  hasOptimizedCapture: boolean;
 };
 
 function uploadModerationJob(
@@ -733,6 +711,9 @@ function uploadModerationJob(
     attribution: { mode: "anonymous", label: "Anonymous" },
     status: "reviewing",
     validationReasons: [],
+    archiveFacts: { section: "StartPos", mapSid: "Map/Sid" },
+    captureSourceUrl: "",
+    hasOptimizedCapture: false,
     ...overrides
   };
 }

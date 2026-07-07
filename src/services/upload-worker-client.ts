@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
-import { signBotRequest, type CatalogPublication, type DeletedUploadSubmission, type UploadDiscordMessages } from "../upload-worker.js";
+import {
+  signBotRequest,
+  type CatalogPublication,
+  type DeletedUploadSubmission,
+  type UploadAiReview,
+  type UploadDiscordMessages
+} from "../upload-worker.js";
 
 export type UploadWorkerJob = {
   batchId: string;
@@ -17,6 +23,10 @@ export type UploadWorkerJob = {
   };
   status: string;
   validationReasons: string[];
+  archiveFacts: Record<string, unknown>;
+  aiReview?: UploadAiReview;
+  captureSourceUrl: string;
+  hasOptimizedCapture: boolean;
 };
 
 export type UploadWorkerStatusSubmission = {
@@ -42,6 +52,10 @@ export type UploadWorkerStatusBody = {
   submissions: UploadWorkerStatusSubmission[];
 };
 
+export type UploadWorkerSubmissionContext = UploadWorkerJob & {
+  batchId: string;
+};
+
 export type UploadWorkerDiscordMessageInput = {
   submissionId: string;
   kind: keyof UploadDiscordMessages;
@@ -55,6 +69,9 @@ export type UploadWorkerClient = {
   claimJobs(limit?: number): Promise<UploadWorkerJob[]>;
   requeueJobs(submissionIds: string[]): Promise<void>;
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
+  getSubmissionContext(submissionId: string): Promise<UploadWorkerSubmissionContext>;
+  recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void>;
+  putOptimizedCapture(submissionId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void>;
   approve(submissionId: string): Promise<UploadWorkerStatusBody>;
   reject(submissionId: string, reason: string): Promise<void>;
   requestChanges(submissionId: string, reason: string): Promise<void>;
@@ -85,6 +102,19 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     },
     async acknowledgeDelivered(submissionIds: string[]): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, "/bot/jobs/delivered", { submissionIds });
+    },
+    async getSubmissionContext(submissionId: string): Promise<UploadWorkerSubmissionContext> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/submissions/${submissionId}/context`, {});
+      return await readJson(response) as UploadWorkerSubmissionContext;
+    },
+    async recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void> {
+      await signedJson(fetchImpl, baseUrl, secret, `/bot/reviews/${submissionId}`, review);
+    },
+    async putOptimizedCapture(submissionId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void> {
+      await signedJson(fetchImpl, baseUrl, secret, `/bot/optimized-captures/${submissionId}`, {
+        contentType: capture.contentType,
+        bytesBase64: capture.bytes.toString("base64")
+      });
     },
     async approve(submissionId: string): Promise<UploadWorkerStatusBody> {
       const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, {});

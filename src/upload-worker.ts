@@ -2,7 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 import { validateAkrArchive } from "./submissions/archive.js";
 import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js";
 import { sectionTag } from "./submissions/sections.js";
-import { akrMaxBytes, imageSourceMaxBytes, type AkronProfileSection } from "./submissions/types.js";
+import { akrMaxBytes, catalogImageMaxBytes, imageSourceMaxBytes, type AkronProfileSection } from "./submissions/types.js";
 
 export type UploadSection = Extract<AkronProfileSection, "StartPos" | "AutoKill" | "AutoDeafen">;
 export type UploadStatus =
@@ -53,6 +53,21 @@ export type DeletedUploadSubmission = {
   discord?: UploadDiscordMessages;
 };
 
+export type UploadAiReview = {
+  decision: "allow" | "needs_review" | "reject";
+  severity: "low" | "medium" | "high";
+  reasons: string[];
+  reviewedUtc: string;
+};
+
+export type UploadOptimizedCapture = {
+  contentType: "image/webp";
+  uploadedBytes: number;
+  extension: "webp";
+  r2Key?: string;
+  bytes?: Buffer;
+};
+
 export type UploadObjectRecord = {
   id: string;
   tokenHash: string;
@@ -94,6 +109,9 @@ export type UploadSubmissionRecord = {
   attribution: UploadAttribution;
   status: UploadStatus;
   validationReasons: string[];
+  archiveFacts?: Record<string, unknown>;
+  aiReview?: UploadAiReview;
+  optimizedCapture?: UploadOptimizedCapture;
   reviewClaimedUtc?: string;
   moderationDeliveredUtc?: string;
   publication?: CatalogPublication;
@@ -123,6 +141,8 @@ export type UploadWorkerStore = {
   getUploadedObjectBody(id: string): Promise<UploadedObjectBody | undefined>;
   putUploadedObject(id: string, upload: PendingUploadedObjectBody): Promise<UploadedObjectWriteResult>;
   publishCatalogEntry(input: PublishCatalogEntryInput): Promise<CatalogPublication>;
+  recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined>;
+  putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined>;
   recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined>;
   deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined>;
   rememberBotNonce(nonce: string, expiresUtc: string): Promise<boolean>;
@@ -134,6 +154,19 @@ export type PublishCatalogEntryInput = {
   capture?: UploadObjectRecord;
   now: Date;
   captureSourceUrl?: string;
+};
+
+export type RecordAiReviewInput = {
+  submissionId: string;
+  review: Omit<UploadAiReview, "reviewedUtc">;
+  now: Date;
+};
+
+export type PutOptimizedCaptureInput = {
+  submissionId: string;
+  bytes: Buffer;
+  contentType: "image/webp";
+  now: Date;
 };
 
 export type RecordDiscordMessageInput = {
@@ -282,7 +315,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
           if (body instanceof Response) {
             return body;
           }
-          return await claimModerationJobs({ body, store: options.store, now });
+          return await claimModerationJobs({ body, store: options.store, now, origin: uploadOrigin, botSecret: options.botSecret });
         }
 
         if (request.method === "POST" && url.pathname === "/bot/jobs/requeue") {
@@ -299,6 +332,49 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             return body;
           }
           return await acknowledgeDeliveredModerationJobs({ body, store: options.store, now });
+        }
+
+        const contextMatch = url.pathname.match(/^\/bot\/submissions\/([^/]+)\/context$/);
+        if (request.method === "POST" && contextMatch) {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          return await getBotSubmissionContext({
+            submissionId: contextMatch[1] ?? "",
+            store: options.store,
+            now,
+            origin: uploadOrigin,
+            botSecret: options.botSecret
+          });
+        }
+
+        const aiReviewMatch = url.pathname.match(/^\/bot\/reviews\/([^/]+)$/);
+        if (request.method === "POST" && aiReviewMatch) {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          return await recordAiReview({
+            submissionId: aiReviewMatch[1] ?? "",
+            body,
+            store: options.store,
+            now
+          });
+        }
+
+        const optimizedCaptureMatch = url.pathname.match(/^\/bot\/optimized-captures\/([^/]+)$/);
+        if (request.method === "POST" && optimizedCaptureMatch) {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          return await putOptimizedCapture({
+            submissionId: optimizedCaptureMatch[1] ?? "",
+            body,
+            store: options.store,
+            now
+          });
         }
 
         const discordMessageMatch = url.pathname.match(/^\/bot\/discord-messages\/([^/]+)$/);
@@ -480,12 +556,21 @@ export class InMemoryUploadStore implements UploadWorkerStore {
       throw new Error("Cannot publish missing upload objects.");
     }
 
-    const publicCaptureBytes = uploadedCapture ? Buffer.from(await bufferFromBody(uploadedCapture.body)) : undefined;
-    const publicCapture: UploadObjectRecord | undefined = input.capture && publicCaptureBytes
+    const optimizedCapture = input.submission.optimizedCapture?.bytes ? input.submission.optimizedCapture : undefined;
+    const publicCaptureBytes = optimizedCapture?.bytes ?? (uploadedCapture ? Buffer.from(await bufferFromBody(uploadedCapture.body)) : undefined);
+    const publicCapture: UploadObjectRecord | undefined = publicCaptureBytes
       ? {
-          ...input.capture,
+          ...(input.capture ?? {
+            id: `${input.submission.id}-optimized-capture`,
+            tokenHash: "",
+            kind: "capture" as const,
+            batchId: input.submission.batchId,
+            maxBytes: catalogImageMaxBytes,
+            contentType: "image/webp"
+          }),
           bytes: publicCaptureBytes,
-          contentType: "image/webp"
+          uploadedBytes: publicCaptureBytes.length,
+          contentType: optimizedCapture?.contentType ?? "image/webp"
         }
       : undefined;
     const publication = buildPublication(input.submission, publicCapture, input.now, "https://akron.example.test");
@@ -501,6 +586,55 @@ export class InMemoryUploadStore implements UploadWorkerStore {
     }
     this.catalogIndex = mergeCatalogIndex(this.catalogIndex, buildCatalogPack(input.submission, publication, input.now));
     return publication;
+  }
+
+  async recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined> {
+    for (const [batchId, batch] of this.batches.entries()) {
+      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
+      if (!submission) {
+        continue;
+      }
+      submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
+      batch.updatedUtc = input.now.toISOString();
+      this.batches.set(batchId, clone(batch));
+      return clone(submission);
+    }
+    return undefined;
+  }
+
+  async putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined> {
+    for (const [batchId, batch] of this.batches.entries()) {
+      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
+      if (!submission) {
+        continue;
+      }
+      submission.optimizedCapture = {
+        bytes: Buffer.from(input.bytes),
+        contentType: input.contentType,
+        uploadedBytes: input.bytes.length,
+        extension: "webp"
+      };
+      if (submission.publication) {
+        const captureRecord = optimizedCaptureRecordForSubmission(submission);
+        if (captureRecord.bytes) {
+          const publication = buildPublication(submission, captureRecord, input.now, "https://akron.example.test");
+          submission.publication = {
+            ...submission.publication,
+            imageKey: publication.imageKey,
+            imageUrl: publication.imageUrl
+          };
+          this.publicObjects.set(publication.imageKey, {
+            bytes: Buffer.from(captureRecord.bytes),
+            contentType: captureRecord.contentType
+          });
+          this.catalogIndex = mergeCatalogIndex(this.catalogIndex, buildCatalogPack(submission, submission.publication, input.now));
+        }
+      }
+      batch.updatedUtc = input.now.toISOString();
+      this.batches.set(batchId, clone(batch));
+      return clone(submission);
+    }
+    return undefined;
   }
 
   async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
@@ -894,6 +1028,7 @@ async function completeUpload(input: {
     for (const { submission, packBytes } of uploadedSubmissions) {
       const validation = await validateAkrArchive(packBytes);
       const reasons = [...validation.reasons];
+      submission.archiveFacts = validation.normalizedFacts;
       if (validation.section !== submission.section) {
         reasons.push("Uploaded archive section does not match prepared submission.");
       }
@@ -1171,6 +1306,8 @@ async function claimModerationJobs(input: {
   body: Record<string, unknown>;
   store: UploadWorkerStore;
   now: () => Date;
+  origin: string;
+  botSecret: string;
 }): Promise<Response> {
   const requestedLimit = Math.trunc(readOptionalNumber(input.body, "limit") || 10);
   const limit = Math.min(Math.max(requestedLimit, 1), 25);
@@ -1185,8 +1322,115 @@ async function claimModerationJobs(input: {
       description: job.submission.description,
       attribution: botAttribution(job.submission.attribution),
       status: job.submission.status,
-      validationReasons: job.submission.validationReasons
+      validationReasons: job.submission.validationReasons,
+      archiveFacts: job.submission.archiveFacts ?? {},
+      aiReview: job.submission.aiReview,
+      captureSourceUrl: job.submission.captureObjectId
+        ? signedSourceObjectUrl(input.origin, job.submission.captureObjectId, input.botSecret, input.now())
+        : "",
+      hasOptimizedCapture: Boolean(job.submission.optimizedCapture)
     }))
+  });
+}
+
+async function getBotSubmissionContext(input: {
+  submissionId: string;
+  store: UploadWorkerStore;
+  now: () => Date;
+  origin: string;
+  botSecret: string;
+}): Promise<Response> {
+  const found = await findSubmission(input.store, input.submissionId);
+  if (!found) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+
+  return json({
+    batchId: found.batch.id,
+    submissionId: found.submission.id,
+    section: found.submission.section,
+    mapSid: found.submission.mapSid,
+    title: found.submission.title,
+    description: found.submission.description,
+    status: found.submission.status,
+    validationReasons: found.submission.validationReasons,
+    archiveFacts: found.submission.archiveFacts ?? {},
+    aiReview: found.submission.aiReview,
+    captureSourceUrl: found.submission.captureObjectId
+      ? signedSourceObjectUrl(input.origin, found.submission.captureObjectId, input.botSecret, input.now())
+      : "",
+    hasOptimizedCapture: Boolean(found.submission.optimizedCapture)
+  });
+}
+
+async function recordAiReview(input: {
+  submissionId: string;
+  body: Record<string, unknown>;
+  store: UploadWorkerStore;
+  now: () => Date;
+}): Promise<Response> {
+  const decision = readRequiredString(input.body, "decision");
+  const severity = readRequiredString(input.body, "severity");
+  if (decision !== "allow" && decision !== "needs_review" && decision !== "reject") {
+    return json({ error: "ai_review_decision_invalid" }, 400);
+  }
+  if (severity !== "low" && severity !== "medium" && severity !== "high") {
+    return json({ error: "ai_review_severity_invalid" }, 400);
+  }
+  const reasons = readArray(input.body.reasons ?? [], "reasons")
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "")
+    .map(value => value.trim().slice(0, 500))
+    .slice(0, 10);
+
+  const saved = await input.store.recordAiReview({
+    submissionId: input.submissionId,
+    review: { decision, severity, reasons },
+    now: input.now()
+  });
+  if (!saved) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+  return json({ ok: true, submissionId: saved.id, aiReview: saved.aiReview });
+}
+
+async function putOptimizedCapture(input: {
+  submissionId: string;
+  body: Record<string, unknown>;
+  store: UploadWorkerStore;
+  now: () => Date;
+}): Promise<Response> {
+  const contentType = normalizeContentType(readRequiredString(input.body, "contentType"));
+  if (contentType !== "image/webp") {
+    return json({ error: "optimized_capture_type_unsupported" }, 415);
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(readRequiredString(input.body, "bytesBase64"), "base64");
+  } catch {
+    return json({ error: "optimized_capture_invalid" }, 400);
+  }
+  if (bytes.length <= 0 || bytes.length > catalogImageMaxBytes) {
+    return json({ error: "optimized_capture_too_large", maxBytes: catalogImageMaxBytes }, 413);
+  }
+
+  const saved = await input.store.putOptimizedCapture({
+    submissionId: input.submissionId,
+    bytes,
+    contentType,
+    now: input.now()
+  });
+  if (!saved) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+  return json({
+    ok: true,
+    submissionId: saved.id,
+    optimizedCapture: {
+      contentType: saved.optimizedCapture?.contentType,
+      uploadedBytes: saved.optimizedCapture?.uploadedBytes,
+      extension: saved.optimizedCapture?.extension
+    }
   });
 }
 
@@ -1487,6 +1731,20 @@ export function buildCatalogPack(submission: UploadSubmissionRecord, publication
     downloadCount: 0,
     updatedUtc: now.toISOString(),
     tags: [sectionTag(submission.section), mapSlug]
+  };
+}
+
+function optimizedCaptureRecordForSubmission(submission: UploadSubmissionRecord): UploadObjectRecord {
+  return {
+    id: `${submission.id}-optimized-capture`,
+    tokenHash: "",
+    kind: "capture",
+    batchId: submission.batchId,
+    submissionId: submission.id,
+    maxBytes: catalogImageMaxBytes,
+    contentType: submission.optimizedCapture?.contentType ?? "image/webp",
+    uploadedBytes: submission.optimizedCapture?.uploadedBytes,
+    bytes: submission.optimizedCapture?.bytes
   };
 }
 

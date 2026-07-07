@@ -409,6 +409,9 @@ describe("upload worker", () => {
         section: string;
         status: string;
         attribution: { label: string };
+        archiveFacts: Record<string, unknown>;
+        captureSourceUrl: string;
+        hasOptimizedCapture: boolean;
       }>;
     };
 
@@ -419,7 +422,10 @@ describe("upload worker", () => {
       submissionId: prepared.submissions[0]?.submissionId,
       section: "StartPos",
       status: "reviewing",
-      attribution: { label: "Anonymous" }
+      attribution: { label: "Anonymous" },
+      archiveFacts: { section: "StartPos", mapSid },
+      captureSourceUrl: expect.stringContaining("/uploads/source/"),
+      hasOptimizedCapture: false
     });
 
     const empty = await signedBotJson(worker, "/bot/jobs/claim", { limit: 5 }, "nonce-claim-empty");
@@ -756,6 +762,67 @@ describe("upload worker", () => {
     });
   });
 
+  it("persists bot AI review and exposes it through submission context", async () => {
+    const worker = testWorker();
+    const prepared = await prepareAndUpload(worker, {
+      pack: validArchive("StartPos"),
+      section: "StartPos"
+    });
+    await postJson(worker, "/uploads/complete", {
+      installId,
+      batchId: prepared.batchId
+    });
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+
+    const recorded = await signedBotJson(worker, `/bot/reviews/${submissionId}`, {
+      decision: "needs_review",
+      severity: "medium",
+      reasons: ["Manual check required."]
+    }, "nonce-ai-review");
+    const context = await signedBotJson(worker, `/bot/submissions/${submissionId}/context`, {}, "nonce-ai-context");
+    const contextBody = await context.json() as { aiReview?: { decision: string; severity: string; reasons: string[] } };
+
+    expect(recorded.status).toBe(200);
+    expect(context.status).toBe(200);
+    expect(contextBody.aiReview).toMatchObject({
+      decision: "needs_review",
+      severity: "medium",
+      reasons: ["Manual check required."]
+    });
+  });
+
+  it("publishes approved uploads with a bot-optimized capture image", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({
+      store,
+      botSecret,
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const prepared = await prepareAndUpload(worker, {
+      pack: validArchive("StartPos"),
+      section: "StartPos"
+    });
+    await postJson(worker, "/uploads/complete", {
+      installId,
+      batchId: prepared.batchId
+    });
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+
+    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}`, {
+      contentType: "image/webp",
+      bytesBase64: Buffer.from("optimized-webp").toString("base64")
+    }, "nonce-optimized-capture");
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-optimized-approve");
+    const approvedBody = await approved.json() as UploadStatusBody;
+    const publication = approvedBody.submissions[0]?.publication;
+
+    expect(optimized.status).toBe(200);
+    expect(publication?.imageKey).toMatch(/^captures\/springcollab2020-1-beginner\/.+\.webp$/);
+    expect(publication?.imageUrl).toMatch(/\/capture\.webp$/);
+    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")?.contentType).toBe("image/webp");
+    expect(store.getCatalogIndexForTesting().packs[0]?.imageUrl).toBe(publication?.imageUrl);
+  });
+
   it("deletes published uploads from public objects and the catalog", async () => {
     const store = new InMemoryUploadStore();
     const worker = createUploadWorker({
@@ -842,6 +909,43 @@ describe("upload worker", () => {
       imageUrl: "",
       mapSid
     });
+  });
+
+  it("repairs an already-published catalog entry when an optimized capture arrives later", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({
+      store,
+      botSecret,
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const pack = validArchive("StartPos");
+    const preparedResponse = await prepare(worker, {
+      capture: undefined,
+      submissions: [submissionInput({ packSizeBytes: pack.length })]
+    });
+    expect(preparedResponse.status).toBe(201);
+    const prepared = await preparedResponse.json() as {
+      batchId: string;
+      submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
+    };
+
+    await worker.fetch(uploadRequest(prepared.submissions[0]?.pack.uploadUrl ?? "", pack, "application/octet-stream"));
+    await postJson(worker, "/uploads/complete", {
+      installId,
+      batchId: prepared.batchId
+    });
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "repair-approve");
+    expect(store.getCatalogIndexForTesting().packs[0]?.imageUrl).toBe("");
+
+    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}`, {
+      contentType: "image/webp",
+      bytesBase64: Buffer.from("late-webp").toString("base64")
+    }, "repair-optimized");
+    const repaired = store.getCatalogIndexForTesting().packs[0];
+
+    expect(optimized.status).toBe(200);
+    expect(repaired?.imageUrl).toMatch(/\/capture\.webp$/);
   });
 
   it("preserves sibling moderation updates while saving an approved submission", async () => {
