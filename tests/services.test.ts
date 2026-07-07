@@ -653,7 +653,12 @@ describe("upload moderation messages", () => {
           mapSid: "Map/Sid",
           title: "Beginner StartPos",
           description: "Start positions.",
-          attribution: { mode: "anonymous", label: "Anonymous" },
+          attribution: {
+            mode: "discord",
+            label: "Discord confirmed",
+            confirmed: true,
+            discordUserId: "123456789012345678"
+          },
           status: "published",
           validationReasons: [],
           publication: {
@@ -673,6 +678,10 @@ describe("upload moderation messages", () => {
       name: "Beginner StartPos",
       appliedTags: ["published-tag"]
     });
+    const postedEmbed = (createdThreads[0] as { message?: { embeds?: Array<{ toJSON?: () => { fields?: Array<{ name: string; value: string }> } }> } })
+      .message?.embeds?.[0];
+    const embed = postedEmbed?.toJSON?.();
+    expect(embed?.fields?.find(field => field.name === "Attribution")?.value).toBe("<@123456789012345678>");
     expect(recordCalls).toEqual([{
       submissionId: "submission",
       kind: "publication",

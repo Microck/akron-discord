@@ -567,6 +567,22 @@ describe("upload worker", () => {
     expect(approved.status).toBe(200);
     expect(approvedBody.status).toBe("published");
     expect(approvedBody.submissions[0]?.status).toBe("published");
+    expect(approvedBody.submissions[0]?.attribution).toMatchObject({
+      mode: "discord",
+      label: "Discord confirmed",
+      confirmed: true,
+      discordUserId: "123456789012345678"
+    });
+
+    const publicStatus = await worker.fetch(new Request(`${baseUrl}/uploads/status/${prepared.batchId}?installId=${encodeURIComponent(installId)}`));
+    const publicStatusBody = await publicStatus.json() as UploadStatusBody;
+    expect(publicStatus.status).toBe(200);
+    expect(publicStatusBody.submissions[0]?.attribution).toMatchObject({
+      mode: "discord",
+      label: "Discord confirmed",
+      confirmed: true
+    });
+    expect(publicStatusBody.submissions[0]?.attribution?.discordUserId).toBeUndefined();
   });
 
   it("queues Discord attribution after the owner confirms a claimed job", async () => {
@@ -1205,6 +1221,12 @@ type UploadStatusBody = {
     submissionId: string;
     section: string;
     mapSid: string;
+    attribution?: {
+      mode?: string;
+      label?: string;
+      confirmed?: boolean;
+      discordUserId?: string;
+    };
     status: string;
     validationReasons: string[];
     publication?: {

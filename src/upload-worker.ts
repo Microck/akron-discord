@@ -1233,7 +1233,7 @@ async function applyModerationAction(input: {
     return json({ error: "submission_not_found" }, 404);
   }
   if (input.action === "approve" && found.submission.status === "published") {
-    return json(publicBatchStatus(found.batch));
+    return json(botBatchStatus(found.batch));
   }
   if (!isModeratableStatus(found.submission.status)) {
     return json({ error: "submission_not_reviewable", status: found.submission.status }, 409);
@@ -1304,7 +1304,7 @@ async function applyModerationAction(input: {
     submission: found.submission,
     now: input.now
   });
-  return json(publicBatchStatus(savedBatch));
+  return json(botBatchStatus(savedBatch));
 }
 
 async function acknowledgeDeliveredModerationJobs(input: {
@@ -1702,6 +1702,17 @@ function isClaimableModerationStatus(submission: UploadSubmissionRecord, now: Da
 }
 
 function publicBatchStatus(batch: UploadBatchRecord): Record<string, unknown> {
+  return batchStatus(batch, publicAttribution);
+}
+
+function botBatchStatus(batch: UploadBatchRecord): Record<string, unknown> {
+  return batchStatus(batch, botAttribution);
+}
+
+function batchStatus(
+  batch: UploadBatchRecord,
+  attribution: (attribution: UploadAttribution) => Record<string, unknown>
+): Record<string, unknown> {
   return {
     batchId: batch.id,
     status: batch.status,
@@ -1712,7 +1723,7 @@ function publicBatchStatus(batch: UploadBatchRecord): Record<string, unknown> {
       mapSid: submission.mapSid,
       title: submission.title,
       description: submission.description,
-      attribution: publicAttribution(submission.attribution),
+      attribution: attribution(submission.attribution),
       status: submission.status,
       validationReasons: submission.validationReasons,
       publication: submission.publication

@@ -336,12 +336,22 @@ function buildPublishedUploadEmbed(submission: UploadWorkerStatusSubmission): Em
     .addFields(
       { name: "Section", value: submission.section, inline: true },
       { name: "Map SID", value: discordFieldValue(submission.mapSid || "Unknown"), inline: true },
-      { name: "Attribution", value: submission.attribution.label || "Anonymous", inline: true }
+      { name: "Attribution", value: publishedAttributionLabel(submission), inline: true }
     );
   if (submission.publication?.imageUrl) {
     embed.setImage(submission.publication.imageUrl);
   }
   return embed;
+}
+
+function publishedAttributionLabel(submission: UploadWorkerStatusSubmission): string {
+  if (submission.attribution.mode === "discord" &&
+      submission.attribution.confirmed &&
+      submission.attribution.discordUserId) {
+    return `<@${submission.attribution.discordUserId}>`;
+  }
+
+  return submission.attribution.label || "Anonymous";
 }
 
 function buildPublishedUploadComponents(submission: UploadWorkerStatusSubmission): ActionRowBuilder<ButtonBuilder> {
