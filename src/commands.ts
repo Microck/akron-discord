@@ -98,7 +98,7 @@ export const commandDefinitions = [
     .setName("delete-upload-pack")
     .setDescription("Delete an in-game uploaded pack from the catalog and known Discord posts.")
     .addStringOption(option =>
-      option.setName("submission-id").setDescription("Upload submission ID to delete.").setRequired(true)
+      option.setName("submission-id").setDescription("Upload submission ID to delete. Defaults to the current upload thread.")
     )
     .addStringOption(option =>
       option.setName("reason").setDescription("Optional admin note stored on the deleted submission.")
@@ -345,15 +345,36 @@ export async function handleCommand(input: {
     }
 
     await interaction.deferReply({ ephemeral: true });
-    const submissionId = interaction.options.getString("submission-id", true).trim();
+    const submissionId = interaction.options.getString("submission-id")?.trim() ?? "";
     const reason = interaction.options.getString("reason")?.trim() || `Deleted by ${interaction.user.username}.`;
     const worker = createUploadWorkerClient(config);
-    const deleted = await worker.deleteSubmission(submissionId, reason);
-    const discordResults = await deleteKnownDiscordMessages(client, deleted.discord);
+    const currentThread = interaction.channel?.isThread() ? interaction.channel : null;
+    if (!submissionId && !currentThread) {
+      await interaction.editReply("Run this inside an uploaded pack thread or pass `submission-id`.");
+      return;
+    }
+    const currentThreadId = currentThread?.id;
+    const deleted = submissionId
+      ? await worker.deleteSubmission(submissionId, reason)
+      : await worker.deleteSubmissionByDiscordThread(currentThreadId ?? "", reason);
+    const deletingCurrentThread = Boolean(currentThreadId && deleted.discord?.publication?.threadId === currentThreadId);
+    const discordResults = await deleteKnownDiscordMessages(
+      client,
+      deleted.discord,
+      deletingCurrentThread && currentThreadId ? { skipPublicationThreadId: currentThreadId } : {}
+    );
+    if (deletingCurrentThread) {
+      discordResults.push(`public post: deleting current thread ${currentThreadId} after response`);
+    }
+    await interaction.editReply(formatDeleteUploadPackResult({
+      submissionId: deleted.submissionId,
+      removedCatalogPack: Boolean(deleted.publication?.packId),
+      discordResults
+    }));
     await logAudit(db, {
       actorId: interaction.user.id,
       action: "upload_pack_deleted",
-      target: submissionId,
+      target: deleted.submissionId,
       details: {
         batchId: deleted.batchId,
         previousStatus: deleted.previousStatus,
@@ -361,11 +382,28 @@ export async function handleCommand(input: {
         discordResults
       }
     });
-    await interaction.editReply(formatDeleteUploadPackResult({
-      submissionId,
-      removedCatalogPack: Boolean(deleted.publication?.packId),
-      discordResults
-    }));
+    if (deletingCurrentThread && deleted.discord?.publication) {
+      const currentThreadDeleteResult = await deleteDiscordMessageReference(client, "public post", deleted.discord.publication);
+      const failedDiscordResults = [...discordResults.slice(0, -1), currentThreadDeleteResult];
+      if (!isSuccessfulThreadDeleteResult(currentThreadDeleteResult)) {
+        await interaction.editReply(formatDeleteUploadPackResult({
+          submissionId: deleted.submissionId,
+          removedCatalogPack: Boolean(deleted.publication?.packId),
+          discordResults: failedDiscordResults
+        }));
+        await logAudit(db, {
+          actorId: interaction.user.id,
+          action: "upload_pack_discord_cleanup_failed",
+          target: deleted.submissionId,
+          details: {
+            batchId: deleted.batchId,
+            previousStatus: deleted.previousStatus,
+            packId: deleted.publication?.packId ?? "",
+            discordResults: failedDiscordResults
+          }
+        });
+      }
+    }
   }
 }
 
@@ -413,7 +451,11 @@ function normalizeTagName(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-async function deleteKnownDiscordMessages(client: Client<true>, discord: UploadDiscordMessages | undefined): Promise<string[]> {
+async function deleteKnownDiscordMessages(
+  client: Client<true>,
+  discord: UploadDiscordMessages | undefined,
+  options: { skipPublicationThreadId?: string } = {}
+): Promise<string[]> {
   const refs = [
     ["public post", discord?.publication],
     ["review message", discord?.review]
@@ -422,6 +464,9 @@ async function deleteKnownDiscordMessages(client: Client<true>, discord: UploadD
   for (const [label, ref] of refs) {
     if (!ref) {
       results.push(`${label}: no recorded message`);
+      continue;
+    }
+    if (label === "public post" && ref.threadId && ref.threadId === options.skipPublicationThreadId) {
       continue;
     }
     results.push(await deleteDiscordMessageReference(client, label, ref));
@@ -450,6 +495,10 @@ async function deleteDiscordMessageReference(client: Client<true>, label: string
     const message = error instanceof Error ? error.message : String(error);
     return `${label}: delete failed (${message})`;
   }
+}
+
+function isSuccessfulThreadDeleteResult(result: string): boolean {
+  return /^public post: deleted thread \d+$/.test(result);
 }
 
 function formatDeleteUploadPackResult(input: {

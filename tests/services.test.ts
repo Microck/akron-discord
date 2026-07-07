@@ -350,6 +350,34 @@ describe("upload worker client", () => {
       messageId: "message"
     });
   });
+
+  it("signs delete-by-Discord-thread requests for the upload worker", async () => {
+    const requests: Request[] = [];
+    const client = createUploadWorkerClient(
+      config({
+        uploadWorkerUrl: "https://uploads.example.test/api/",
+        uploadWorkerBotSecret: "secret"
+      }),
+      async (request, init) => {
+        requests.push(request instanceof Request ? new Request(request, init) : new Request(request, init));
+        return Response.json({
+          deleted: {
+            batchId: "batch",
+            submissionId: "submission",
+            previousStatus: "published",
+            discord: { publication: { threadId: "thread-123" } }
+          }
+        });
+      }
+    );
+
+    const deleted = await client.deleteSubmissionByDiscordThread("thread-123", "Admin cleanup.");
+
+    expect(deleted.submissionId).toBe("submission");
+    expect(requests[0]?.url).toBe("https://uploads.example.test/bot/submissions/by-discord-thread/thread-123/delete");
+    expect(requests[0]?.headers.get("x-akron-signature")).toMatch(/^[a-f0-9]{64}$/);
+    expect(await requests[0]?.json()).toEqual({ reason: "Admin cleanup." });
+  });
 });
 
 describe("upload moderation messages", () => {

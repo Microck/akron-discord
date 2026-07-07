@@ -158,6 +158,25 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return batch && submission ? { batch, submission } : undefined;
   }
 
+  async findSubmissionByDiscordThread(threadId: string): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined> {
+    const row = await this.db
+      .prepare([
+        "SELECT upload_batches.id AS batch_id",
+        "FROM upload_batches, json_each(upload_batches.payload_json, '$.submissions')",
+        "WHERE json_extract(json_each.value, '$.discord.publication.threadId') = ?",
+        "LIMIT 1"
+      ].join(" "))
+      .bind(threadId)
+      .first<{ batch_id: string }>();
+    if (!row) {
+      return undefined;
+    }
+
+    const batch = await this.getBatch(row.batch_id);
+    const submission = batch?.submissions.find(candidate => candidate.discord?.publication?.threadId === threadId);
+    return batch && submission ? { batch, submission } : undefined;
+  }
+
   async tryBeginCompletion(batch: UploadBatchRecord): Promise<boolean> {
     const locked = await this.db
       .prepare([

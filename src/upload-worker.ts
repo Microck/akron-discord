@@ -132,6 +132,7 @@ export type UploadBatchRecord = {
 export type UploadWorkerStore = {
   getBatch(id: string): Promise<UploadBatchRecord | undefined>;
   findSubmission(submissionId: string): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined>;
+  findSubmissionByDiscordThread(threadId: string): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined>;
   tryBeginCompletion(batch: UploadBatchRecord): Promise<boolean>;
   tryReserveModerationAction(batch: UploadBatchRecord, submissionId: string, now: Date): Promise<boolean>;
   claimModerationJobs(limit: number, now: Date): Promise<Array<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord }>>;
@@ -405,6 +406,20 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
           });
         }
 
+        const deleteThreadSubmissionMatch = url.pathname.match(/^\/bot\/submissions\/by-discord-thread\/([^/]+)\/delete$/);
+        if (request.method === "POST" && deleteThreadSubmissionMatch) {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          return await deleteSubmissionByDiscordThread({
+            threadId: decodeURIComponent(deleteThreadSubmissionMatch[1] ?? ""),
+            body,
+            store: options.store,
+            now
+          });
+        }
+
         const moderationMatch = url.pathname.match(/^\/bot\/moderation\/([^/]+)\/(approve|reject|request-changes)$/);
         if (request.method === "POST" && moderationMatch) {
           const body = await readSignedJson(request, options.botSecret, now, options.store);
@@ -449,6 +464,17 @@ export class InMemoryUploadStore implements UploadWorkerStore {
     for (const batch of this.batches.values()) {
       const batchClone = clone(batch);
       const submission = batchClone.submissions.find(candidate => candidate.id === submissionId);
+      if (submission) {
+        return { batch: batchClone, submission };
+      }
+    }
+    return undefined;
+  }
+
+  async findSubmissionByDiscordThread(threadId: string): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined> {
+    for (const batch of this.batches.values()) {
+      const batchClone = clone(batch);
+      const submission = batchClone.submissions.find(candidate => candidate.discord?.publication?.threadId === threadId);
       if (submission) {
         return { batch: batchClone, submission };
       }
@@ -1494,6 +1520,28 @@ async function deleteSubmission(input: {
 }): Promise<Response> {
   const deleted = await input.store.deleteSubmission({
     submissionId: input.submissionId,
+    now: input.now(),
+    reason: readOptionalString(input.body, "reason") || undefined
+  });
+  if (!deleted) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+  return json({ ok: true, deleted });
+}
+
+async function deleteSubmissionByDiscordThread(input: {
+  threadId: string;
+  body: Record<string, unknown>;
+  store: UploadWorkerStore;
+  now: () => Date;
+}): Promise<Response> {
+  const found = await input.store.findSubmissionByDiscordThread(input.threadId);
+  if (!found) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+
+  const deleted = await input.store.deleteSubmission({
+    submissionId: found.submission.id,
     now: input.now(),
     reason: readOptionalString(input.body, "reason") || undefined
   });
