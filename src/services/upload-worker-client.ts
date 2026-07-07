@@ -39,6 +39,7 @@ export type UploadWorkerStatusSubmission = {
     mode: string;
     label: string;
     confirmed?: boolean;
+    discordUserId?: string;
   };
   status: string;
   validationReasons: string[];
