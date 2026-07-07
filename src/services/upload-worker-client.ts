@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
-import { signBotRequest } from "../upload-worker.js";
+import { signBotRequest, type CatalogPublication, type DeletedUploadSubmission, type UploadDiscordMessages } from "../upload-worker.js";
 
 export type UploadWorkerJob = {
   batchId: string;
@@ -19,14 +19,48 @@ export type UploadWorkerJob = {
   validationReasons: string[];
 };
 
+export type UploadWorkerStatusSubmission = {
+  submissionId: string;
+  section: string;
+  mapSid: string;
+  title: string;
+  description: string;
+  attribution: {
+    mode: string;
+    label: string;
+    confirmed?: boolean;
+  };
+  status: string;
+  validationReasons: string[];
+  publication?: CatalogPublication;
+};
+
+export type UploadWorkerStatusBody = {
+  batchId: string;
+  status: string;
+  expiresUtc: string;
+  submissions: UploadWorkerStatusSubmission[];
+};
+
+export type UploadWorkerDiscordMessageInput = {
+  submissionId: string;
+  kind: keyof UploadDiscordMessages;
+  guildId: string;
+  channelId: string;
+  messageId: string;
+  threadId?: string;
+};
+
 export type UploadWorkerClient = {
   claimJobs(limit?: number): Promise<UploadWorkerJob[]>;
   requeueJobs(submissionIds: string[]): Promise<void>;
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
-  approve(submissionId: string): Promise<void>;
+  approve(submissionId: string): Promise<UploadWorkerStatusBody>;
   reject(submissionId: string, reason: string): Promise<void>;
   requestChanges(submissionId: string, reason: string): Promise<void>;
   confirmAttribution(submissionId: string, discordUserId: string): Promise<void>;
+  recordDiscordMessage(input: UploadWorkerDiscordMessageInput): Promise<void>;
+  deleteSubmission(submissionId: string, reason?: string): Promise<DeletedUploadSubmission>;
 };
 
 export function hasUploadWorkerConfig(config: AppConfig): boolean {
@@ -52,8 +86,9 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     async acknowledgeDelivered(submissionIds: string[]): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, "/bot/jobs/delivered", { submissionIds });
     },
-    async approve(submissionId: string): Promise<void> {
-      await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, {});
+    async approve(submissionId: string): Promise<UploadWorkerStatusBody> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, {});
+      return await readJson(response) as UploadWorkerStatusBody;
     },
     async reject(submissionId: string, reason: string): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/reject`, { reason });
@@ -63,6 +98,23 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     },
     async confirmAttribution(submissionId: string, discordUserId: string): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/attribution/${submissionId}/confirm`, { discordUserId });
+    },
+    async recordDiscordMessage(input: UploadWorkerDiscordMessageInput): Promise<void> {
+      await signedJson(fetchImpl, baseUrl, secret, `/bot/discord-messages/${input.submissionId}`, {
+        kind: input.kind,
+        guildId: input.guildId,
+        channelId: input.channelId,
+        messageId: input.messageId,
+        threadId: input.threadId
+      });
+    },
+    async deleteSubmission(submissionId: string, reason?: string): Promise<DeletedUploadSubmission> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/submissions/${submissionId}/delete`, { reason: reason ?? "" });
+      const body = await readJson(response) as { deleted?: DeletedUploadSubmission };
+      if (!body.deleted) {
+        throw new Error("Upload Worker delete response did not include deletion metadata.");
+      }
+      return body.deleted;
     }
   };
 }

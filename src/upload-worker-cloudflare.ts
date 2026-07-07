@@ -8,8 +8,11 @@ import {
   moderationClaimLeaseMs,
   type CatalogIndex,
   type CatalogPack,
+  type DeletedUploadSubmission,
+  type DeleteSubmissionInput,
   type PendingUploadedObjectBody,
   type PublishCatalogEntryInput,
+  type RecordDiscordMessageInput,
   type UploadBatchRecord,
   type UploadObjectRecord,
   type UploadedObjectBody,
@@ -51,6 +54,7 @@ type D1RunResult = {
 type R2Bucket = {
   put(key: string, value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
   get(key: string): Promise<R2ObjectBody | null>;
+  delete(key: string): Promise<void>;
 };
 
 type R2ObjectBody = {
@@ -468,6 +472,82 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return publication;
   }
 
+  async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
+    const found = await this.findSubmission(input.submissionId);
+    if (!found) {
+      return undefined;
+    }
+
+    found.submission.discord = {
+      ...found.submission.discord,
+      [input.kind]: {
+        ...input.message,
+        postedUtc: input.now.toISOString()
+      }
+    };
+    found.batch.updatedUtc = input.now.toISOString();
+    await this.putBatchPayload(found.batch);
+    return found.submission;
+  }
+
+  async deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined> {
+    const found = await this.findSubmission(input.submissionId);
+    if (!found) {
+      return undefined;
+    }
+
+    const previousStatus = found.submission.status;
+    const publication = found.submission.publication;
+    const discord = found.submission.discord;
+    const nowIso = input.now.toISOString();
+    if (publication) {
+      const releaseCatalogLock = await this.acquireCatalogLock();
+      try {
+        if (publication.packId) {
+          await this.deleteCatalogEntry(publication.packId);
+          const nextIndex = await this.catalogIndexWithoutEntry(publication.packId);
+          await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
+            httpMetadata: { contentType: "application/json" }
+          });
+        }
+      } finally {
+        await releaseCatalogLock();
+      }
+
+      if (publication.packKey) {
+        await this.publicBucket.delete(publication.packKey);
+      }
+      if (publication.imageKey) {
+        await this.publicBucket.delete(publication.imageKey);
+      }
+    }
+
+    await this.deleteQuarantineObjectsForSubmission(found.batch, found.submission);
+
+    found.submission.status = "deleted";
+    if (input.reason) {
+      found.submission.validationReasons.push(input.reason);
+    }
+    delete found.submission.publication;
+    delete found.submission.reviewClaimedUtc;
+    delete found.submission.moderationDeliveredUtc;
+    found.batch.updatedUtc = nowIso;
+    found.batch.status = deriveBatchStatusForStore(found.batch);
+    await this.putBatchPayload(found.batch);
+    await this.db
+      .prepare("UPDATE upload_submissions SET status = 'deleted', updated_utc = ?, moderation_delivered_utc = NULL WHERE id = ?")
+      .bind(nowIso, found.submission.id)
+      .run();
+
+    return {
+      batchId: found.batch.id,
+      submissionId: found.submission.id,
+      previousStatus,
+      publication,
+      discord
+    };
+  }
+
   async rememberBotNonce(nonce: string, expiresUtc: string): Promise<boolean> {
     try {
       await this.db
@@ -513,6 +593,53 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     await this.db
       .prepare("DELETE FROM upload_catalog_entries WHERE id = ?")
       .bind(id)
+      .run();
+  }
+
+  private async catalogIndexWithoutEntry(id: string): Promise<CatalogIndex> {
+    const rows = await this.db
+      .prepare("SELECT entry_json FROM upload_catalog_entries ORDER BY published_utc ASC, id ASC")
+      .all<CatalogEntryRow>();
+    let index = await this.readCurrentCatalogIndex();
+    index = {
+      ...index,
+      packs: index.packs.filter(pack => pack.id !== id)
+    };
+    for (const row of rows.results) {
+      index = mergeCatalogIndex(index, JSON.parse(row.entry_json) as CatalogPack);
+    }
+    return index;
+  }
+
+  private async deleteQuarantineObjectsForSubmission(batch: UploadBatchRecord, submission: UploadSubmissionRecord): Promise<void> {
+    await this.deleteQuarantineObject(submission.packObjectId);
+    if (!submission.captureObjectId) {
+      return;
+    }
+
+    const captureStillUsed = batch.submissions.some(candidate =>
+      candidate.id !== submission.id &&
+      candidate.status !== "deleted" &&
+      candidate.captureObjectId === submission.captureObjectId
+    );
+    if (!captureStillUsed) {
+      await this.deleteQuarantineObject(submission.captureObjectId);
+    }
+  }
+
+  private async deleteQuarantineObject(objectId: string): Promise<void> {
+    const row = await this.db
+      .prepare("SELECT r2_key FROM upload_objects WHERE id = ?")
+      .bind(objectId)
+      .first<{ r2_key: string }>();
+    if (!row) {
+      return;
+    }
+
+    await this.quarantineBucket.delete(row.r2_key);
+    await this.db
+      .prepare("DELETE FROM upload_objects WHERE id = ?")
+      .bind(objectId)
       .run();
   }
 
@@ -680,6 +807,9 @@ function deriveBatchStatusForStore(batch: UploadBatchRecord): UploadBatchRecord[
   }
   if (statuses.has("rejected")) {
     return "rejected";
+  }
+  if (statuses.has("deleted")) {
+    return "deleted";
   }
   return "withdrawn";
 }

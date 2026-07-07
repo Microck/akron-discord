@@ -20,6 +20,7 @@ import {
   buildUploadModerationComponents,
   buildUploadModerationEmbed,
   pollUploadModerationQueue,
+  publishApprovedUploadToDiscord,
   uploadModerationButtonId
 } from "../src/services/upload-moderation.js";
 
@@ -288,6 +289,67 @@ describe("upload worker client", () => {
     expect(request?.headers.get("x-akron-signature")).toMatch(/^[a-f0-9]{64}$/);
     expect(await request?.text()).toBe("{\"limit\":3}");
   });
+
+  it("parses approval responses and signs Discord message records", async () => {
+    const requests: Request[] = [];
+    const client = createUploadWorkerClient(
+      config({
+        uploadWorkerUrl: "https://uploads.example.test/api/",
+        uploadWorkerBotSecret: "secret"
+      }),
+      async (request, init) => {
+        const captured = request instanceof Request ? new Request(request, init) : new Request(request, init);
+        requests.push(captured);
+        if (captured.url === "https://uploads.example.test/bot/moderation/submission/approve") {
+          return Response.json({
+            batchId: "batch",
+            status: "published",
+            expiresUtc: "2026-01-01T00:30:00.000Z",
+            submissions: [{
+              submissionId: "submission",
+              section: "StartPos",
+              mapSid: "Map/Sid",
+              title: "Pack",
+              description: "Description",
+              attribution: { mode: "anonymous", label: "Anonymous" },
+              status: "published",
+              validationReasons: [],
+              publication: {
+                packId: "pack",
+                packKey: "packs/map/pack.akr",
+                imageKey: "",
+                downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
+                imageUrl: "",
+                publishedUtc: "2026-01-01T00:00:00.000Z"
+              }
+            }]
+          });
+        }
+        return Response.json({ ok: true });
+      }
+    );
+
+    const approved = await client.approve("submission");
+    await client.recordDiscordMessage({
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum",
+      threadId: "thread",
+      messageId: "message"
+    });
+
+    expect(approved.submissions[0]?.publication?.downloadUrl).toBe("https://akron.micr.dev/maps/map/pack.akr");
+    expect(requests.map(request => new URL(request.url).pathname)).toEqual([
+      "/bot/moderation/submission/approve",
+      "/bot/discord-messages/submission"
+    ]);
+    expect(await requests[1]?.json()).toMatchObject({
+      kind: "publication",
+      threadId: "thread",
+      messageId: "message"
+    });
+  });
 });
 
 describe("upload moderation messages", () => {
@@ -527,6 +589,95 @@ describe("upload moderation messages", () => {
     expect(errors.map(error => error instanceof Error ? error.message : String(error))).toEqual([
       "Discord DM failed."
     ]);
+  });
+
+  it("posts approved uploads to the matching public forum and records the thread", async () => {
+    const recordCalls: unknown[] = [];
+    const createdThreads: unknown[] = [];
+    const starterMessage = { id: "starter-message" };
+    const forum = {
+      id: "forum-startpos",
+      name: "startpos-packs",
+      type: ChannelType.GuildForum,
+      availableTags: [{ id: "published-tag", name: "Published" }],
+      threads: {
+        async create(input: unknown): Promise<unknown> {
+          createdThreads.push(input);
+          return {
+            id: "thread-id",
+            async fetchStarterMessage(): Promise<unknown> {
+              return starterMessage;
+            }
+          };
+        }
+      }
+    };
+    const client = {
+      guilds: {
+        async fetch(): Promise<unknown> {
+          return {
+            channels: {
+              async fetch(): Promise<unknown> {
+                return {
+                  find(predicate: (candidate: typeof forum) => boolean): typeof forum | null {
+                    return predicate(forum) ? forum : null;
+                  }
+                };
+              }
+            }
+          };
+        }
+      }
+    };
+    const worker = {
+      async recordDiscordMessage(input: unknown): Promise<void> {
+        recordCalls.push(input);
+      }
+    };
+
+    await publishApprovedUploadToDiscord({
+      client: client as never,
+      config: config({ discordGuildId: "guild" }),
+      worker: worker as never,
+      submissionId: "submission",
+      status: {
+        batchId: "batch",
+        status: "published",
+        expiresUtc: "2026-01-01T00:30:00.000Z",
+        submissions: [{
+          submissionId: "submission",
+          section: "StartPos",
+          mapSid: "Map/Sid",
+          title: "Beginner StartPos",
+          description: "Start positions.",
+          attribution: { mode: "anonymous", label: "Anonymous" },
+          status: "published",
+          validationReasons: [],
+          publication: {
+            packId: "pack",
+            packKey: "packs/map/pack.akr",
+            imageKey: "",
+            downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
+            imageUrl: "",
+            publishedUtc: "2026-01-01T00:00:00.000Z"
+          }
+        }]
+      }
+    });
+
+    expect(createdThreads).toHaveLength(1);
+    expect(createdThreads[0]).toMatchObject({
+      name: "Beginner StartPos",
+      appliedTags: ["published-tag"]
+    });
+    expect(recordCalls).toEqual([{
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum-startpos",
+      threadId: "thread-id",
+      messageId: "starter-message"
+    }]);
   });
 });
 describe("playtester activity thresholds", () => {

@@ -22,9 +22,11 @@ import { isModerator, requireAdmin, requireModerator } from "./permissions.js";
 import { logAudit } from "./services/audit.js";
 import { applyGithubLabels, closeSyncedGithubIssue, linkGithubIssue, planGithubLabels, unlinkGithubIssue } from "./services/github-sync.js";
 import { upsertMapMapping } from "./services/map-resolver.js";
+import { createUploadWorkerClient, hasUploadWorkerConfig } from "./services/upload-worker-client.js";
 import { applyServerSync, planServerSync } from "./server-sync.js";
 import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js";
 import { scanSubmissionThread } from "./submissions/scanner.js";
+import type { UploadDiscordMessage, UploadDiscordMessages } from "./upload-worker.js";
 
 export const commandDefinitions = [
   new SlashCommandBuilder()
@@ -91,6 +93,15 @@ export const commandDefinitions = [
     )
     .addStringOption(option =>
       option.setName("display-name").setDescription("Human-readable map name.").setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("delete-upload-pack")
+    .setDescription("Delete an in-game uploaded pack from the catalog and known Discord posts.")
+    .addStringOption(option =>
+      option.setName("submission-id").setDescription("Upload submission ID to delete.").setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName("reason").setDescription("Optional admin note stored on the deleted submission.")
     )
 ].map(command => command.toJSON());
 
@@ -321,6 +332,40 @@ export async function handleCommand(input: {
       details: { mapSid, displayName }
     });
     await interaction.editReply(`Stored mapping: ${mapUrl} -> ${mapSid}. Rescan affected posts when ready.`);
+    return;
+  }
+
+  if (interaction.commandName === "delete-upload-pack") {
+    if (!await requireAdmin(interaction, config)) {
+      return;
+    }
+    if (!hasUploadWorkerConfig(config)) {
+      await interaction.reply({ content: "Upload Worker integration is not configured.", ephemeral: true });
+      return;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+    const submissionId = interaction.options.getString("submission-id", true).trim();
+    const reason = interaction.options.getString("reason")?.trim() || `Deleted by ${interaction.user.username}.`;
+    const worker = createUploadWorkerClient(config);
+    const deleted = await worker.deleteSubmission(submissionId, reason);
+    const discordResults = await deleteKnownDiscordMessages(client, deleted.discord);
+    await logAudit(db, {
+      actorId: interaction.user.id,
+      action: "upload_pack_deleted",
+      target: submissionId,
+      details: {
+        batchId: deleted.batchId,
+        previousStatus: deleted.previousStatus,
+        packId: deleted.publication?.packId ?? "",
+        discordResults
+      }
+    });
+    await interaction.editReply(formatDeleteUploadPackResult({
+      submissionId,
+      removedCatalogPack: Boolean(deleted.publication?.packId),
+      discordResults
+    }));
   }
 }
 
@@ -366,6 +411,57 @@ function findSolvedTag(parent: ForumChannel): { id: string; name: string } | und
 
 function normalizeTagName(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function deleteKnownDiscordMessages(client: Client<true>, discord: UploadDiscordMessages | undefined): Promise<string[]> {
+  const refs = [
+    ["public post", discord?.publication],
+    ["review message", discord?.review]
+  ] as const;
+  const results: string[] = [];
+  for (const [label, ref] of refs) {
+    if (!ref) {
+      results.push(`${label}: no recorded message`);
+      continue;
+    }
+    results.push(await deleteDiscordMessageReference(client, label, ref));
+  }
+  return results;
+}
+
+async function deleteDiscordMessageReference(client: Client<true>, label: string, ref: UploadDiscordMessage): Promise<string> {
+  try {
+    if (ref.threadId) {
+      const thread = await client.channels.fetch(ref.threadId);
+      if (thread?.isThread()) {
+        await thread.delete("Akron uploaded pack deleted by admin");
+        return `${label}: deleted thread ${ref.threadId}`;
+      }
+    }
+
+    const channel = await client.channels.fetch(ref.channelId);
+    if (channel?.isTextBased() && "messages" in channel) {
+      const message = await channel.messages.fetch(ref.messageId);
+      await message.delete();
+      return `${label}: deleted message ${ref.messageId}`;
+    }
+    return `${label}: recorded channel was not found`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `${label}: delete failed (${message})`;
+  }
+}
+
+function formatDeleteUploadPackResult(input: {
+  submissionId: string;
+  removedCatalogPack: boolean;
+  discordResults: string[];
+}): string {
+  return [
+    `Deleted upload submission ${input.submissionId}.`,
+    input.removedCatalogPack ? "Catalog/R2 pack was removed." : "No published catalog pack was recorded.",
+    ...input.discordResults
+  ].join("\n");
 }
 
 async function applySolvedTag(thread: AnyThreadChannel, parent: ForumChannel, solvedTagId: string): Promise<void> {

@@ -6,11 +6,19 @@ import {
   EmbedBuilder,
   type ButtonInteraction,
   type Client,
+  type ForumChannel,
+  type Message,
   type TextChannel
 } from "discord.js";
 import type { AppConfig } from "../config.js";
 import { requireModerator } from "../permissions.js";
-import { createUploadWorkerClient, hasUploadWorkerConfig, type UploadWorkerJob } from "./upload-worker-client.js";
+import {
+  createUploadWorkerClient,
+  hasUploadWorkerConfig,
+  type UploadWorkerJob,
+  type UploadWorkerStatusBody,
+  type UploadWorkerStatusSubmission
+} from "./upload-worker-client.js";
 
 const customIdPrefix = "upload-review";
 
@@ -100,10 +108,11 @@ export async function pollUploadModerationQueue(input: {
             components: buildUploadModerationComponents(job)
           });
         } else {
-          await channel.send({
+          const message = await channel.send({
             embeds: [buildUploadModerationEmbed(job)],
             components: buildUploadModerationComponents(job)
           });
+          await recordReviewMessage({ worker, config: input.config, job, message, onError: input.onError });
         }
         try {
           await worker.acknowledgeDelivered([job.submissionId]);
@@ -152,11 +161,20 @@ export async function handleUploadModerationInteraction(input: {
 
   await input.interaction.deferUpdate();
   const worker = createUploadWorkerClient(input.config);
+  let uploadWasApproved = false;
   try {
     if (parsed.action === "confirm") {
       await worker.confirmAttribution(parsed.submissionId, input.interaction.user.id);
     } else if (parsed.action === "approve") {
-      await worker.approve(parsed.submissionId);
+      const approved = await worker.approve(parsed.submissionId);
+      uploadWasApproved = true;
+      await publishApprovedUploadToDiscord({
+        client: input.interaction.client as Client<true>,
+        config: input.config,
+        worker,
+        status: approved,
+        submissionId: parsed.submissionId
+      });
     } else if (parsed.action === "reject") {
       await worker.reject(parsed.submissionId, `Rejected by ${input.interaction.user.username}.`);
     } else {
@@ -164,7 +182,10 @@ export async function handleUploadModerationInteraction(input: {
     }
   } catch (error) {
     await input.interaction.editReply({
-      content: "Upload action failed. Staff have been alerted."
+      content: uploadWasApproved
+        ? "Upload approved and cataloged, but the public Discord post failed. Staff have been alerted."
+        : "Upload action failed. Staff have been alerted.",
+      components: uploadWasApproved ? [] : undefined
     });
     throw error;
   }
@@ -176,6 +197,132 @@ export async function handleUploadModerationInteraction(input: {
     components: []
   });
   return true;
+}
+
+export async function publishApprovedUploadToDiscord(input: {
+  client: Client<true>;
+  config: AppConfig;
+  worker: ReturnType<typeof createUploadWorkerClient>;
+  status: UploadWorkerStatusBody;
+  submissionId: string;
+}): Promise<void> {
+  const submission = input.status.submissions.find(candidate => candidate.submissionId === input.submissionId);
+  if (!submission || submission.status !== "published" || !submission.publication) {
+    throw new Error("Approved upload response did not include a published submission.");
+  }
+
+  const forum = await findPublicationForum(input.client, input.config, submission.section);
+  if (!forum) {
+    throw new Error(`Public upload forum was not found for ${submission.section}.`);
+  }
+
+  const thread = await forum.threads.create({
+    name: forumThreadName(submission.title),
+    appliedTags: publishedTagIds(forum),
+    message: {
+      embeds: [buildPublishedUploadEmbed(submission)],
+      components: [buildPublishedUploadComponents(submission)]
+    }
+  });
+  const starterMessage = await fetchStarterMessage(thread);
+  await input.worker.recordDiscordMessage({
+    submissionId: input.submissionId,
+    kind: "publication",
+    guildId: input.config.discordGuildId,
+    channelId: forum.id,
+    threadId: thread.id,
+    messageId: starterMessage?.id ?? thread.id
+  });
+}
+
+async function recordReviewMessage(input: {
+  worker: ReturnType<typeof createUploadWorkerClient>;
+  config: AppConfig;
+  job: UploadWorkerJob;
+  message: Message | undefined;
+  onError: (error: unknown) => Promise<void>;
+}): Promise<void> {
+  if (!input.message?.id || !input.message.channelId) {
+    return;
+  }
+
+  try {
+    await input.worker.recordDiscordMessage({
+      submissionId: input.job.submissionId,
+      kind: "review",
+      guildId: input.config.discordGuildId,
+      channelId: input.message.channelId,
+      messageId: input.message.id
+    });
+  } catch (error) {
+    await input.onError(error);
+  }
+}
+
+function buildPublishedUploadEmbed(submission: UploadWorkerStatusSubmission): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setTitle(submission.title)
+    .setDescription(submission.description || "No description provided.")
+    .setColor(0x57f287)
+    .addFields(
+      { name: "Section", value: submission.section, inline: true },
+      { name: "Map SID", value: discordFieldValue(submission.mapSid || "Unknown"), inline: true },
+      { name: "Attribution", value: submission.attribution.label || "Anonymous", inline: true }
+    );
+  if (submission.publication?.imageUrl) {
+    embed.setImage(submission.publication.imageUrl);
+  }
+  return embed;
+}
+
+function buildPublishedUploadComponents(submission: UploadWorkerStatusSubmission): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setLabel("Download .akr")
+      .setStyle(ButtonStyle.Link)
+      .setURL(submission.publication?.downloadUrl ?? "https://akron.micr.dev/catalog/index.json")
+  );
+}
+
+async function findPublicationForum(client: Client<true>, config: AppConfig, section: string): Promise<ForumChannel | null> {
+  const channelName = forumChannelNameForSection(section);
+  if (!channelName) {
+    return null;
+  }
+  const guild = await client.guilds.fetch(config.discordGuildId);
+  const channels = await guild.channels.fetch();
+  const channel = channels.find(candidate => candidate?.name === channelName && candidate.type === ChannelType.GuildForum);
+  return channel as ForumChannel | null;
+}
+
+function forumChannelNameForSection(section: string): string {
+  if (section === "StartPos") {
+    return "startpos-packs";
+  }
+  if (section === "AutoKill") {
+    return "auto-kill-areas";
+  }
+  if (section === "AutoDeafen") {
+    return "auto-deafen-areas";
+  }
+  return "";
+}
+
+function publishedTagIds(forum: ForumChannel): string[] {
+  const tag = forum.availableTags.find(candidate => candidate.name.toLowerCase() === "published");
+  return tag ? [tag.id] : [];
+}
+
+function forumThreadName(title: string): string {
+  const trimmed = title.trim() || "Akron Community Pack";
+  return trimmed.length <= 100 ? trimmed : trimmed.slice(0, 97) + "...";
+}
+
+async function fetchStarterMessage(thread: Awaited<ReturnType<ForumChannel["threads"]["create"]>>): Promise<Message | null> {
+  if ("fetchStarterMessage" in thread && typeof thread.fetchStarterMessage === "function") {
+    return await thread.fetchStarterMessage();
+  }
+  return null;
 }
 
 function parseUploadModerationButtonId(customId: string): { action: UploadModerationAction; submissionId: string } | null {

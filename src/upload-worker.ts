@@ -14,7 +14,8 @@ export type UploadStatus =
   | "published"
   | "rejected"
   | "changes_requested"
-  | "withdrawn";
+  | "withdrawn"
+  | "deleted";
 
 export type UploadAttribution =
   | { mode: "anonymous" }
@@ -29,6 +30,27 @@ export type CatalogPublication = {
   downloadUrl: string;
   imageUrl: string;
   publishedUtc: string;
+};
+
+export type UploadDiscordMessage = {
+  guildId: string;
+  channelId: string;
+  messageId: string;
+  threadId?: string;
+  postedUtc: string;
+};
+
+export type UploadDiscordMessages = {
+  review?: UploadDiscordMessage;
+  publication?: UploadDiscordMessage;
+};
+
+export type DeletedUploadSubmission = {
+  batchId: string;
+  submissionId: string;
+  previousStatus: UploadStatus;
+  publication?: CatalogPublication;
+  discord?: UploadDiscordMessages;
 };
 
 export type UploadObjectRecord = {
@@ -75,6 +97,7 @@ export type UploadSubmissionRecord = {
   reviewClaimedUtc?: string;
   moderationDeliveredUtc?: string;
   publication?: CatalogPublication;
+  discord?: UploadDiscordMessages;
 };
 
 export type UploadBatchRecord = {
@@ -100,6 +123,8 @@ export type UploadWorkerStore = {
   getUploadedObjectBody(id: string): Promise<UploadedObjectBody | undefined>;
   putUploadedObject(id: string, upload: PendingUploadedObjectBody): Promise<UploadedObjectWriteResult>;
   publishCatalogEntry(input: PublishCatalogEntryInput): Promise<CatalogPublication>;
+  recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined>;
+  deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined>;
   rememberBotNonce(nonce: string, expiresUtc: string): Promise<boolean>;
 };
 
@@ -109,6 +134,19 @@ export type PublishCatalogEntryInput = {
   capture?: UploadObjectRecord;
   now: Date;
   captureSourceUrl?: string;
+};
+
+export type RecordDiscordMessageInput = {
+  submissionId: string;
+  kind: keyof UploadDiscordMessages;
+  message: Omit<UploadDiscordMessage, "postedUtc">;
+  now: Date;
+};
+
+export type DeleteSubmissionInput = {
+  submissionId: string;
+  now: Date;
+  reason?: string;
 };
 
 export type UploadWorkerOptions = {
@@ -261,6 +299,34 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             return body;
           }
           return await acknowledgeDeliveredModerationJobs({ body, store: options.store, now });
+        }
+
+        const discordMessageMatch = url.pathname.match(/^\/bot\/discord-messages\/([^/]+)$/);
+        if (request.method === "POST" && discordMessageMatch) {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          return await recordDiscordMessage({
+            submissionId: discordMessageMatch[1] ?? "",
+            body,
+            store: options.store,
+            now
+          });
+        }
+
+        const deleteSubmissionMatch = url.pathname.match(/^\/bot\/submissions\/([^/]+)\/delete$/);
+        if (request.method === "POST" && deleteSubmissionMatch) {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          return await deleteSubmission({
+            submissionId: deleteSubmissionMatch[1] ?? "",
+            body,
+            store: options.store,
+            now
+          });
         }
 
         const moderationMatch = url.pathname.match(/^\/bot\/moderation\/([^/]+)\/(approve|reject|request-changes)$/);
@@ -435,6 +501,79 @@ export class InMemoryUploadStore implements UploadWorkerStore {
     }
     this.catalogIndex = mergeCatalogIndex(this.catalogIndex, buildCatalogPack(input.submission, publication, input.now));
     return publication;
+  }
+
+  async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
+    for (const [batchId, batch] of this.batches.entries()) {
+      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
+      if (!submission) {
+        continue;
+      }
+      submission.discord = {
+        ...submission.discord,
+        [input.kind]: {
+          ...input.message,
+          postedUtc: input.now.toISOString()
+        }
+      };
+      batch.updatedUtc = input.now.toISOString();
+      this.batches.set(batchId, clone(batch));
+      return clone(submission);
+    }
+    return undefined;
+  }
+
+  async deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined> {
+    for (const [batchId, batch] of this.batches.entries()) {
+      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
+      if (!submission) {
+        continue;
+      }
+
+      const previousStatus = submission.status;
+      const publication = clone(submission.publication);
+      const discord = clone(submission.discord);
+      if (publication?.packKey) {
+        this.publicObjects.delete(publication.packKey);
+      }
+      if (publication?.imageKey) {
+        this.publicObjects.delete(publication.imageKey);
+      }
+      if (publication?.packId) {
+        this.catalogIndex = {
+          ...this.catalogIndex,
+          packs: this.catalogIndex.packs.filter(pack => pack.id !== publication.packId)
+        };
+      }
+
+      this.objects.delete(submission.packObjectId);
+      if (submission.captureObjectId && !batch.submissions.some(candidate =>
+        candidate.id !== submission.id &&
+        candidate.status !== "deleted" &&
+        candidate.captureObjectId === submission.captureObjectId
+      )) {
+        this.objects.delete(submission.captureObjectId);
+      }
+
+      submission.status = "deleted";
+      submission.validationReasons = input.reason
+        ? [...submission.validationReasons, input.reason]
+        : submission.validationReasons;
+      delete submission.publication;
+      delete submission.reviewClaimedUtc;
+      delete submission.moderationDeliveredUtc;
+      batch.updatedUtc = input.now.toISOString();
+      batch.status = deriveBatchStatus(batch);
+      this.batches.set(batchId, clone(batch));
+      return {
+        batchId: batch.id,
+        submissionId: submission.id,
+        previousStatus,
+        publication,
+        discord
+      };
+    }
+    return undefined;
   }
 
   getPublicObjectForTesting(key: string): { bytes: Buffer; contentType: string } | undefined {
@@ -816,6 +955,9 @@ async function updateClientSubmissionStatus(input: {
   if (found.submission.status === "published") {
     return json({ error: "submission_already_published" }, 409);
   }
+  if (found.submission.status === "deleted") {
+    return json({ error: "submission_deleted" }, 409);
+  }
   if (found.submission.status === "reviewing" || found.submission.status === "moderating") {
     return json({ error: "submission_locked", status: found.submission.status }, 409);
   }
@@ -843,6 +985,9 @@ async function convertSubmissionToAnonymous(input: {
   }
   if (found.submission.status === "published") {
     return json({ error: "submission_already_published" }, 409);
+  }
+  if (found.submission.status === "deleted") {
+    return json({ error: "submission_deleted" }, 409);
   }
   if (found.submission.status === "moderating") {
     return json({ error: "submission_locked", status: found.submission.status }, 409);
@@ -1069,6 +1214,51 @@ async function requeueModerationJobs(input: {
   return json({ ok: true, requeued: submissionIds.length });
 }
 
+async function recordDiscordMessage(input: {
+  submissionId: string;
+  body: Record<string, unknown>;
+  store: UploadWorkerStore;
+  now: () => Date;
+}): Promise<Response> {
+  const kind = readRequiredString(input.body, "kind");
+  if (kind !== "review" && kind !== "publication") {
+    return json({ error: "discord_message_kind_invalid" }, 400);
+  }
+
+  const saved = await input.store.recordDiscordMessage({
+    submissionId: input.submissionId,
+    kind,
+    message: {
+      guildId: readRequiredString(input.body, "guildId"),
+      channelId: readRequiredString(input.body, "channelId"),
+      messageId: readRequiredString(input.body, "messageId"),
+      threadId: readOptionalString(input.body, "threadId") || undefined
+    },
+    now: input.now()
+  });
+  if (!saved) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+  return json({ ok: true, submissionId: saved.id, discord: saved.discord });
+}
+
+async function deleteSubmission(input: {
+  submissionId: string;
+  body: Record<string, unknown>;
+  store: UploadWorkerStore;
+  now: () => Date;
+}): Promise<Response> {
+  const deleted = await input.store.deleteSubmission({
+    submissionId: input.submissionId,
+    now: input.now(),
+    reason: readOptionalString(input.body, "reason") || undefined
+  });
+  if (!deleted) {
+    return json({ error: "submission_not_found" }, 404);
+  }
+  return json({ ok: true, deleted });
+}
+
 async function readSignedJson(
   request: Request,
   secret: string,
@@ -1189,6 +1379,9 @@ function deriveBatchStatus(batch: UploadBatchRecord): UploadStatus {
   }
   if (statuses.has("rejected")) {
     return "rejected";
+  }
+  if (statuses.has("deleted")) {
+    return "deleted";
   }
   return "withdrawn";
 }

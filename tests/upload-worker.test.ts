@@ -728,6 +728,88 @@ describe("upload worker", () => {
     });
   });
 
+  it("records Discord publication metadata for bot cleanup", async () => {
+    const worker = testWorker();
+    const prepared = await prepareAndUpload(worker, {
+      pack: validArchive("StartPos"),
+      section: "StartPos"
+    });
+    await postJson(worker, "/uploads/complete", {
+      installId,
+      batchId: prepared.batchId
+    });
+
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    const recorded = await signedBotJson(worker, `/bot/discord-messages/${submissionId}`, {
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum",
+      threadId: "thread",
+      messageId: "message"
+    }, "nonce-record-discord");
+    const body = await recorded.json() as { discord?: { publication?: { threadId?: string; messageId?: string } } };
+
+    expect(recorded.status).toBe(200);
+    expect(body.discord?.publication).toMatchObject({
+      threadId: "thread",
+      messageId: "message"
+    });
+  });
+
+  it("deletes published uploads from public objects and the catalog", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({
+      store,
+      botSecret,
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const prepared = await prepareAndUpload(worker, {
+      pack: validArchive("StartPos"),
+      section: "StartPos"
+    });
+    await postJson(worker, "/uploads/complete", {
+      installId,
+      batchId: prepared.batchId
+    });
+
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-delete-approve");
+    const approvedBody = await approved.json() as UploadStatusBody;
+    const publication = approvedBody.submissions[0]?.publication;
+    await signedBotJson(worker, `/bot/discord-messages/${submissionId}`, {
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum",
+      threadId: "thread",
+      messageId: "message"
+    }, "nonce-delete-record");
+
+    const deleted = await signedBotJson(worker, `/bot/submissions/${submissionId}/delete`, {
+      reason: "Admin cleanup."
+    }, "nonce-delete-pack");
+    const deletedBody = await deleted.json() as {
+      deleted?: {
+        previousStatus: string;
+        publication?: { packId: string };
+        discord?: { publication?: { threadId?: string } };
+      };
+    };
+    const status = await worker.fetch(new Request(`${baseUrl}/uploads/status/${prepared.batchId}?installId=${encodeURIComponent(installId)}`));
+    const statusBody = await status.json() as UploadStatusBody;
+
+    expect(deleted.status).toBe(200);
+    expect(deletedBody.deleted).toMatchObject({
+      previousStatus: "published",
+      publication: { packId: publication?.packId },
+      discord: { publication: { threadId: "thread" } }
+    });
+    expect(store.getPublicObjectForTesting(publication?.packKey ?? "")).toBeUndefined();
+    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")).toBeUndefined();
+    expect(store.getCatalogIndexForTesting().packs).toEqual([]);
+    expect(statusBody.submissions[0]?.status).toBe("deleted");
+    expect(statusBody.submissions[0]?.publication).toBeUndefined();
+  });
+
   it("publishes valid pack-only uploads with an empty catalog image URL", async () => {
     const store = new InMemoryUploadStore();
     const worker = createUploadWorker({
@@ -969,6 +1051,7 @@ type UploadStatusBody = {
     status: string;
     validationReasons: string[];
     publication?: {
+      packId: string;
       packKey: string;
       imageKey: string;
       downloadUrl: string;
