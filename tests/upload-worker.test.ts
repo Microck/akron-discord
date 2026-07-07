@@ -877,6 +877,59 @@ describe("upload worker", () => {
     expect(statusBody.submissions[0]?.publication).toBeUndefined();
   });
 
+  it("deletes published uploads by recorded Discord thread", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({
+      store,
+      botSecret,
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const prepared = await prepareAndUpload(worker, {
+      pack: validArchive("StartPos"),
+      section: "StartPos"
+    });
+    await postJson(worker, "/uploads/complete", {
+      installId,
+      batchId: prepared.batchId
+    });
+
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-delete-thread-approve");
+    const approvedBody = await approved.json() as UploadStatusBody;
+    const publication = approvedBody.submissions[0]?.publication;
+    await signedBotJson(worker, `/bot/discord-messages/${submissionId}`, {
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum",
+      threadId: "thread-delete-target",
+      messageId: "message"
+    }, "nonce-delete-thread-record");
+
+    const deleted = await signedBotJson(worker, "/bot/submissions/by-discord-thread/thread-delete-target/delete", {
+      reason: "Admin cleanup from thread."
+    }, "nonce-delete-thread-pack");
+    const deletedBody = await deleted.json() as {
+      deleted?: {
+        submissionId: string;
+        previousStatus: string;
+        discord?: { publication?: { threadId?: string } };
+      };
+    };
+    const status = await worker.fetch(new Request(`${baseUrl}/uploads/status/${prepared.batchId}?installId=${encodeURIComponent(installId)}`));
+    const statusBody = await status.json() as UploadStatusBody;
+
+    expect(deleted.status).toBe(200);
+    expect(deletedBody.deleted).toMatchObject({
+      submissionId,
+      previousStatus: "published",
+      discord: { publication: { threadId: "thread-delete-target" } }
+    });
+    expect(store.getPublicObjectForTesting(publication?.packKey ?? "")).toBeUndefined();
+    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")).toBeUndefined();
+    expect(store.getCatalogIndexForTesting().packs).toEqual([]);
+    expect(statusBody.submissions[0]?.status).toBe("deleted");
+  });
+
   it("publishes valid pack-only uploads with an empty catalog image URL", async () => {
     const store = new InMemoryUploadStore();
     const worker = createUploadWorker({

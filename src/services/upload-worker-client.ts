@@ -78,6 +78,7 @@ export type UploadWorkerClient = {
   confirmAttribution(submissionId: string, discordUserId: string): Promise<void>;
   recordDiscordMessage(input: UploadWorkerDiscordMessageInput): Promise<void>;
   deleteSubmission(submissionId: string, reason?: string): Promise<DeletedUploadSubmission>;
+  deleteSubmissionByDiscordThread(threadId: string, reason?: string): Promise<DeletedUploadSubmission>;
 };
 
 export function hasUploadWorkerConfig(config: AppConfig): boolean {
@@ -140,6 +141,14 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     },
     async deleteSubmission(submissionId: string, reason?: string): Promise<DeletedUploadSubmission> {
       const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/submissions/${submissionId}/delete`, { reason: reason ?? "" });
+      const body = await readJson(response) as { deleted?: DeletedUploadSubmission };
+      if (!body.deleted) {
+        throw new Error("Upload Worker delete response did not include deletion metadata.");
+      }
+      return body.deleted;
+    },
+    async deleteSubmissionByDiscordThread(threadId: string, reason?: string): Promise<DeletedUploadSubmission> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/submissions/by-discord-thread/${encodeURIComponent(threadId)}/delete`, { reason: reason ?? "" });
       const body = await readJson(response) as { deleted?: DeletedUploadSubmission };
       if (!body.deleted) {
         throw new Error("Upload Worker delete response did not include deletion metadata.");
