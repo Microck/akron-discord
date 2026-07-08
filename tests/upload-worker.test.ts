@@ -136,6 +136,31 @@ describe("upload worker", () => {
     expect(body.submissions[0]?.pack.uploadUrl).toMatch(/^https:\/\/akron\.micr\.dev\/uploads\/objects\//);
   });
 
+  it("prepares ordered room capture upload URLs for the current Akron client", async () => {
+    const worker = testWorker();
+
+    const response = await prepare(worker, {
+      capture: undefined,
+      captures: [
+        { roomName: "a-00", sizeBytes: 128, contentType: "image/png" },
+        { roomName: "b-01", sizeBytes: 256, contentType: "image/webp" }
+      ]
+    });
+    const body = await response.json() as {
+      capture: { uploadUrl: string };
+      captures: Array<{ roomName: string; uploadUrl: string }>;
+      submissions: Array<{ pack: { uploadUrl: string } }>;
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.captures).toHaveLength(2);
+    expect(body.captures.map(capture => capture.roomName)).toEqual(["a-00", "b-01"]);
+    expect(body.captures[0]?.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
+    expect(body.captures[1]?.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
+    expect(body.capture.uploadUrl).toBe(body.captures[0]?.uploadUrl);
+    expect(body.submissions[0]?.pack.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
+  });
+
   it("rejects packs and captures above the upload budget", async () => {
     const worker = testWorker();
 
