@@ -198,6 +198,10 @@ export type PreparedObject = {
   maxBytes: number;
 };
 
+type PreparedCaptureObject = PreparedObject & {
+  roomName: string;
+};
+
 const allowedUploadSections = new Set<UploadSection>(["StartPos", "AutoKill", "AutoDeafen"]);
 const defaultTermsVersion = 1;
 const preparedUploadTtlMs = 30 * 60 * 1000;
@@ -792,10 +796,11 @@ async function prepareUpload(input: {
   const batchId = input.id();
   const createdUtc = input.now().toISOString();
   const expiresUtc = new Date(input.now().getTime() + preparedUploadTtlMs).toISOString();
-  const capture = body.capture === undefined || body.capture === null ? undefined : readObject(body.capture, "capture");
-  let captureToken = "";
-  let captureObject: UploadObjectRecord | undefined;
-  if (capture) {
+  const captureInputs = readCaptureInputs(body);
+  const captureObjects: UploadObjectRecord[] = [];
+  const responseCaptures: PreparedCaptureObject[] = [];
+  for (const rawCapture of captureInputs) {
+    const capture = readObject(rawCapture, "capture");
     const captureSizeBytes = readRequiredNumber(capture, "sizeBytes");
     const captureContentType = normalizeContentType(readRequiredString(capture, "contentType"));
     if (captureSizeBytes <= 0 || captureSizeBytes > imageSourceMaxBytes) {
@@ -805,14 +810,21 @@ async function prepareUpload(input: {
       return json({ error: "capture_type_unsupported" }, 415);
     }
 
-    captureToken = input.id();
-    captureObject = createObjectRecord({
+    const captureToken = input.id();
+    const captureObject = createObjectRecord({
       id: input.id(),
       token: captureToken,
       kind: "capture",
       batchId,
       maxBytes: imageSourceMaxBytes,
       contentType: captureContentType
+    });
+    captureObjects.push(captureObject);
+    responseCaptures.push({
+      objectId: captureObject.id,
+      uploadUrl: `${input.origin}/uploads/objects/${captureObject.id}?token=${captureToken}`,
+      maxBytes: captureObject.maxBytes,
+      roomName: readOptionalString(capture, "roomName")
     });
   }
 
@@ -853,7 +865,7 @@ async function prepareUpload(input: {
       title,
       description,
       packObjectId: packObject.id,
-      captureObjectId: captureObject?.id ?? "",
+      captureObjectId: captureObjects[0]?.id ?? "",
       attribution,
       status: "prepared",
       validationReasons: []
@@ -879,7 +891,7 @@ async function prepareUpload(input: {
     expiresUtc,
     submissions: preparedSubmissions
   });
-  if (captureObject) {
+  for (const captureObject of captureObjects) {
     await input.store.putObject(captureObject);
   }
   for (const packObject of packObjects) {
@@ -891,14 +903,29 @@ async function prepareUpload(input: {
     expiresUtc,
     submissions: responseSubmissions
   };
-  if (captureObject) {
+  if (responseCaptures.length > 0) {
+    responseBody.captures = responseCaptures;
+    // Keep the original single-capture field for clients that have not moved
+    // to ordered room previews yet. The canonical v2 client reads `captures`.
     responseBody.capture = {
-      objectId: captureObject.id,
-      uploadUrl: `${input.origin}/uploads/objects/${captureObject.id}?token=${captureToken}`,
-      maxBytes: captureObject.maxBytes
+      objectId: responseCaptures[0].objectId,
+      uploadUrl: responseCaptures[0].uploadUrl,
+      maxBytes: responseCaptures[0].maxBytes
     };
   }
   return json(responseBody, 201);
+}
+
+function readCaptureInputs(body: Record<string, unknown>): unknown[] {
+  if (body.captures !== undefined && body.captures !== null) {
+    return readArray(body.captures, "captures");
+  }
+
+  if (body.capture === undefined || body.capture === null) {
+    return [];
+  }
+
+  return [body.capture];
 }
 
 async function putUploadObject(input: {
