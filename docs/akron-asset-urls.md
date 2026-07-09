@@ -6,6 +6,7 @@ The bot stores files in Cloudflare R2, but public Discord embeds and catalog ent
 https://akron.micr.dev/catalog/index.json
 https://akron.micr.dev/maps/<map-id>/<pack-id>.akr
 https://akron.micr.dev/maps/<map-id>/<pack-id>/capture.webp
+https://akron.micr.dev/maps/<map-id>/<pack-id>/captures/<capture-file>
 https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
 ```
 
@@ -32,9 +33,14 @@ Set this in the bot deployment:
 
 ```text
 AKRON_PUBLIC_ASSET_BASE_URL=https://akron.micr.dev
+UPLOAD_WORKER_URL=https://akron-upload-worker.<account-subdomain>.workers.dev
 ```
 
 Keep `CLOUDFLARE_R2_PUBLIC_BASE_URL` configured as the raw R2 public origin. The bot still needs it as the storage fallback and as the origin the website proxies to.
+
+The bot uses the direct `workers.dev` origin for signed `/bot/*` requests to
+avoid adding Vercel proxy latency to moderation actions. Player-facing upload
+URLs and published asset URLs continue to use `akron.micr.dev`.
 
 ## Netlify DNS
 
@@ -85,6 +91,10 @@ Add rewrites to the future Akron website's `vercel.json`. Replace `<MINTLIFY_SUB
     {
       "source": "/maps/:map/:pack/capture.webp",
       "destination": "<R2_PUBLIC_BASE_URL>/captures/:map/:pack.webp"
+    },
+    {
+      "source": "/maps/:map/:pack/captures/:capture",
+      "destination": "<R2_PUBLIC_BASE_URL>/captures/:map/:pack/:capture"
     },
     {
       "source": "/submissions/:path*",

@@ -405,7 +405,9 @@ Default upload limits:
 - Optimized stored map capture target and hard cap: 4 MiB.
 - Allowed map capture formats: PNG, JPEG, and WebP.
 - One `.akr` attachment is required per `.akr` submission.
-- At most one map capture image is used as the catalog preview.
+- Manual Discord submissions use at most one map capture image.
+- Automated in-game uploads preserve up to 10 ordered room captures for moderator review and the public gallery.
+- Automated capture room labels are limited to 200 characters at the upload boundary.
 - Map captures are optional but heavily recommended for map-specific catalog posts.
 
 The 4 MiB `.akr` limit matches Akron's current in-game community pack download guardrail.
@@ -422,7 +424,7 @@ Pipeline:
 3. Run `optimo` with metadata stripping.
 4. Resize large captures to the catalog storage budget.
 5. Upload only the optimized output to R2.
-6. Store the optimized R2 URL as `imageUrl` in `index.json`.
+6. Store optimized automated-upload previews in ordered `images` entries with their room labels.
 
 Recommended first settings:
 
@@ -625,8 +627,12 @@ Catalog path convention:
 catalog/index.json
 catalog/backups/index-YYYY-MM-DDTHH-mm-ssZ.json
 packs/{mapSidSlug}/{packId}.akr
-captures/{mapSidSlug}/{packId}.webp
+captures/{mapSidSlug}/{packId}/{roomSlug}.webp
 ```
+
+Automated multi-image captures are served through Akron-branded URLs using
+`/maps/{mapSidSlug}/{packId}/captures/{captureFile}`. The website must rewrite
+that path to the matching public R2 object under `captures/`.
 
 The bot should update SQLite and R2 in an order that makes recovery practical. If a catalog write fails after assets upload, the post should stay out of `Published` and the failure should be logged to `audit-log` and `bot-alerts`.
 
@@ -649,7 +655,12 @@ Catalog entries must match Akron's current in-game contract:
       "downloadUrl": "https://r2.example/akron/packs/example.akr",
       "authorName": "Display Name",
       "authorAvatarUrl": "",
-      "imageUrl": "https://r2.example/akron/captures/example.png",
+      "images": [
+        {
+          "url": "https://r2.example/akron/captures/example/slot-1.webp",
+          "roomName": "a-00"
+        }
+      ],
       "downloadCount": 0,
       "updatedUtc": "2026-05-20T00:00:00Z",
       "tags": ["startpos", "beginner"]

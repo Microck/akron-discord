@@ -17,10 +17,13 @@ import { optimizeCatalogImage } from "../src/services/image-optimizer.js";
 import { catalogImageMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
 import { createUploadWorkerClient, hasUploadWorkerConfig } from "../src/services/upload-worker-client.js";
 import {
+  buildPublishedUploadComponents,
+  buildPublishedUploadEmbed,
   buildUploadModerationComponents,
-  buildUploadModerationEmbed,
+  buildUploadModerationEmbeds,
   pollUploadModerationQueue,
   publishApprovedUploadToDiscord,
+  uploadGalleryButtonId,
   uploadModerationButtonId
 } from "../src/services/upload-moderation.js";
 
@@ -317,9 +320,8 @@ describe("upload worker client", () => {
               publication: {
                 packId: "pack",
                 packKey: "packs/map/pack.akr",
-                imageKey: "",
                 downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
-                imageUrl: "",
+                images: [],
                 publishedUtc: "2026-01-01T00:00:00.000Z"
               }
             }]
@@ -382,14 +384,28 @@ describe("upload worker client", () => {
 
 describe("upload moderation messages", () => {
   it("builds staff review embeds and stable button IDs", () => {
-    const job = uploadModerationJob("submission");
+    const job = uploadModerationJob("submission", {
+      captures: [
+        { objectId: "capture-1", roomName: "Slot 1 StartPos", sourceUrl: "https://uploads.example.test/source/1", optimized: false },
+        { objectId: "capture-2", roomName: "Slot 2 StartPos", sourceUrl: "https://uploads.example.test/source/2", optimized: false }
+      ]
+    });
 
-    const embed = buildUploadModerationEmbed(job).toJSON();
+    const embeds = buildUploadModerationEmbeds(job).map(embed => embed.toJSON());
+    const embed = embeds[0];
     const components = buildUploadModerationComponents(job)[0]?.toJSON();
 
     expect(embed.title).toBe("Map StartPos Pack");
     expect(embed.description).toBe("Start positions.");
     expect(embed.fields?.map(field => field.name)).toContain("Submission ID");
+    expect(embeds.map(candidate => candidate.image?.url)).toEqual([
+      "https://uploads.example.test/source/1",
+      "https://uploads.example.test/source/2"
+    ]);
+    expect(embeds.map(candidate => candidate.footer?.text)).toEqual([
+      "Slot 1 StartPos (1/2)",
+      "Slot 2 StartPos (2/2)"
+    ]);
     expect(components?.components.map(component => "custom_id" in component ? component.custom_id : "")).toEqual([
       uploadModerationButtonId("approve", "submission"),
       uploadModerationButtonId("changes", "submission"),
@@ -412,11 +428,40 @@ describe("upload moderation messages", () => {
   it("bounds long Map SID values in moderation embeds", () => {
     const job = uploadModerationJob("submission", { mapSid: "x".repeat(2_000) });
 
-    const embed = buildUploadModerationEmbed(job).toJSON();
+    const embed = buildUploadModerationEmbeds(job)[0]?.toJSON();
     const mapSid = embed.fields?.find(field => field.name === "Map SID")?.value ?? "";
 
     expect(mapSid).toHaveLength(1024);
     expect(mapSid.endsWith("...")).toBe(true);
+  });
+
+  it("starts published galleries on the first capture and links both arrow controls", () => {
+    const submission = publishedUploadSubmission();
+
+    const embed = buildPublishedUploadEmbed(submission, 0).toJSON();
+    const components = buildPublishedUploadComponents(submission, 0).toJSON();
+
+    expect(embed.image?.url).toBe("https://akron.micr.dev/maps/map/pack/captures/slot-1.webp");
+    expect(embed.footer?.text).toBe("Slot 1 StartPos (1/2)");
+    expect(components.components.map(component => "custom_id" in component ? component.custom_id : "")).toEqual([
+      uploadGalleryButtonId("submission", 1),
+      "",
+      uploadGalleryButtonId("submission", 1)
+    ]);
+  });
+
+  it("bounds gallery footers to Discord's embed limit", () => {
+    const submission = publishedUploadSubmission();
+    submission.publication.images = [{
+      key: "captures/map/pack/01-room.webp",
+      url: "https://akron.micr.dev/maps/map/pack/captures/01-room.webp",
+      roomName: "x".repeat(3_000)
+    }];
+
+    const footer = buildPublishedUploadEmbed(submission, 0).toJSON().footer?.text ?? "";
+
+    expect(footer).toHaveLength(2_048);
+    expect(footer.endsWith("... (1/1)")).toBe(true);
   });
 
   it("reports requeue failures without hiding the Discord delivery failure", async () => {
@@ -664,9 +709,8 @@ describe("upload moderation messages", () => {
           publication: {
             packId: "pack",
             packKey: "packs/map/pack.akr",
-            imageKey: "",
             downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
-            imageUrl: "",
+            images: [],
             publishedUtc: "2026-01-01T00:00:00.000Z"
           }
         }]
@@ -730,8 +774,12 @@ type TestUploadModerationJob = {
   status: string;
   validationReasons: string[];
   archiveFacts: Record<string, unknown>;
-  captureSourceUrl: string;
-  hasOptimizedCapture: boolean;
+  captures: Array<{
+    objectId: string;
+    roomName: string;
+    sourceUrl: string;
+    optimized: boolean;
+  }>;
 };
 
 function uploadModerationJob(
@@ -749,9 +797,39 @@ function uploadModerationJob(
     status: "reviewing",
     validationReasons: [],
     archiveFacts: { section: "StartPos", mapSid: "Map/Sid" },
-    captureSourceUrl: "",
-    hasOptimizedCapture: false,
+    captures: [],
     ...overrides
+  };
+}
+
+function publishedUploadSubmission() {
+  return {
+    submissionId: "submission",
+    section: "StartPos",
+    mapSid: "Map/Sid",
+    title: "Map StartPos Pack",
+    description: "Start positions.",
+    attribution: { mode: "anonymous", label: "Anonymous" },
+    status: "published",
+    validationReasons: [],
+    publication: {
+      packId: "pack",
+      packKey: "packs/map/pack.akr",
+      downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
+      publishedUtc: "2026-01-01T00:00:00.000Z",
+      images: [
+        {
+          key: "captures/map/pack/slot-1.webp",
+          url: "https://akron.micr.dev/maps/map/pack/captures/slot-1.webp",
+          roomName: "Slot 1 StartPos"
+        },
+        {
+          key: "captures/map/pack/slot-2.webp",
+          url: "https://akron.micr.dev/maps/map/pack/captures/slot-2.webp",
+          roomName: "Slot 2 StartPos"
+        }
+      ]
+    }
   };
 }
 

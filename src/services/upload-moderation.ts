@@ -49,6 +49,25 @@ export function buildUploadModerationEmbed(job: UploadWorkerJob): EmbedBuilder {
   return embed;
 }
 
+export function buildUploadModerationEmbeds(job: UploadWorkerJob): EmbedBuilder[] {
+  const primary = buildUploadModerationEmbed(job);
+  if (job.captures.length === 0) {
+    return [primary];
+  }
+
+  const total = job.captures.length;
+  primary
+    .setImage(job.captures[0]?.sourceUrl ?? "")
+    .setFooter({ text: captureLabel(job.captures[0]?.roomName ?? "", 0, total) });
+  return [
+    primary,
+    ...job.captures.slice(1).map((capture, index) => new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setImage(capture.sourceUrl)
+      .setFooter({ text: captureLabel(capture.roomName, index + 1, total) }))
+  ];
+}
+
 function discordFieldValue(value: string): string {
   const trimmed = value.trim() || "Unknown";
   return trimmed.length <= 1024 ? trimmed : trimmed.slice(0, 1021) + "...";
@@ -112,7 +131,7 @@ export async function pollUploadModerationQueue(input: {
           }
           const user = await input.client.users.fetch(job.attribution.discordUserId);
           await user.send({
-            embeds: [buildUploadModerationEmbed(job)],
+            embeds: buildUploadModerationEmbeds(job),
             components: buildUploadModerationComponents(job)
           });
         } else {
@@ -122,7 +141,7 @@ export async function pollUploadModerationQueue(input: {
             job
           });
           const message = await channel.send({
-            embeds: [buildUploadModerationEmbed(reviewedJob)],
+            embeds: buildUploadModerationEmbeds(reviewedJob),
             components: buildUploadModerationComponents(reviewedJob)
           });
           await recordReviewMessage({ worker, config: input.config, job: reviewedJob, message, onError: input.onError });
@@ -159,6 +178,26 @@ export async function handleUploadModerationInteraction(input: {
   interaction: ButtonInteraction;
   config: AppConfig;
 }): Promise<boolean> {
+  const gallery = parseUploadGalleryButtonId(input.interaction.customId);
+  if (gallery) {
+    if (!hasUploadWorkerConfig(input.config)) {
+      await input.interaction.reply({ content: "Upload Worker integration is not configured.", ephemeral: true });
+      return true;
+    }
+    await input.interaction.deferUpdate();
+    const submission = await createUploadWorkerClient(input.config).getSubmissionContext(gallery.submissionId);
+    if (!submission.publication) {
+      await input.interaction.editReply({ content: "This upload gallery is no longer available.", components: [] });
+      return true;
+    }
+    const imageIndex = clampGalleryIndex(gallery.imageIndex, submission.publication.images.length);
+    await input.interaction.editReply({
+      embeds: [buildPublishedUploadEmbed(submission, imageIndex)],
+      components: [buildPublishedUploadComponents(submission, imageIndex)]
+    });
+    return true;
+  }
+
   const parsed = parseUploadModerationButtonId(input.interaction.customId);
   if (!parsed) {
     return false;
@@ -233,21 +272,30 @@ async function prepareUploadReviewJob(input: {
     job = { ...job, aiReview: { ...aiReview, reviewedUtc: new Date().toISOString() } };
   }
 
-  if (job.captureSourceUrl && !job.hasOptimizedCapture) {
-    const capture = await fetchCaptureForOptimization(job.captureSourceUrl);
+  for (const captureSource of job.captures.filter(capture => !capture.optimized)) {
+    const capture = await fetchCaptureForOptimization(captureSource.sourceUrl);
     const optimized = await optimizeCatalogImage({
       bytes: capture.bytes,
       contentType: capture.contentType,
-      fileName: "akron-map-capture"
+      fileName: captureSource.roomName || "akron-map-capture"
     });
-    await input.worker.putOptimizedCapture(job.submissionId, {
+    await input.worker.putOptimizedCapture(job.submissionId, captureSource.objectId, {
       bytes: optimized.bytes,
       contentType: "image/webp"
     });
-    job = { ...job, hasOptimizedCapture: true };
+    job = {
+      ...job,
+      captures: job.captures.map(candidate =>
+        candidate.objectId === captureSource.objectId ? { ...candidate, optimized: true } : candidate
+      )
+    };
   }
 
-  return job;
+  // Refresh signed source URLs after potentially expensive image processing so
+  // Discord receives the full validity window when it resolves the embeds.
+  return job.captures.length > 0
+    ? await input.worker.getSubmissionContext(job.submissionId)
+    : job;
 }
 
 async function fetchCaptureForOptimization(url: string): Promise<{ bytes: Buffer; contentType: string }> {
@@ -289,8 +337,8 @@ export async function publishApprovedUploadToDiscord(input: {
     name: forumThreadName(submission.title),
     appliedTags: publishedTagIds(forum),
     message: {
-      embeds: [buildPublishedUploadEmbed(submission)],
-      components: [buildPublishedUploadComponents(submission)]
+      embeds: [buildPublishedUploadEmbed(submission, 0)],
+      components: [buildPublishedUploadComponents(submission, 0)]
     }
   });
   const starterMessage = await fetchStarterMessage(thread);
@@ -328,7 +376,7 @@ async function recordReviewMessage(input: {
   }
 }
 
-function buildPublishedUploadEmbed(submission: UploadWorkerStatusSubmission): EmbedBuilder {
+export function buildPublishedUploadEmbed(submission: UploadWorkerStatusSubmission, imageIndex: number): EmbedBuilder {
   const embed = new EmbedBuilder()
     .setTitle(submission.title)
     .setDescription(submission.description || "No description provided.")
@@ -338,8 +386,13 @@ function buildPublishedUploadEmbed(submission: UploadWorkerStatusSubmission): Em
       { name: "Map SID", value: discordFieldValue(submission.mapSid || "Unknown"), inline: true },
       { name: "Attribution", value: publishedAttributionLabel(submission), inline: true }
     );
-  if (submission.publication?.imageUrl) {
-    embed.setImage(submission.publication.imageUrl);
+  const images = submission.publication?.images ?? [];
+  const index = clampGalleryIndex(imageIndex, images.length);
+  const image = images[index];
+  if (image) {
+    embed
+      .setImage(image.url)
+      .setFooter({ text: captureLabel(image.roomName, index, images.length) });
   }
   return embed;
 }
@@ -354,13 +407,63 @@ function publishedAttributionLabel(submission: UploadWorkerStatusSubmission): st
   return submission.attribution.label || "Anonymous";
 }
 
-function buildPublishedUploadComponents(submission: UploadWorkerStatusSubmission): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+export function buildPublishedUploadComponents(submission: UploadWorkerStatusSubmission, imageIndex: number): ActionRowBuilder<ButtonBuilder> {
+  const row = new ActionRowBuilder<ButtonBuilder>();
+  const images = submission.publication?.images ?? [];
+  const index = clampGalleryIndex(imageIndex, images.length);
+  if (images.length > 1) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(uploadGalleryButtonId(submission.submissionId, (index + images.length - 1) % images.length))
+        .setEmoji("\u2B05\uFE0F")
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+  row.addComponents(
     new ButtonBuilder()
       .setLabel("Download .akr")
       .setStyle(ButtonStyle.Link)
       .setURL(submission.publication?.downloadUrl ?? "https://akron.micr.dev/catalog/index.json")
   );
+  if (images.length > 1) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(uploadGalleryButtonId(submission.submissionId, (index + 1) % images.length))
+        .setEmoji("\u27A1\uFE0F")
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+  return row;
+}
+
+export function uploadGalleryButtonId(submissionId: string, imageIndex: number): string {
+  return `upload-gallery:${submissionId}:${imageIndex}`;
+}
+
+function captureLabel(roomName: string, imageIndex: number, imageCount: number): string {
+  const suffix = ` (${imageIndex + 1}/${imageCount})`;
+  const label = roomName.trim() || "Preview";
+  const maxLabelLength = 2048 - suffix.length;
+  const boundedLabel = label.length <= maxLabelLength
+    ? label
+    : label.slice(0, maxLabelLength - 3) + "...";
+  return boundedLabel + suffix;
+}
+
+function clampGalleryIndex(imageIndex: number, imageCount: number): number {
+  if (imageCount <= 0) {
+    return 0;
+  }
+  return Math.min(Math.max(Math.trunc(imageIndex), 0), imageCount - 1);
+}
+
+function parseUploadGalleryButtonId(customId: string): { submissionId: string; imageIndex: number } | null {
+  const [prefix, submissionId, rawImageIndex] = customId.split(":");
+  const imageIndex = Number(rawImageIndex);
+  if (prefix !== "upload-gallery" || !submissionId || !Number.isInteger(imageIndex) || imageIndex < 0) {
+    return null;
+  }
+  return { submissionId, imageIndex };
 }
 
 async function findPublicationForum(client: Client<true>, config: AppConfig, section: string): Promise<ForumChannel | null> {
