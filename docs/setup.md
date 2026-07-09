@@ -36,9 +36,14 @@ GITHUB_OWNER=
 GITHUB_REPO=
 GITHUB_WEBHOOK_SECRET=
 GITHUB_WEBHOOK_PORT=3005
-UPLOAD_WORKER_URL=
+UPLOAD_WORKER_URL=https://akron-upload-worker.<account-subdomain>.workers.dev
 UPLOAD_WORKER_BOT_SECRET=
 ```
+
+Set `UPLOAD_WORKER_URL` to the Worker's direct `workers.dev` origin. Private
+bot requests should not pass through the public Vercel rewrite because the
+extra proxy hop can exceed the bot's request timeout. The Worker still returns
+public upload and asset URLs under `https://akron.micr.dev`.
 
 Recommended NIM model:
 

@@ -26,10 +26,15 @@ export type UploadObjectKind = "pack" | "capture";
 export type CatalogPublication = {
   packId: string;
   packKey: string;
-  imageKey: string;
   downloadUrl: string;
-  imageUrl: string;
+  images: CatalogImage[];
   publishedUtc: string;
+};
+
+export type CatalogImage = {
+  key: string;
+  url: string;
+  roomName: string;
 };
 
 export type UploadDiscordMessage = {
@@ -66,6 +71,12 @@ export type UploadOptimizedCapture = {
   extension: "webp";
   r2Key?: string;
   bytes?: Buffer;
+};
+
+export type UploadCaptureRecord = {
+  objectId: string;
+  roomName: string;
+  optimized?: UploadOptimizedCapture;
 };
 
 export type UploadObjectRecord = {
@@ -105,13 +116,12 @@ export type UploadSubmissionRecord = {
   title: string;
   description: string;
   packObjectId: string;
-  captureObjectId: string;
+  captures: UploadCaptureRecord[];
   attribution: UploadAttribution;
   status: UploadStatus;
   validationReasons: string[];
   archiveFacts?: Record<string, unknown>;
   aiReview?: UploadAiReview;
-  optimizedCapture?: UploadOptimizedCapture;
   reviewClaimedUtc?: string;
   moderationDeliveredUtc?: string;
   publication?: CatalogPublication;
@@ -152,9 +162,9 @@ export type UploadWorkerStore = {
 export type PublishCatalogEntryInput = {
   submission: UploadSubmissionRecord;
   pack: UploadObjectRecord;
-  capture?: UploadObjectRecord;
+  captures: UploadObjectRecord[];
   now: Date;
-  captureSourceUrl?: string;
+  captureSourceUrls: string[];
 };
 
 export type RecordAiReviewInput = {
@@ -165,6 +175,7 @@ export type RecordAiReviewInput = {
 
 export type PutOptimizedCaptureInput = {
   submissionId: string;
+  objectId: string;
   bytes: Buffer;
   contentType: "image/webp";
   now: Date;
@@ -212,7 +223,9 @@ const maxTitleLength = 120;
 const maxDescriptionLength = 1_000;
 const maxMapSidLength = 512;
 const maxMapUrlLength = 512;
+const maxRoomNameLength = 200;
 const maxSubmissionsPerBatch = 8;
+const maxCapturesPerBatch = 10;
 const botSignatureWindowMs = 5 * 60 * 1000;
 const jsonContentType = { "content-type": "application/json; charset=utf-8" };
 const allowedCaptureContentTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
@@ -235,9 +248,11 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             limits: {
               packMaxBytes: akrMaxBytes,
               captureMaxBytes: imageSourceMaxBytes,
+              capturesMaxCount: maxCapturesPerBatch,
               titleMaxLength: maxTitleLength,
               descriptionMaxLength: maxDescriptionLength,
               mapSidMaxLength: maxMapSidLength,
+              roomNameMaxLength: maxRoomNameLength,
               submissionsMaxCount: maxSubmissionsPerBatch
             },
             serverTimeUtc: now().toISOString()
@@ -368,7 +383,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
           });
         }
 
-        const optimizedCaptureMatch = url.pathname.match(/^\/bot\/optimized-captures\/([^/]+)$/);
+        const optimizedCaptureMatch = url.pathname.match(/^\/bot\/optimized-captures\/([^/]+)\/([^/]+)$/);
         if (request.method === "POST" && optimizedCaptureMatch) {
           const body = await readSignedJson(request, options.botSecret, now, options.store);
           if (body instanceof Response) {
@@ -376,6 +391,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
           }
           return await putOptimizedCapture({
             submissionId: optimizedCaptureMatch[1] ?? "",
+            objectId: optimizedCaptureMatch[2] ?? "",
             body,
             store: options.store,
             now
@@ -581,37 +597,39 @@ export class InMemoryUploadStore implements UploadWorkerStore {
 
   async publishCatalogEntry(input: PublishCatalogEntryInput): Promise<CatalogPublication> {
     const packBytes = input.pack.bytes;
-    const uploadedCapture = input.capture ? await this.getUploadedObjectBody(input.capture.id) : undefined;
-    if (!packBytes || (input.capture && !uploadedCapture)) {
+    if (!packBytes) {
       throw new Error("Cannot publish missing upload objects.");
     }
 
-    const optimizedCapture = input.submission.optimizedCapture?.bytes ? input.submission.optimizedCapture : undefined;
-    const publicCaptureBytes = optimizedCapture?.bytes ?? (uploadedCapture ? Buffer.from(await bufferFromBody(uploadedCapture.body)) : undefined);
-    const publicCapture: UploadObjectRecord | undefined = publicCaptureBytes
-      ? {
-          ...(input.capture ?? {
-            id: `${input.submission.id}-optimized-capture`,
-            tokenHash: "",
-            kind: "capture" as const,
-            batchId: input.submission.batchId,
-            maxBytes: catalogImageMaxBytes,
-            contentType: "image/webp"
-          }),
-          bytes: publicCaptureBytes,
-          uploadedBytes: publicCaptureBytes.length,
-          contentType: optimizedCapture?.contentType ?? "image/webp"
-        }
-      : undefined;
-    const publication = buildPublication(input.submission, publicCapture, input.now, "https://akron.example.test");
+    const publicCaptures: UploadObjectRecord[] = [];
+    for (const [index, capture] of input.captures.entries()) {
+      const captureState = input.submission.captures[index];
+      const optimized = captureState?.optimized?.bytes ? captureState.optimized : undefined;
+      const uploaded = optimized ? undefined : await this.getUploadedObjectBody(capture.id);
+      const bytes = optimized?.bytes ?? (uploaded ? Buffer.from(await bufferFromBody(uploaded.body)) : undefined);
+      if (!bytes) {
+        throw new Error("Cannot publish missing upload objects.");
+      }
+      publicCaptures.push({
+        ...capture,
+        bytes,
+        uploadedBytes: bytes.length,
+        contentType: optimized?.contentType ?? capture.contentType
+      });
+    }
+    const publication = buildPublication(input.submission, publicCaptures, input.now, "https://akron.example.test");
     this.publicObjects.set(publication.packKey, {
       bytes: Buffer.from(packBytes),
       contentType: "application/octet-stream"
     });
-    if (publication.imageKey && publicCaptureBytes && publicCapture) {
-      this.publicObjects.set(publication.imageKey, {
-        bytes: publicCaptureBytes,
-        contentType: publicCapture.contentType
+    for (const [index, image] of publication.images.entries()) {
+      const capture = publicCaptures[index];
+      if (!capture?.bytes) {
+        continue;
+      }
+      this.publicObjects.set(image.key, {
+        bytes: Buffer.from(capture.bytes),
+        contentType: capture.contentType
       });
     }
     this.catalogIndex = mergeCatalogIndex(this.catalogIndex, buildCatalogPack(input.submission, publication, input.now));
@@ -638,28 +656,16 @@ export class InMemoryUploadStore implements UploadWorkerStore {
       if (!submission) {
         continue;
       }
-      submission.optimizedCapture = {
+      const capture = submission.captures.find(candidate => candidate.objectId === input.objectId);
+      if (!capture) {
+        return undefined;
+      }
+      capture.optimized = {
         bytes: Buffer.from(input.bytes),
         contentType: input.contentType,
         uploadedBytes: input.bytes.length,
         extension: "webp"
       };
-      if (submission.publication) {
-        const captureRecord = optimizedCaptureRecordForSubmission(submission);
-        if (captureRecord.bytes) {
-          const publication = buildPublication(submission, captureRecord, input.now, "https://akron.example.test");
-          submission.publication = {
-            ...submission.publication,
-            imageKey: publication.imageKey,
-            imageUrl: publication.imageUrl
-          };
-          this.publicObjects.set(publication.imageKey, {
-            bytes: Buffer.from(captureRecord.bytes),
-            contentType: captureRecord.contentType
-          });
-          this.catalogIndex = mergeCatalogIndex(this.catalogIndex, buildCatalogPack(submission, submission.publication, input.now));
-        }
-      }
       batch.updatedUtc = input.now.toISOString();
       this.batches.set(batchId, clone(batch));
       return clone(submission);
@@ -700,8 +706,8 @@ export class InMemoryUploadStore implements UploadWorkerStore {
       if (publication?.packKey) {
         this.publicObjects.delete(publication.packKey);
       }
-      if (publication?.imageKey) {
-        this.publicObjects.delete(publication.imageKey);
+      for (const image of publication?.images ?? []) {
+        this.publicObjects.delete(image.key);
       }
       if (publication?.packId) {
         this.catalogIndex = {
@@ -711,12 +717,15 @@ export class InMemoryUploadStore implements UploadWorkerStore {
       }
 
       this.objects.delete(submission.packObjectId);
-      if (submission.captureObjectId && !batch.submissions.some(candidate =>
-        candidate.id !== submission.id &&
-        candidate.status !== "deleted" &&
-        candidate.captureObjectId === submission.captureObjectId
-      )) {
-        this.objects.delete(submission.captureObjectId);
+      for (const capture of submission.captures) {
+        const captureStillUsed = batch.submissions.some(candidate =>
+          candidate.id !== submission.id &&
+          candidate.status !== "deleted" &&
+          candidate.captures.some(candidateCapture => candidateCapture.objectId === capture.objectId)
+        );
+        if (!captureStillUsed) {
+          this.objects.delete(capture.objectId);
+        }
       }
 
       submission.status = "deleted";
@@ -797,6 +806,9 @@ async function prepareUpload(input: {
   const createdUtc = input.now().toISOString();
   const expiresUtc = new Date(input.now().getTime() + preparedUploadTtlMs).toISOString();
   const captureInputs = readCaptureInputs(body);
+  if (captureInputs.length > maxCapturesPerBatch) {
+    return json({ error: "too_many_captures", maxCaptures: maxCapturesPerBatch }, 413);
+  }
   const captureObjects: UploadObjectRecord[] = [];
   const responseCaptures: PreparedCaptureObject[] = [];
   for (const rawCapture of captureInputs) {
@@ -824,7 +836,7 @@ async function prepareUpload(input: {
       objectId: captureObject.id,
       uploadUrl: `${input.origin}/uploads/objects/${captureObject.id}?token=${captureToken}`,
       maxBytes: captureObject.maxBytes,
-      roomName: readOptionalString(capture, "roomName")
+      roomName: readOptionalBoundedString(capture, "roomName", maxRoomNameLength)
     });
   }
 
@@ -865,7 +877,10 @@ async function prepareUpload(input: {
       title,
       description,
       packObjectId: packObject.id,
-      captureObjectId: captureObjects[0]?.id ?? "",
+      captures: responseCaptures.map(capture => ({
+        objectId: capture.objectId,
+        roomName: capture.roomName
+      })),
       attribution,
       status: "prepared",
       validationReasons: []
@@ -901,31 +916,17 @@ async function prepareUpload(input: {
   const responseBody: Record<string, unknown> = {
     batchId,
     expiresUtc,
+    captures: responseCaptures,
     submissions: responseSubmissions
   };
-  if (responseCaptures.length > 0) {
-    responseBody.captures = responseCaptures;
-    // Keep the original single-capture field for clients that have not moved
-    // to ordered room previews yet. The canonical v2 client reads `captures`.
-    responseBody.capture = {
-      objectId: responseCaptures[0].objectId,
-      uploadUrl: responseCaptures[0].uploadUrl,
-      maxBytes: responseCaptures[0].maxBytes
-    };
-  }
   return json(responseBody, 201);
 }
 
 function readCaptureInputs(body: Record<string, unknown>): unknown[] {
-  if (body.captures !== undefined && body.captures !== null) {
-    return readArray(body.captures, "captures");
-  }
-
-  if (body.capture === undefined || body.capture === null) {
+  if (body.captures === undefined || body.captures === null) {
     return [];
   }
-
-  return [body.capture];
+  return readArray(body.captures, "captures");
 }
 
 async function putUploadObject(input: {
@@ -1047,10 +1048,8 @@ async function completeUpload(input: {
 
   for (const submission of batch.submissions) {
     const pack = await input.store.getObject(submission.packObjectId, { includeBytes: false });
-    const capture = submission.captureObjectId
-      ? await input.store.getObject(submission.captureObjectId, { includeBytes: false })
-      : undefined;
-    if (!isUploadedObjectReady(pack) || (submission.captureObjectId && !isUploadedObjectReady(capture))) {
+    const captures = await loadSubmissionCaptureObjects(input.store, submission, false);
+    if (!isUploadedObjectReady(pack) || captures.some(capture => !isUploadedObjectReady(capture))) {
       return json({ error: "upload_objects_missing", submissionId: submission.id }, 409);
     }
   }
@@ -1065,10 +1064,8 @@ async function completeUpload(input: {
     const uploadedSubmissions: Array<{ submission: UploadSubmissionRecord; packBytes: Buffer }> = [];
     for (const submission of batch.submissions) {
       const pack = await input.store.getObject(submission.packObjectId);
-      const capture = submission.captureObjectId
-        ? await input.store.getObject(submission.captureObjectId, { includeBytes: false })
-        : undefined;
-      if (!pack?.bytes || (submission.captureObjectId && !isUploadedObjectReady(capture))) {
+      const captures = await loadSubmissionCaptureObjects(input.store, submission, false);
+      if (!pack?.bytes || captures.some(capture => !isUploadedObjectReady(capture))) {
         batch.status = "prepared";
         batch.updatedUtc = input.now().toISOString();
         await input.store.putBatch(batch);
@@ -1281,10 +1278,8 @@ async function applyModerationAction(input: {
   if (input.action === "approve") {
     try {
       const pack = await input.store.getObject(found.submission.packObjectId);
-      const capture = found.submission.captureObjectId
-        ? await input.store.getObject(found.submission.captureObjectId, { includeBytes: false })
-        : undefined;
-      if (!pack?.bytes || (found.submission.captureObjectId && !isUploadedObjectReady(capture))) {
+      const captureRecords = await loadSubmissionCaptureObjects(input.store, found.submission, false);
+      if (!pack?.bytes || captureRecords.some(capture => !isUploadedObjectReady(capture))) {
         found.submission.status = "reviewing";
         await saveSubmissionUpdate({
           store: input.store,
@@ -1294,15 +1289,14 @@ async function applyModerationAction(input: {
         });
         return json({ error: "upload_objects_missing", submissionId: found.submission.id }, 409);
       }
-      const captureSourceUrl = capture
-        ? signedSourceObjectUrl(input.origin, capture.id, input.botSecret, input.now())
-        : undefined;
       found.submission.publication = await input.store.publishCatalogEntry({
         submission: found.submission,
         pack,
-        capture,
+        captures: captureRecords.filter((capture): capture is UploadObjectRecord => Boolean(capture)),
         now: input.now(),
-        captureSourceUrl
+        captureSourceUrls: found.submission.captures.map(capture =>
+          signedSourceObjectUrl(input.origin, capture.objectId, input.botSecret, input.now())
+        )
       });
       found.submission.status = "published";
     } catch (error) {
@@ -1378,10 +1372,7 @@ async function claimModerationJobs(input: {
       validationReasons: job.submission.validationReasons,
       archiveFacts: job.submission.archiveFacts ?? {},
       aiReview: job.submission.aiReview,
-      captureSourceUrl: job.submission.captureObjectId
-        ? signedSourceObjectUrl(input.origin, job.submission.captureObjectId, input.botSecret, input.now())
-        : "",
-      hasOptimizedCapture: Boolean(job.submission.optimizedCapture)
+      captures: botCaptureSources(job.submission, input.origin, input.botSecret, input.now())
     }))
   });
 }
@@ -1409,10 +1400,9 @@ async function getBotSubmissionContext(input: {
     validationReasons: found.submission.validationReasons,
     archiveFacts: found.submission.archiveFacts ?? {},
     aiReview: found.submission.aiReview,
-    captureSourceUrl: found.submission.captureObjectId
-      ? signedSourceObjectUrl(input.origin, found.submission.captureObjectId, input.botSecret, input.now())
-      : "",
-    hasOptimizedCapture: Boolean(found.submission.optimizedCapture)
+    attribution: botAttribution(found.submission.attribution),
+    publication: found.submission.publication,
+    captures: botCaptureSources(found.submission, input.origin, input.botSecret, input.now())
   });
 }
 
@@ -1448,6 +1438,7 @@ async function recordAiReview(input: {
 
 async function putOptimizedCapture(input: {
   submissionId: string;
+  objectId: string;
   body: Record<string, unknown>;
   store: UploadWorkerStore;
   now: () => Date;
@@ -1469,6 +1460,7 @@ async function putOptimizedCapture(input: {
 
   const saved = await input.store.putOptimizedCapture({
     submissionId: input.submissionId,
+    objectId: input.objectId,
     bytes,
     contentType,
     now: input.now()
@@ -1479,11 +1471,7 @@ async function putOptimizedCapture(input: {
   return json({
     ok: true,
     submissionId: saved.id,
-    optimizedCapture: {
-      contentType: saved.optimizedCapture?.contentType,
-      uploadedBytes: saved.optimizedCapture?.uploadedBytes,
-      extension: saved.optimizedCapture?.extension
-    }
+    objectId: input.objectId
   });
 }
 
@@ -1713,6 +1701,30 @@ function isUploadedObjectReady(object: UploadObjectRecord | undefined): boolean 
   return typeof object?.uploadedBytes === "number" && object.uploadedBytes > 0;
 }
 
+async function loadSubmissionCaptureObjects(
+  store: UploadWorkerStore,
+  submission: UploadSubmissionRecord,
+  includeBytes: boolean
+): Promise<Array<UploadObjectRecord | undefined>> {
+  return await Promise.all(submission.captures.map(capture =>
+    store.getObject(capture.objectId, { includeBytes })
+  ));
+}
+
+function botCaptureSources(
+  submission: UploadSubmissionRecord,
+  origin: string,
+  botSecret: string,
+  now: Date
+): Array<{ objectId: string; roomName: string; sourceUrl: string; optimized: boolean }> {
+  return submission.captures.map(capture => ({
+    objectId: capture.objectId,
+    roomName: capture.roomName,
+    sourceUrl: signedSourceObjectUrl(origin, capture.objectId, botSecret, now),
+    optimized: Boolean(capture.optimized)
+  }));
+}
+
 function isClaimableModerationStatus(submission: UploadSubmissionRecord, now: Date): boolean {
   if (submission.status === "queued" || submission.status === "awaiting_attribution") {
     return true;
@@ -1768,7 +1780,7 @@ export type CatalogPack = {
   downloadUrl: string;
   authorName: string;
   authorAvatarUrl: string;
-  imageUrl: string;
+  images: Array<{ url: string; roomName: string }>;
   downloadCount: number;
   updatedUtc: string;
   tags: string[];
@@ -1782,21 +1794,28 @@ export type CatalogIndex = {
 
 export function buildPublication(
   submission: UploadSubmissionRecord,
-  capture: UploadObjectRecord | undefined,
+  captures: UploadObjectRecord[],
   now: Date,
   publicBaseUrl: string
 ): CatalogPublication {
   const mapSlug = slugMapSid(submission.mapSid);
   const packId = buildPackId(submission);
-  const imageExtension = capture ? imageExtensionForContentType(capture.contentType) : "";
   const packKey = `packs/${mapSlug}/${packId}.akr`;
-  const imageKey = capture ? `captures/${mapSlug}/${packId}.${imageExtension}` : "";
+  const images = captures.map((capture, index) => {
+    const roomName = submission.captures[index]?.roomName ?? "";
+    const imageName = imageNameForCapture(roomName, index);
+    const key = `captures/${mapSlug}/${packId}/${imageName}.${imageExtensionForContentType(capture.contentType)}`;
+    return {
+      key,
+      url: publicAssetUrl(publicBaseUrl, key),
+      roomName
+    };
+  });
   return {
     packId,
     packKey,
-    imageKey,
     downloadUrl: publicAssetUrl(publicBaseUrl, packKey),
-    imageUrl: imageKey ? publicAssetUrl(publicBaseUrl, imageKey) : "",
+    images,
     publishedUtc: now.toISOString()
   };
 }
@@ -1813,25 +1832,20 @@ export function buildCatalogPack(submission: UploadSubmissionRecord, publication
     downloadUrl: publication.downloadUrl,
     authorName: authorNameForAttribution(submission.attribution),
     authorAvatarUrl: "",
-    imageUrl: publication.imageUrl,
+    images: publication.images.map(image => ({ url: image.url, roomName: image.roomName })),
     downloadCount: 0,
     updatedUtc: now.toISOString(),
     tags: [sectionTag(submission.section), mapSlug]
   };
 }
 
-function optimizedCaptureRecordForSubmission(submission: UploadSubmissionRecord): UploadObjectRecord {
-  return {
-    id: `${submission.id}-optimized-capture`,
-    tokenHash: "",
-    kind: "capture",
-    batchId: submission.batchId,
-    submissionId: submission.id,
-    maxBytes: catalogImageMaxBytes,
-    contentType: submission.optimizedCapture?.contentType ?? "image/webp",
-    uploadedBytes: submission.optimizedCapture?.uploadedBytes,
-    bytes: submission.optimizedCapture?.bytes
-  };
+function imageNameForCapture(roomName: string, index: number): string {
+  const normalized = roomName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${String(index + 1).padStart(2, "0")}-${normalized || "image"}`;
 }
 
 export function mergeCatalogIndex(index: CatalogIndex, entry: CatalogPack): CatalogIndex {
@@ -1876,6 +1890,9 @@ function publicAssetPath(key: string): string {
   if (parts[0] === "captures" && parts.length === 3) {
     const captureName = parts[2]?.replace(/\.webp$/i, "").replace(/\.(png|jpg|jpeg)$/i, "") ?? "";
     return "/maps/" + encodePathSegments(`${parts[1]}/${captureName}/capture.webp`);
+  }
+  if (parts[0] === "captures" && parts.length === 4) {
+    return "/maps/" + encodePathSegments(`${parts[1]}/${parts[2]}/captures/${parts[3]}`);
   }
   return "/r2-assets/" + encodePathSegments(key);
 }
@@ -1988,6 +2005,14 @@ function readRequiredString(source: Record<string, unknown>, key: string): strin
 function readOptionalString(source: Record<string, unknown>, key: string): string {
   const value = source[key];
   return typeof value === "string" ? value.trim() : "";
+}
+
+function readOptionalBoundedString(source: Record<string, unknown>, key: string, maxLength: number): string {
+  const value = readOptionalString(source, key);
+  if (value.length > maxLength) {
+    throw new HttpError(400, `${key}_too_long`);
+  }
+  return value;
 }
 
 function readBoundedString(source: Record<string, unknown>, key: string, maxLength: number): string {

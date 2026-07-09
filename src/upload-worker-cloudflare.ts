@@ -458,19 +458,22 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
   async publishCatalogEntry(input: PublishCatalogEntryInput): Promise<ReturnType<typeof buildPublication>> {
     const packBytes = input.pack.bytes;
-    if (!packBytes || (input.capture && input.capture.uploadedBytes === undefined)) {
+    if (!packBytes || input.captures.some(capture => capture.uploadedBytes === undefined)) {
       throw new Error("Cannot publish missing upload objects.");
     }
 
-    const publicCapture = await this.publicCaptureForPublication(input);
-    const publicCaptureBytes = publicCapture?.bytes;
-    const publication = buildPublication(input.submission, publicCapture, input.now, this.publicBaseUrl);
+    const publicCaptures = await this.publicCapturesForPublication(input);
+    const publication = buildPublication(input.submission, publicCaptures, input.now, this.publicBaseUrl);
     await this.publicBucket.put(publication.packKey, packBytes, {
       httpMetadata: { contentType: "application/octet-stream" }
     });
-    if (publication.imageKey && publicCaptureBytes && publicCapture) {
-      await this.publicBucket.put(publication.imageKey, publicCaptureBytes, {
-        httpMetadata: { contentType: publicCapture.contentType }
+    for (const [index, image] of publication.images.entries()) {
+      const capture = publicCaptures[index];
+      if (!capture?.bytes) {
+        throw new Error("Cannot publish missing optimized capture bytes.");
+      }
+      await this.publicBucket.put(image.key, capture.bytes, {
+        httpMetadata: { contentType: capture.contentType }
       });
     }
 
@@ -512,19 +515,20 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       return undefined;
     }
 
-    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}.webp`;
+    const capture = found.submission.captures.find(candidate => candidate.objectId === input.objectId);
+    if (!capture) {
+      return undefined;
+    }
+    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}/${capture.objectId}.webp`;
     await this.quarantineBucket.put(r2Key, input.bytes, {
       httpMetadata: { contentType: input.contentType }
     });
-    found.submission.optimizedCapture = {
+    capture.optimized = {
       r2Key,
       contentType: input.contentType,
       uploadedBytes: input.bytes.length,
       extension: "webp"
     };
-    if (found.submission.publication) {
-      await this.publishOptimizedCaptureForPublishedSubmission(found.submission, input.bytes, input.now);
-    }
     found.batch.updatedUtc = input.now.toISOString();
     await this.putBatchPayload(found.batch);
     return found.submission;
@@ -575,8 +579,8 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       if (publication.packKey) {
         await this.publicBucket.delete(publication.packKey);
       }
-      if (publication.imageKey) {
-        await this.publicBucket.delete(publication.imageKey);
+      for (const image of publication.images) {
+        await this.publicBucket.delete(image.key);
       }
     }
 
@@ -671,20 +675,18 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
   private async deleteQuarantineObjectsForSubmission(batch: UploadBatchRecord, submission: UploadSubmissionRecord): Promise<void> {
     await this.deleteQuarantineObject(submission.packObjectId);
-    if (submission.optimizedCapture?.r2Key) {
-      await this.quarantineBucket.delete(submission.optimizedCapture.r2Key);
-    }
-    if (!submission.captureObjectId) {
-      return;
-    }
-
-    const captureStillUsed = batch.submissions.some(candidate =>
-      candidate.id !== submission.id &&
-      candidate.status !== "deleted" &&
-      candidate.captureObjectId === submission.captureObjectId
-    );
-    if (!captureStillUsed) {
-      await this.deleteQuarantineObject(submission.captureObjectId);
+    for (const capture of submission.captures) {
+      if (capture.optimized?.r2Key) {
+        await this.quarantineBucket.delete(capture.optimized.r2Key);
+      }
+      const captureStillUsed = batch.submissions.some(candidate =>
+        candidate.id !== submission.id &&
+        candidate.status !== "deleted" &&
+        candidate.captures.some(candidateCapture => candidateCapture.objectId === capture.objectId)
+      );
+      if (!captureStillUsed) {
+        await this.deleteQuarantineObject(capture.objectId);
+      }
     }
   }
 
@@ -758,14 +760,14 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return parsed;
   }
 
-  private async optimizePublicCapture(input: PublishCatalogEntryInput & { capture: UploadObjectRecord }): Promise<UploadObjectRecord | undefined> {
-    if (!input.captureSourceUrl) {
-      return input.capture;
+  private async optimizePublicCapture(capture: UploadObjectRecord, sourceUrl: string): Promise<UploadObjectRecord | undefined> {
+    if (!sourceUrl) {
+      return capture;
     }
 
     let smallestBytes = Number.POSITIVE_INFINITY;
     for (const attempt of catalogCaptureTransformAttempts) {
-      const response = await fetch(input.captureSourceUrl, {
+      const response = await fetch(sourceUrl, {
         cf: {
           image: {
             fit: "scale-down",
@@ -787,7 +789,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       }
 
       return {
-        ...input.capture,
+        ...capture,
         bytes,
         uploadedBytes: bytes.length,
         contentType: "image/webp"
@@ -798,26 +800,25 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return undefined;
   }
 
-  private async publicCaptureForPublication(input: PublishCatalogEntryInput): Promise<UploadObjectRecord | undefined> {
-    if (input.submission.optimizedCapture) {
-      const bytes = await this.readOptimizedCaptureBytes(input.submission.optimizedCapture.r2Key);
-      if (bytes) {
-        return {
-          ...(input.capture ?? {
-            id: `${input.submission.id}-optimized-capture`,
-            tokenHash: "",
-            kind: "capture" as const,
-            batchId: input.submission.batchId,
-            maxBytes: catalogImageMaxBytes
-          }),
-          bytes,
-          uploadedBytes: bytes.length,
-          contentType: input.submission.optimizedCapture.contentType
-        };
+  private async publicCapturesForPublication(input: PublishCatalogEntryInput): Promise<UploadObjectRecord[]> {
+    const captures: UploadObjectRecord[] = [];
+    for (const [index, capture] of input.captures.entries()) {
+      const optimized = input.submission.captures[index]?.optimized;
+      const optimizedBytes = optimized ? await this.readOptimizedCaptureBytes(optimized.r2Key) : undefined;
+      const publicCapture = optimizedBytes
+        ? {
+            ...capture,
+            bytes: optimizedBytes,
+            uploadedBytes: optimizedBytes.length,
+            contentType: optimized?.contentType ?? "image/webp"
+          }
+        : await this.optimizePublicCapture(capture, input.captureSourceUrls[index] ?? "");
+      if (!publicCapture) {
+        throw new Error("Optimized capture exceeds the public image budget.");
       }
+      captures.push(publicCapture);
     }
-
-    return input.capture ? await this.optimizePublicCapture({ ...input, capture: input.capture }) : undefined;
+    return captures;
   }
 
   private async readOptimizedCaptureBytes(r2Key: string | undefined): Promise<Buffer | undefined> {
@@ -828,48 +829,6 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return stored ? Buffer.from(await stored.arrayBuffer()) : undefined;
   }
 
-  private async publishOptimizedCaptureForPublishedSubmission(
-    submission: UploadSubmissionRecord,
-    bytes: Buffer,
-    now: Date
-  ): Promise<void> {
-    if (!submission.publication) {
-      return;
-    }
-
-    const capture: UploadObjectRecord = {
-      id: `${submission.id}-optimized-capture`,
-      tokenHash: "",
-      kind: "capture",
-      batchId: submission.batchId,
-      submissionId: submission.id,
-      maxBytes: catalogImageMaxBytes,
-      contentType: "image/webp",
-      uploadedBytes: bytes.length,
-      bytes
-    };
-    const publication = buildPublication(submission, capture, now, this.publicBaseUrl);
-    const previousPublication = submission.publication;
-    submission.publication = {
-      ...previousPublication,
-      imageKey: publication.imageKey,
-      imageUrl: publication.imageUrl
-    };
-    await this.publicBucket.put(publication.imageKey, bytes, {
-      httpMetadata: { contentType: "image/webp" }
-    });
-
-    const releaseCatalogLock = await this.acquireCatalogLock();
-    try {
-      const entry = await this.fillCatalogMapUrl(buildCatalogPack(submission, submission.publication, now));
-      const nextIndex = await this.upsertCatalogEntry(entry);
-      await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
-        httpMetadata: { contentType: "application/json" }
-      });
-    } finally {
-      await releaseCatalogLock();
-    }
-  }
 }
 
 function readTermsVersion(value: string | undefined): number {

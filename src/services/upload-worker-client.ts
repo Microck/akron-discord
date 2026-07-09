@@ -25,8 +25,14 @@ export type UploadWorkerJob = {
   validationReasons: string[];
   archiveFacts: Record<string, unknown>;
   aiReview?: UploadAiReview;
-  captureSourceUrl: string;
-  hasOptimizedCapture: boolean;
+  captures: UploadWorkerCapture[];
+};
+
+export type UploadWorkerCapture = {
+  objectId: string;
+  roomName: string;
+  sourceUrl: string;
+  optimized: boolean;
 };
 
 export type UploadWorkerStatusSubmission = {
@@ -44,6 +50,7 @@ export type UploadWorkerStatusSubmission = {
   status: string;
   validationReasons: string[];
   publication?: CatalogPublication;
+  captures?: UploadWorkerCapture[];
 };
 
 export type UploadWorkerStatusBody = {
@@ -55,6 +62,7 @@ export type UploadWorkerStatusBody = {
 
 export type UploadWorkerSubmissionContext = UploadWorkerJob & {
   batchId: string;
+  publication?: CatalogPublication;
 };
 
 export type UploadWorkerDiscordMessageInput = {
@@ -72,7 +80,7 @@ export type UploadWorkerClient = {
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
   getSubmissionContext(submissionId: string): Promise<UploadWorkerSubmissionContext>;
   recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void>;
-  putOptimizedCapture(submissionId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void>;
+  putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void>;
   approve(submissionId: string): Promise<UploadWorkerStatusBody>;
   reject(submissionId: string, reason: string): Promise<void>;
   requestChanges(submissionId: string, reason: string): Promise<void>;
@@ -112,8 +120,8 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     async recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/reviews/${submissionId}`, review);
     },
-    async putOptimizedCapture(submissionId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void> {
-      await signedJson(fetchImpl, baseUrl, secret, `/bot/optimized-captures/${submissionId}`, {
+    async putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void> {
+      await signedJson(fetchImpl, baseUrl, secret, `/bot/optimized-captures/${submissionId}/${objectId}`, {
         contentType: capture.contentType,
         bytesBase64: capture.bytes.toString("base64")
       });

@@ -44,9 +44,11 @@ describe("upload worker", () => {
       limits: {
         packMaxBytes: akrMaxBytes,
         captureMaxBytes: imageSourceMaxBytes,
+        capturesMaxCount: 10,
         titleMaxLength: 120,
         descriptionMaxLength: 1_000,
         mapSidMaxLength: 512,
+        roomNameMaxLength: 200,
         submissionsMaxCount: 8
       },
       serverTimeUtc: "2026-01-01T00:00:00.000Z"
@@ -122,17 +124,17 @@ describe("upload worker", () => {
       body: JSON.stringify({
         installId,
         termsVersion: 1,
-        capture: { sizeBytes: 128, contentType: "image/png" },
+        captures: [{ roomName: "a-00", sizeBytes: 128, contentType: "image/png" }],
         submissions: [submissionInput()]
       })
     }));
     const body = await response.json() as {
-      capture: { uploadUrl: string };
+      captures: Array<{ uploadUrl: string }>;
       submissions: Array<{ pack: { uploadUrl: string } }>;
     };
 
     expect(response.status).toBe(201);
-    expect(body.capture.uploadUrl).toMatch(/^https:\/\/akron\.micr\.dev\/uploads\/objects\//);
+    expect(body.captures[0]?.uploadUrl).toMatch(/^https:\/\/akron\.micr\.dev\/uploads\/objects\//);
     expect(body.submissions[0]?.pack.uploadUrl).toMatch(/^https:\/\/akron\.micr\.dev\/uploads\/objects\//);
   });
 
@@ -140,14 +142,12 @@ describe("upload worker", () => {
     const worker = testWorker();
 
     const response = await prepare(worker, {
-      capture: undefined,
       captures: [
         { roomName: "a-00", sizeBytes: 128, contentType: "image/png" },
         { roomName: "b-01", sizeBytes: 256, contentType: "image/webp" }
       ]
     });
     const body = await response.json() as {
-      capture: { uploadUrl: string };
       captures: Array<{ roomName: string; uploadUrl: string }>;
       submissions: Array<{ pack: { uploadUrl: string } }>;
     };
@@ -157,8 +157,76 @@ describe("upload worker", () => {
     expect(body.captures.map(capture => capture.roomName)).toEqual(["a-00", "b-01"]);
     expect(body.captures[0]?.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
     expect(body.captures[1]?.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
-    expect(body.capture.uploadUrl).toBe(body.captures[0]?.uploadUrl);
     expect(body.submissions[0]?.pack.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
+  });
+
+  it("accepts pack-only prepare requests when captures are omitted", async () => {
+    const worker = testWorker();
+
+    const response = await prepare(worker, { captures: undefined });
+    const body = await response.json() as {
+      captures: unknown[];
+      submissions: Array<{ pack: { uploadUrl: string } }>;
+    };
+
+    expect(response.status).toBe(201);
+    expect(body.captures).toEqual([]);
+    expect(body.submissions[0]?.pack.uploadUrl).toMatch(/^https:\/\/uploads\.example\.test\/uploads\/objects\//);
+  });
+
+  it("keeps ordered room captures through moderation and catalog publication", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({
+      store,
+      botSecret,
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const pack = validArchive("StartPos");
+    const preparedResponse = await prepare(worker, {
+      captures: [
+        { roomName: "Slot 1 StartPos", sizeBytes: 128, contentType: "image/png" },
+        { roomName: "Slot 2 StartPos", sizeBytes: 128, contentType: "image/png" }
+      ],
+      submissions: [submissionInput({ packSizeBytes: pack.length })]
+    });
+    const prepared = await preparedResponse.json() as {
+      batchId: string;
+      captures: Array<{ objectId: string; uploadUrl: string }>;
+      submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
+    };
+    for (const capture of prepared.captures) {
+      expect((await worker.fetch(uploadRequest(capture.uploadUrl, Buffer.from("fake-png"), "image/png"))).status).toBe(200);
+    }
+    expect((await worker.fetch(uploadRequest(prepared.submissions[0]?.pack.uploadUrl ?? "", pack, "application/octet-stream"))).status).toBe(200);
+    await postJson(worker, "/uploads/complete", { installId, batchId: prepared.batchId });
+
+    const claim = await signedBotJson(worker, "/bot/jobs/claim", { limit: 1 }, "ordered-captures-claim");
+    const job = (await claim.json() as {
+      jobs: Array<{ captures: Array<{ objectId: string; roomName: string; sourceUrl: string }> }>;
+    }).jobs[0];
+    expect(job?.captures.map(capture => capture.roomName)).toEqual(["Slot 1 StartPos", "Slot 2 StartPos"]);
+    expect(job?.captures.every(capture => capture.sourceUrl.includes("/uploads/source/"))).toBe(true);
+
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    for (const capture of job?.captures ?? []) {
+      const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/${capture.objectId}`, {
+        contentType: "image/webp",
+        bytesBase64: Buffer.from(`optimized-${capture.roomName}`).toString("base64")
+      }, `ordered-captures-${capture.objectId}`);
+      expect(optimized.status).toBe(200);
+    }
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "ordered-captures-approve");
+    const publication = (await approved.json() as UploadStatusBody).submissions[0]?.publication;
+
+    expect(publication?.images.map(image => image.roomName)).toEqual(["Slot 1 StartPos", "Slot 2 StartPos"]);
+    expect(publication?.images.map(image => image.url)).toEqual([
+      expect.stringMatching(/\/captures\/01-slot-1-startpos\.webp$/),
+      expect.stringMatching(/\/captures\/02-slot-2-startpos\.webp$/)
+    ]);
+    expect(store.getCatalogIndexForTesting().packs[0]?.images).toEqual(publication?.images.map(image => ({
+      url: image.url,
+      roomName: image.roomName
+    })));
   });
 
   it("rejects packs and captures above the upload budget", async () => {
@@ -171,7 +239,7 @@ describe("upload worker", () => {
     await expectJson(packResponse, { error: "pack_too_large", maxBytes: akrMaxBytes });
 
     const captureResponse = await prepare(worker, {
-      capture: { sizeBytes: imageSourceMaxBytes + 1, contentType: "image/png" }
+      captures: [{ roomName: "a-00", sizeBytes: imageSourceMaxBytes + 1, contentType: "image/png" }]
     });
     expect(captureResponse.status).toBe(413);
     await expectJson(captureResponse, { error: "capture_too_large", maxBytes: imageSourceMaxBytes });
@@ -193,20 +261,45 @@ describe("upload worker", () => {
     await expectJson(longMapSid, { error: "mapSid_too_long" });
   });
 
+  it("rejects capture lists that exceed Discord's embed limit", async () => {
+    const worker = testWorker();
+    const captures = Array.from({ length: 11 }, (_, index) => ({
+      roomName: `room-${index}`,
+      sizeBytes: 128,
+      contentType: "image/png"
+    }));
+
+    const response = await prepare(worker, { captures });
+
+    expect(response.status).toBe(413);
+    await expectJson(response, { error: "too_many_captures", maxCaptures: 10 });
+  });
+
+  it("rejects capture room names that exceed the public label limit", async () => {
+    const worker = testWorker();
+
+    const response = await prepare(worker, {
+      captures: [{ roomName: "x".repeat(201), sizeBytes: 128, contentType: "image/png" }]
+    });
+
+    expect(response.status).toBe(400);
+    await expectJson(response, { error: "roomName_too_long" });
+  });
+
   it("rejects unsupported capture image types at prepare and PUT time", async () => {
     const worker = testWorker();
 
     const svgPrepare = await prepare(worker, {
-      capture: { sizeBytes: 128, contentType: "image/svg+xml" }
+      captures: [{ roomName: "a-00", sizeBytes: 128, contentType: "image/svg+xml" }]
     });
     expect(svgPrepare.status).toBe(415);
     await expectJson(svgPrepare, { error: "capture_type_unsupported" });
 
     const preparedResponse = await prepare(worker);
     const prepared = await preparedResponse.json() as {
-      capture: { uploadUrl: string };
+      captures: Array<{ uploadUrl: string }>;
     };
-    const svgPut = await worker.fetch(uploadRequest(prepared.capture.uploadUrl, Buffer.from("<svg />"), "image/svg+xml"));
+    const svgPut = await worker.fetch(uploadRequest(prepared.captures[0]?.uploadUrl ?? "", Buffer.from("<svg />"), "image/svg+xml"));
     expect(svgPut.status).toBe(415);
     await expectJson(svgPut, { error: "capture_type_unsupported" });
   });
@@ -215,10 +308,10 @@ describe("upload worker", () => {
     const worker = testWorker();
     const preparedResponse = await prepare(worker);
     const prepared = await preparedResponse.json() as {
-      capture: { uploadUrl: string };
+      captures: Array<{ uploadUrl: string }>;
     };
 
-    const upload = await worker.fetch(new Request(prepared.capture.uploadUrl, {
+    const upload = await worker.fetch(new Request(prepared.captures[0]?.uploadUrl ?? "", {
       method: "PUT",
       headers: { "content-type": "image/png" },
       body: new ReadableStream<Uint8Array>({
@@ -435,8 +528,7 @@ describe("upload worker", () => {
         status: string;
         attribution: { label: string };
         archiveFacts: Record<string, unknown>;
-        captureSourceUrl: string;
-        hasOptimizedCapture: boolean;
+        captures: Array<{ objectId: string; roomName: string; sourceUrl: string; optimized: boolean }>;
       }>;
     };
 
@@ -449,8 +541,12 @@ describe("upload worker", () => {
       status: "reviewing",
       attribution: { label: "Anonymous" },
       archiveFacts: { section: "StartPos", mapSid },
-      captureSourceUrl: expect.stringContaining("/uploads/source/"),
-      hasOptimizedCapture: false
+      captures: [{
+        objectId: expect.any(String),
+        roomName: "",
+        sourceUrl: expect.stringContaining("/uploads/source/"),
+        optimized: false
+      }]
     });
 
     const empty = await signedBotJson(worker, "/bot/jobs/claim", { limit: 5 }, "nonce-claim-empty");
@@ -758,12 +854,15 @@ describe("upload worker", () => {
     expect(second.status).toBe(200);
     expect(publication).toMatchObject({
       packKey: expect.stringMatching(/^packs\/springcollab2020-1-beginner\//),
-      imageKey: expect.stringMatching(/^captures\/springcollab2020-1-beginner\/.+\.webp$/),
       downloadUrl: expect.stringMatching(/^https:\/\/akron\.example\.test\/maps\/springcollab2020-1-beginner\/.+\.akr$/),
-      imageUrl: expect.stringMatching(/^https:\/\/akron\.example\.test\/maps\/springcollab2020-1-beginner\/.+\/capture\.webp$/)
+      images: [{
+        key: expect.stringMatching(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.png$/),
+        url: expect.stringMatching(/^https:\/\/akron\.example\.test\/maps\/springcollab2020-1-beginner\/.+\/captures\/01-image\.png$/),
+        roomName: ""
+      }]
     });
     expect(store.getPublicObjectForTesting(publication?.packKey ?? "")?.contentType).toBe("application/octet-stream");
-    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")?.contentType).toBe("image/webp");
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/png");
     const catalog = store.getCatalogIndexForTesting();
     expect(catalog.packs).toHaveLength(1);
     expect(catalog.packs[0]).toMatchObject({
@@ -849,7 +948,8 @@ describe("upload worker", () => {
     });
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
 
-    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}`, {
+    const captureObjectId = prepared.captures[0]?.objectId ?? "";
+    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/${captureObjectId}`, {
       contentType: "image/webp",
       bytesBase64: Buffer.from("optimized-webp").toString("base64")
     }, "nonce-optimized-capture");
@@ -858,10 +958,10 @@ describe("upload worker", () => {
     const publication = approvedBody.submissions[0]?.publication;
 
     expect(optimized.status).toBe(200);
-    expect(publication?.imageKey).toMatch(/^captures\/springcollab2020-1-beginner\/.+\.webp$/);
-    expect(publication?.imageUrl).toMatch(/\/capture\.webp$/);
-    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")?.contentType).toBe("image/webp");
-    expect(store.getCatalogIndexForTesting().packs[0]?.imageUrl).toBe(publication?.imageUrl);
+    expect(publication?.images[0]?.key).toMatch(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.webp$/);
+    expect(publication?.images[0]?.url).toMatch(/\/captures\/01-image\.webp$/);
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/webp");
+    expect(store.getCatalogIndexForTesting().packs[0]?.images[0]?.url).toBe(publication?.images[0]?.url);
   });
 
   it("deletes published uploads from public objects and the catalog", async () => {
@@ -912,7 +1012,7 @@ describe("upload worker", () => {
       discord: { publication: { threadId: "thread" } }
     });
     expect(store.getPublicObjectForTesting(publication?.packKey ?? "")).toBeUndefined();
-    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")).toBeUndefined();
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")).toBeUndefined();
     expect(store.getCatalogIndexForTesting().packs).toEqual([]);
     expect(statusBody.submissions[0]?.status).toBe("deleted");
     expect(statusBody.submissions[0]?.publication).toBeUndefined();
@@ -966,7 +1066,7 @@ describe("upload worker", () => {
       discord: { publication: { threadId: "thread-delete-target" } }
     });
     expect(store.getPublicObjectForTesting(publication?.packKey ?? "")).toBeUndefined();
-    expect(store.getPublicObjectForTesting(publication?.imageKey ?? "")).toBeUndefined();
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")).toBeUndefined();
     expect(store.getCatalogIndexForTesting().packs).toEqual([]);
     expect(statusBody.submissions[0]?.status).toBe("deleted");
   });
@@ -980,16 +1080,16 @@ describe("upload worker", () => {
     });
     const pack = validArchive("StartPos");
     const preparedResponse = await prepare(worker, {
-      capture: undefined,
+      captures: [],
       submissions: [submissionInput({ packSizeBytes: pack.length })]
     });
     expect(preparedResponse.status).toBe(201);
     const prepared = await preparedResponse.json() as {
       batchId: string;
-      capture?: { uploadUrl: string };
+      captures: Array<{ uploadUrl: string }>;
       submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
     };
-    expect(prepared.capture).toBeUndefined();
+    expect(prepared.captures).toEqual([]);
 
     await worker.fetch(uploadRequest(prepared.submissions[0]?.pack.uploadUrl ?? "", pack, "application/octet-stream"));
     await postJson(worker, "/uploads/complete", {
@@ -1000,12 +1100,12 @@ describe("upload worker", () => {
     const catalog = store.getCatalogIndexForTesting();
 
     expect(catalog.packs[0]).toMatchObject({
-      imageUrl: "",
+      images: [],
       mapSid
     });
   });
 
-  it("repairs an already-published catalog entry when an optimized capture arrives later", async () => {
+  it("rejects optimized captures that do not belong to the submission", async () => {
     const store = new InMemoryUploadStore();
     const worker = createUploadWorker({
       store,
@@ -1014,7 +1114,7 @@ describe("upload worker", () => {
     });
     const pack = validArchive("StartPos");
     const preparedResponse = await prepare(worker, {
-      capture: undefined,
+      captures: [],
       submissions: [submissionInput({ packSizeBytes: pack.length })]
     });
     expect(preparedResponse.status).toBe(201);
@@ -1029,17 +1129,13 @@ describe("upload worker", () => {
       batchId: prepared.batchId
     });
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
-    await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "repair-approve");
-    expect(store.getCatalogIndexForTesting().packs[0]?.imageUrl).toBe("");
-
-    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}`, {
+    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/unknown-capture`, {
       contentType: "image/webp",
       bytesBase64: Buffer.from("late-webp").toString("base64")
     }, "repair-optimized");
-    const repaired = store.getCatalogIndexForTesting().packs[0];
 
-    expect(optimized.status).toBe(200);
-    expect(repaired?.imageUrl).toMatch(/\/capture\.webp$/);
+    expect(optimized.status).toBe(404);
+    await expectJson(optimized, { error: "submission_not_found" });
   });
 
   it("preserves sibling moderation updates while saving an approved submission", async () => {
@@ -1060,13 +1156,13 @@ describe("upload worker", () => {
     expect(preparedResponse.status).toBe(201);
     const prepared = await preparedResponse.json() as {
       batchId: string;
-      capture: { uploadUrl: string };
+      captures: Array<{ uploadUrl: string }>;
       submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
     };
     const firstSubmissionId = prepared.submissions[0]?.submissionId ?? "";
     const secondSubmissionId = prepared.submissions[1]?.submissionId ?? "";
 
-    await worker.fetch(uploadRequest(prepared.capture.uploadUrl, Buffer.from("fake-png"), "image/png"));
+    await worker.fetch(uploadRequest(prepared.captures[0]?.uploadUrl ?? "", Buffer.from("fake-png"), "image/png"));
     await worker.fetch(uploadRequest(prepared.submissions[0]?.pack.uploadUrl ?? "", firstPack, "application/octet-stream"));
     await worker.fetch(uploadRequest(prepared.submissions[1]?.pack.uploadUrl ?? "", secondPack, "application/octet-stream"));
     await postJson(worker, "/uploads/complete", {
@@ -1175,10 +1271,10 @@ describe("upload worker", () => {
     });
     const prepared = await preparedResponse.json() as {
       batchId: string;
-      capture: { uploadUrl: string };
+      captures: Array<{ uploadUrl: string }>;
       submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
     };
-    await worker.fetch(uploadRequest(prepared.capture.uploadUrl, Buffer.from("fake-png"), "image/png"));
+    await worker.fetch(uploadRequest(prepared.captures[0]?.uploadUrl ?? "", Buffer.from("fake-png"), "image/png"));
     await worker.fetch(uploadRequest(prepared.submissions[0]?.pack.uploadUrl ?? "", firstPack, "application/octet-stream"));
     await worker.fetch(uploadRequest(prepared.submissions[1]?.pack.uploadUrl ?? "", secondPack, "application/octet-stream"));
 
@@ -1225,7 +1321,7 @@ describe("upload worker", () => {
       pack: validArchive("StartPos"),
       section: "StartPos"
     });
-    const captureObjectId = new URL(prepared.capture.uploadUrl).pathname.split("/").at(-1) ?? "";
+    const captureObjectId = new URL(prepared.captures[0]?.uploadUrl ?? "").pathname.split("/").at(-1) ?? "";
 
     const missingSignature = await worker.fetch(new Request(`${baseUrl}/uploads/source/${captureObjectId}`));
     expect(missingSignature.status).toBe(403);
@@ -1257,9 +1353,8 @@ type UploadStatusBody = {
     publication?: {
       packId: string;
       packKey: string;
-      imageKey: string;
       downloadUrl: string;
-      imageUrl: string;
+      images: Array<{ key: string; url: string; roomName: string }>;
     };
   }>;
 };
@@ -1381,7 +1476,7 @@ async function prepare(
   return postJson(worker, "/uploads/prepare", {
     installId,
     termsVersion: 1,
-    capture: { sizeBytes: 128, contentType: "image/png" },
+    captures: [{ roomName: "", sizeBytes: 128, contentType: "image/png" }],
     submissions: [submissionInput()],
     ...overrides
   });
@@ -1397,7 +1492,7 @@ async function prepareAndUpload(
   }
 ): Promise<{
   batchId: string;
-  capture: { uploadUrl: string };
+  captures: Array<{ objectId: string; uploadUrl: string }>;
   submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
 }> {
   const response = await prepare(worker, {
@@ -1413,12 +1508,14 @@ async function prepareAndUpload(
   expect(response.status).toBe(201);
   const prepared = await response.json() as {
     batchId: string;
-    capture: { uploadUrl: string };
+    captures: Array<{ objectId: string; uploadUrl: string }>;
     submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
   };
 
-  const captureUpload = await worker.fetch(uploadRequest(prepared.capture.uploadUrl, Buffer.from("fake-png"), "image/png"));
-  expect(captureUpload.status).toBe(200);
+  for (const capture of prepared.captures) {
+    const captureUpload = await worker.fetch(uploadRequest(capture.uploadUrl, Buffer.from("fake-png"), "image/png"));
+    expect(captureUpload.status).toBe(200);
+  }
 
   const packUpload = await worker.fetch(uploadRequest(
     prepared.submissions[0]?.pack.uploadUrl ?? "",
