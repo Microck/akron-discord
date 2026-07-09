@@ -398,6 +398,7 @@ describe("upload moderation messages", () => {
     expect(embed.title).toBe("Map StartPos Pack");
     expect(embed.description).toBe("Start positions.");
     expect(embed.fields?.map(field => field.name)).toContain("Submission ID");
+    expect(embed.fields?.find(field => field.name === "Author")?.value).toBe("Anonymous");
     expect(embeds.map(candidate => candidate.image?.url)).toEqual([
       "https://uploads.example.test/source/1",
       "https://uploads.example.test/source/2"
@@ -725,7 +726,7 @@ describe("upload moderation messages", () => {
     const postedEmbed = (createdThreads[0] as { message?: { embeds?: Array<{ toJSON?: () => { fields?: Array<{ name: string; value: string }> } }> } })
       .message?.embeds?.[0];
     const embed = postedEmbed?.toJSON?.();
-    expect(embed?.fields?.find(field => field.name === "Attribution")?.value).toBe("<@123456789012345678>");
+    expect(embed?.fields?.find(field => field.name === "Author")?.value).toBe("<@123456789012345678>");
     expect(recordCalls).toEqual([{
       submissionId: "submission",
       kind: "publication",

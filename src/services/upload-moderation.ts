@@ -40,7 +40,7 @@ export function buildUploadModerationEmbed(job: UploadWorkerJob): EmbedBuilder {
     .addFields(
       { name: "Section", value: job.section, inline: true },
       { name: "Map SID", value: discordFieldValue(job.mapSid || "Unknown"), inline: true },
-      { name: "Attribution", value: job.attribution.label, inline: true },
+      { name: "Author", value: job.attribution.label, inline: true },
       { name: "Submission ID", value: job.submissionId, inline: false }
     );
   if (job.aiReview) {
@@ -384,7 +384,7 @@ export function buildPublishedUploadEmbed(submission: UploadWorkerStatusSubmissi
     .addFields(
       { name: "Section", value: submission.section, inline: true },
       { name: "Map SID", value: discordFieldValue(submission.mapSid || "Unknown"), inline: true },
-      { name: "Attribution", value: publishedAttributionLabel(submission), inline: true }
+      { name: "Author", value: publishedAttributionLabel(submission), inline: true }
     );
   const images = submission.publication?.images ?? [];
   const index = clampGalleryIndex(imageIndex, images.length);
