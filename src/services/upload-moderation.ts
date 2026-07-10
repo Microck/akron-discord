@@ -11,7 +11,11 @@ import {
   type TextChannel
 } from "discord.js";
 import type { AppConfig } from "../config.js";
+import type { AkronDatabase } from "../db/database.js";
+import { uploadDiscordPublications } from "../db/schema.js";
+import { eq } from "drizzle-orm";
 import { requireModerator } from "../permissions.js";
+import { logAudit } from "./audit.js";
 import { optimizeCatalogImage } from "./image-optimizer.js";
 import { reviewWithNim } from "./nim-review.js";
 import {
@@ -23,10 +27,12 @@ import {
   type UploadWorkerStatusSubmission
 } from "./upload-worker-client.js";
 import type { UploadAiReview } from "../upload-worker.js";
+import { imageSourceMaxBytes } from "../submissions/types.js";
 
 const customIdPrefix = "upload-review";
 
 type UploadModerationAction = "approve" | "reject" | "changes" | "confirm";
+let moderationPollInFlight: Promise<void> | undefined;
 
 export function uploadModerationButtonId(action: UploadModerationAction, submissionId: string): string {
   return `${customIdPrefix}:${action}:${submissionId}`;
@@ -103,7 +109,24 @@ export function buildUploadModerationComponents(job: UploadWorkerJob): ActionRow
   ];
 }
 
-export async function pollUploadModerationQueue(input: {
+export function pollUploadModerationQueue(input: {
+  client: Client<true>;
+  config: AppConfig;
+  onError: (error: unknown) => Promise<void>;
+}): Promise<void> {
+  if (moderationPollInFlight) {
+    return moderationPollInFlight;
+  }
+  const poll = pollUploadModerationQueueOnce(input).finally(() => {
+    if (moderationPollInFlight === poll) {
+      moderationPollInFlight = undefined;
+    }
+  });
+  moderationPollInFlight = poll;
+  return poll;
+}
+
+async function pollUploadModerationQueueOnce(input: {
   client: Client<true>;
   config: AppConfig;
   onError: (error: unknown) => Promise<void>;
@@ -129,8 +152,12 @@ export async function pollUploadModerationQueue(input: {
           if (!job.attribution.discordUserId) {
             throw new Error("Discord attribution job did not include a Discord user ID.");
           }
-          const user = await input.client.users.fetch(job.attribution.discordUserId);
-          await user.send({
+          // Resolve attribution only through the configured guild. A public
+          // caller must not be able to turn the bot into an arbitrary-user DM
+          // relay by supplying an unrelated Discord snowflake.
+          const guild = await input.client.guilds.fetch(input.config.discordGuildId);
+          const member = await guild.members.fetch(job.attribution.discordUserId);
+          await member.send({
             embeds: buildUploadModerationEmbeds(job),
             components: buildUploadModerationComponents(job)
           });
@@ -177,6 +204,7 @@ function shouldRequeueFailedDeliveryImmediately(job: UploadWorkerJob): boolean {
 export async function handleUploadModerationInteraction(input: {
   interaction: ButtonInteraction;
   config: AppConfig;
+  db: AkronDatabase;
 }): Promise<boolean> {
   const gallery = parseUploadGalleryButtonId(input.interaction.customId);
   if (gallery) {
@@ -225,19 +253,51 @@ export async function handleUploadModerationInteraction(input: {
       });
       const approved = await worker.approve(parsed.submissionId);
       uploadWasApproved = true;
+      await logAudit(input.db, {
+        actorId: input.interaction.user.id,
+        action: "upload_catalog_approve",
+        target: parsed.submissionId,
+        details: { outcome: "succeeded" }
+      });
       await publishApprovedUploadToDiscord({
         client: input.interaction.client as Client<true>,
         config: input.config,
+        db: input.db,
         worker,
         status: approved,
         submissionId: parsed.submissionId
+      });
+      await logAudit(input.db, {
+        actorId: input.interaction.user.id,
+        action: "upload_discord_publish",
+        target: parsed.submissionId,
+        details: { outcome: "succeeded" }
       });
     } else if (parsed.action === "reject") {
       await worker.reject(parsed.submissionId, `Rejected by ${input.interaction.user.username}.`);
     } else {
       await worker.requestChanges(parsed.submissionId, `Changes requested by ${input.interaction.user.username}.`);
     }
+    if (parsed.action !== "approve") {
+      await logAudit(input.db, {
+        actorId: input.interaction.user.id,
+        action: `upload_moderation_${parsed.action}`,
+        target: parsed.submissionId,
+        details: { outcome: "succeeded" }
+      });
+    }
   } catch (error) {
+    await logAudit(input.db, {
+      actorId: input.interaction.user.id,
+      action: parsed.action === "approve"
+        ? uploadWasApproved ? "upload_discord_publish" : "upload_catalog_approve"
+        : `upload_moderation_${parsed.action}`,
+      target: parsed.submissionId,
+      details: {
+        outcome: "failed",
+        errorName: error instanceof Error ? error.name : "UnknownError"
+      }
+    }).catch(() => undefined);
     await input.interaction.editReply({
       content: uploadWasApproved
         ? "Upload approved and cataloged, but the public Discord post failed. Staff have been alerted."
@@ -299,12 +359,36 @@ async function prepareUploadReviewJob(input: {
 }
 
 async function fetchCaptureForOptimization(url: string): Promise<{ bytes: Buffer; contentType: string }> {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!response.ok) {
     throw new Error("Capture download failed with HTTP " + response.status + ".");
   }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > imageSourceMaxBytes) {
+    throw new Error("Capture download exceeds the source image budget.");
+  }
+  if (!response.body) {
+    throw new Error("Capture download returned an empty body.");
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      totalBytes += next.value.byteLength;
+      if (totalBytes > imageSourceMaxBytes) {
+        await reader.cancel();
+        throw new Error("Capture download exceeds the source image budget.");
+      }
+      chunks.push(Buffer.from(next.value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
   return {
-    bytes: Buffer.from(await response.arrayBuffer()),
+    bytes: Buffer.concat(chunks),
     contentType: response.headers.get("content-type") ?? ""
   };
 }
@@ -319,6 +403,7 @@ function formatAiReview(review: UploadAiReview): string {
 export async function publishApprovedUploadToDiscord(input: {
   client: Client<true>;
   config: AppConfig;
+  db: AkronDatabase;
   worker: ReturnType<typeof createUploadWorkerClient>;
   status: UploadWorkerStatusBody;
   submissionId: string;
@@ -333,23 +418,89 @@ export async function publishApprovedUploadToDiscord(input: {
     throw new Error(`Public upload forum was not found for ${submission.section}.`);
   }
 
-  const thread = await forum.threads.create({
-    name: forumThreadName(submission.title),
-    appliedTags: publishedTagIds(forum),
-    message: {
-      embeds: [buildPublishedUploadEmbed(submission, 0)],
-      components: [buildPublishedUploadComponents(submission, 0)]
-    }
+
+  const existing = await input.db.query.uploadDiscordPublications.findFirst({
+    where: eq(uploadDiscordPublications.submissionId, input.submissionId)
   });
-  const starterMessage = await fetchStarterMessage(thread);
-  await input.worker.recordDiscordMessage({
+  if (existing?.threadId) {
+    const existingThread = await forum.threads.fetch(existing.threadId).catch(() => null);
+    if (existingThread) {
+      await input.worker.recordDiscordMessage({
+        submissionId: input.submissionId,
+        kind: "publication",
+        guildId: existing.guildId,
+        channelId: existing.channelId,
+        threadId: existing.threadId,
+        messageId: existing.messageId || existing.threadId
+      });
+      await input.db.update(uploadDiscordPublications)
+        .set({ status: "recorded", updatedUtc: new Date().toISOString() })
+        .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+      return;
+    }
+    await input.db.delete(uploadDiscordPublications)
+      .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+  } else if (existing) {
+    const reservationAge = Date.now() - Date.parse(existing.updatedUtc);
+    if (!Number.isFinite(reservationAge) || reservationAge < 5 * 60 * 1000) {
+      throw new Error("Discord publication is already being created for this submission.");
+    }
+    await input.db.delete(uploadDiscordPublications)
+      .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+  }
+
+  const reserved = await input.db.insert(uploadDiscordPublications).values({
     submissionId: input.submissionId,
-    kind: "publication",
     guildId: input.config.discordGuildId,
     channelId: forum.id,
-    threadId: thread.id,
-    messageId: starterMessage?.id ?? thread.id
-  });
+    status: "creating",
+    updatedUtc: new Date().toISOString()
+  }).onConflictDoNothing().returning({ submissionId: uploadDiscordPublications.submissionId });
+  if (reserved.length !== 1) {
+    throw new Error("Discord publication is already being created for this submission.");
+  }
+
+  let thread: Awaited<ReturnType<typeof forum.threads.create>> | undefined;
+  try {
+    thread = await forum.threads.create({
+      name: forumThreadName(submission.title),
+      appliedTags: publishedTagIds(forum),
+      message: {
+        embeds: [buildPublishedUploadEmbed(submission, 0)],
+        components: [buildPublishedUploadComponents(submission, 0)]
+      }
+    });
+    const starterMessage = await fetchStarterMessage(thread);
+    const messageId = starterMessage?.id ?? thread.id;
+    await input.db.update(uploadDiscordPublications).set({
+      threadId: thread.id,
+      messageId,
+      status: "created",
+      updatedUtc: new Date().toISOString()
+    }).where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+    await input.worker.recordDiscordMessage({
+      submissionId: input.submissionId,
+      kind: "publication",
+      guildId: input.config.discordGuildId,
+      channelId: forum.id,
+      threadId: thread.id,
+      messageId
+    });
+    await input.db.update(uploadDiscordPublications)
+      .set({ status: "recorded", updatedUtc: new Date().toISOString() })
+      .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+  } catch (error) {
+    const saved = await input.db.query.uploadDiscordPublications.findFirst({
+      where: eq(uploadDiscordPublications.submissionId, input.submissionId)
+    }).catch(() => undefined);
+    if (!saved?.threadId) {
+      if (thread) await thread.delete("Akron publication persistence rollback").catch(() => undefined);
+      await input.db.delete(uploadDiscordPublications)
+        .where(eq(uploadDiscordPublications.submissionId, input.submissionId))
+        .catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 async function recordReviewMessage(input: {

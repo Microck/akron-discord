@@ -2,8 +2,11 @@ import { imageSize } from "image-size";
 import sharp from "sharp";
 import { catalogImageMaxBytes, imageSourceMaxBytes } from "../submissions/types.js";
 
-const maxDecodedImageDimension = 32768;
-const maxDecodedImagePixels = 500_000_000;
+export const maxDecodedImageDimension = 8192;
+export const maxDecodedImagePixels = 24_000_000;
+const maxPendingImageOptimizations = 8;
+let activeImageOptimizations = 0;
+const pendingImageOptimizations: Array<() => void> = [];
 
 const allowedImageTypes = new Map<string, string>([
   ["image/png", "png"],
@@ -12,14 +15,45 @@ const allowedImageTypes = new Map<string, string>([
 ]);
 
 const resizeAttempts = [
-  { size: 4096, quality: 80 },
-  { size: 3584, quality: 76 },
-  { size: 3072, quality: 72 },
-  { size: 2560, quality: 68 },
-  { size: 2048, quality: 64 }
+  { size: 2048, quality: 80 },
+  { size: 1792, quality: 76 },
+  { size: 1536, quality: 72 },
+  { size: 1280, quality: 68 },
+  { size: 1024, quality: 64 }
 ] as const;
 
 export async function optimizeCatalogImage(input: {
+  bytes: Buffer;
+  contentType: string;
+  fileName: string;
+}): Promise<{ bytes: Buffer; contentType: string; extension: "webp" }> {
+  return runInImageOptimizationQueue(() => optimizeCatalogImageNow(input));
+}
+
+export async function runInImageOptimizationQueue<T>(work: () => Promise<T>): Promise<T> {
+  if (activeImageOptimizations > 0) {
+    if (pendingImageOptimizations.length >= maxPendingImageOptimizations) {
+      throw new Error("Image optimization queue is full.");
+    }
+    await new Promise<void>(resolve => pendingImageOptimizations.push(resolve));
+  } else {
+    activeImageOptimizations = 1;
+  }
+  try {
+    return await work();
+  } finally {
+    const next = pendingImageOptimizations.shift();
+    if (next) {
+      // Transfer the single slot directly so a newly arriving scan cannot jump
+      // ahead of an already queued upload or forum image.
+      next();
+    } else {
+      activeImageOptimizations = 0;
+    }
+  }
+}
+
+async function optimizeCatalogImageNow(input: {
   bytes: Buffer;
   contentType: string;
   fileName: string;
@@ -60,6 +94,7 @@ export async function optimizeCatalogImage(input: {
         quality: attempt.quality,
         effort: 3
       })
+      .timeout({ seconds: 10 })
       .toBuffer();
 
     if (optimized.length <= catalogImageMaxBytes) {

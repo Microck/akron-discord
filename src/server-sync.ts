@@ -30,6 +30,8 @@ import {
 } from "./content.js";
 import type { AppConfig } from "./config.js";
 import { embedAssets, embedAssetAttachment, type EmbedAssetName } from "./embed-assets.js";
+import { buildPortableSetupStateExample } from "./submissions/archive.js";
+import type { AkronProfileSection } from "./submissions/types.js";
 import { utcNow } from "./time.js";
 
 export type ServerSyncPlan = {
@@ -305,6 +307,15 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
       PermissionsBitField.Flags.CreatePublicThreads
     ]
   };
+  const testerReadAllow = {
+    id: tester,
+    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
+    deny: [
+      PermissionsBitField.Flags.SendMessages,
+      PermissionsBitField.Flags.SendMessagesInThreads,
+      PermissionsBitField.Flags.AttachFiles
+    ]
+  };
 
   if (spec.name === "verify" || spec.name === "rules") {
     return [
@@ -333,7 +344,13 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
   }
 
   if (spec.visibility === "tester") {
-    return [everyoneDeny, testerPostAllow, moderatorAllow, adminAllow, ...botAllow];
+    return [
+      everyoneDeny,
+      spec.name === "announcements" ? testerReadAllow : testerPostAllow,
+      moderatorAllow,
+      adminAllow,
+      ...botAllow
+    ];
   }
 
   if (spec.visibility === "staff") {
@@ -608,29 +625,30 @@ async function buildForumExampleMessage(spec: ReturnType<typeof buildForumExampl
 function buildExampleAkrBytes(spec: ReturnType<typeof buildForumExampleSpecs>[number]): Buffer {
   const name = spec.threadTitle.replace(/^Example: /, "");
   const manifest = {
-    Format: "akron-archive",
-    FormatVersion: 1,
-    Kind: "setup",
-    KindVersion: 1,
-    CreatedBy: "Akron Discord",
-    Target: {
-      Game: "Celeste",
-      MapSid: "Glyph/Glyph"
+    format: "akron-archive",
+    formatVersion: 1,
+    kind: "setup",
+    kindVersion: 1,
+    createdBy: "Akron",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    target: {
+      game: "Celeste",
+      mapSid: "Glyph/Glyph"
     }
   };
   const setup = {
-    Format: "akron-setup-v1",
-    Name: name,
-    Section: spec.akrSection,
-    State: exampleSetupState(spec.akrSection),
-    ButtonBindings: {},
-    MenuActionBindings: {},
-    StartPositions: spec.akrSection === "StartPos"
-      ? {
-          "1": { Room: "glyph/a-00", AreaSid: "Glyph/Glyph", X: 48, Y: 128 },
-          "2": { Room: "glyph/a-03", AreaSid: "Glyph/Glyph", X: 176, Y: 96 }
-        }
-      : {}
+    format: "akron-setup-v2",
+    name,
+    createdUtc: "2026-01-01T00:00:00.000Z",
+    section: spec.akrSection,
+    state: exampleSetupState(spec.akrSection),
+    ...(spec.akrSection === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {}),
+    ...(spec.akrSection === "StartPos" ? {
+      startPositions: {
+        "1": { room: "glyph/a-00", areaSid: "Glyph/Glyph", x: 48, y: 128, usesSpawnConfig: false, dashes: -1, staminaPercent: -1, facing: "Current", idle: true, grab: false },
+        "2": { room: "glyph/a-03", areaSid: "Glyph/Glyph", x: 176, y: 96, usesSpawnConfig: false, dashes: -1, staminaPercent: -1, facing: "Current", idle: true, grab: false }
+      }
+    } : {})
   };
 
   return buildStoredZip([
@@ -640,51 +658,13 @@ function buildExampleAkrBytes(spec: ReturnType<typeof buildForumExampleSpecs>[nu
 }
 
 function exampleSetupState(section: string): unknown {
-  if (section === "StartPos") {
-    return {
-      RespawnAtStartPos: true
-    };
+  const supported = new Set<AkronProfileSection>([
+    "StartPos", "AutoKill", "AutoDeafen", "Keybinds", "Audio", "Recorder", "Hud"
+  ]);
+  if (!supported.has(section as AkronProfileSection)) {
+    throw new Error(`Unsupported example setup section: ${section}.`);
   }
-  if (section === "AutoKill") {
-    return {
-      AutoKill: true,
-      AutoKillArea: true,
-      AutoKillAreas: [
-        { X: 112, Y: 144, Width: 64, Height: 24 }
-      ]
-    };
-  }
-  if (section === "AutoDeafen") {
-    return {
-      AutoDeafen: true,
-      AutoDeafenArea: true,
-      AutoDeafenAreas: [
-        { X: 32, Y: 48, Width: 160, Height: 120 }
-      ]
-    };
-  }
-  if (section === "Keybinds") {
-    return {};
-  }
-  if (section === "Hud") {
-    return {
-      RoomTimerWidget: true,
-      RoomStatShowRoomName: true
-    };
-  }
-  if (section === "Audio") {
-    return {
-      AllowLowVolume: true,
-      LowVolumeMusic: 0.65,
-      LowVolumeSfx: 0.9
-    };
-  }
-  return {
-    RecordingReplayBufferSeconds: 30,
-    RecordingTriggerLastDeath: true,
-    RecordingPreRollSeconds: 5,
-    RecordingPostRollSeconds: 3
-  };
+  return buildPortableSetupStateExample(section as Exclude<AkronProfileSection, "Whole">);
 }
 
 function buildStoredZip(files: { name: string; content: string }[]): Buffer {

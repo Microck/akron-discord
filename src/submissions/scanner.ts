@@ -481,12 +481,27 @@ async function downloadAttachment(attachment: Attachment, maxBytes: number): Pro
     throw new Error(`${attachment.name} exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit.`);
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.length > maxBytes) {
-    throw new Error(`${attachment.name} exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit.`);
+  if (!response.body) {
+    throw new Error(`Failed to download ${attachment.name}.`);
   }
-
-  return buffer;
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel();
+        throw new Error(`${attachment.name} exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit.`);
+      }
+      chunks.push(Buffer.from(next.value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
 }
 
 async function applyStatusTag(

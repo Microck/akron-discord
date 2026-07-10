@@ -9,33 +9,179 @@ export type ArchiveFixture = {
 
 const mapSid = "SpringCollab2020/1-Beginner";
 
+export function canonicalStateForSection(section: string): Record<string, unknown> {
+  if (section === "StartPos") {
+    return {
+      smartStartPos: false,
+      respawnAtStartPos: false,
+      startPosShowLabel: false,
+      startPosLabelColor: 16_777_215,
+      startPosLabelAnchor: "TopLeft",
+      startPosLabelFormat: "Prefix",
+      startPosLabelStyle: hudLabelStyle(),
+      startPosMousePlacement: false,
+      startPosPlacementPanelX: 8,
+      startPosPlacementPanelY: 8,
+      startPosPlacementPanelMinimized: false,
+      startPosPreviewOpacity: 35,
+      startPosConfiguredDashes: -1,
+      startPosConfiguredStaminaPercent: -1,
+      startPosConfiguredFacing: "Current",
+      startPosConfiguredIdle: true,
+      startPosConfiguredGrab: false,
+      startPosSlotCount: 9
+    };
+  }
+  if (section === "AutoKill") {
+    return {
+      autoKill: false,
+      autoKillTimer: false,
+      autoKillSeconds: 60,
+      autoKillArea: false,
+      autoKillShowArea: true,
+      autoKillShowAreaOnDeath: false,
+      autoKillDefaultAreaConditions: autoKillArea(),
+      autoKillAreas: [],
+      autoKillAreaX: 0,
+      autoKillAreaY: 0,
+      autoKillAreaWidth: 0,
+      autoKillAreaHeight: 0
+    };
+  }
+  if (section === "AutoDeafen") {
+    return {
+      autoDeafen: false,
+      autoDeafenArea: false,
+      autoDeafenShowArea: true,
+      autoDeafenAreas: [],
+      autoDeafenAreaX: 0,
+      autoDeafenAreaY: 0,
+      autoDeafenAreaWidth: 0,
+      autoDeafenAreaHeight: 0
+    };
+  }
+  if (section === "Audio") {
+    return {
+      audioSpeed: false,
+      audioSpeedPolicy: "SyncTimescale",
+      audioSpeedMultiplier: 1,
+      pitchShift: false,
+      pitchShiftPolicy: "Preserve",
+      pitchShiftMultiplier: 1,
+      soundVolumes: { music: 100 },
+      soundVolumeOverrides: { music: false }
+    };
+  }
+  if (section === "Recorder") {
+    return {
+      recordingContainerFormat: "Mkv", recordingReplayBufferSeconds: 0, recordingTriggerLastDeath: true,
+      recordingTriggerRespawnToDeath: false, recordingTriggerRoomEntryToClear: false, recordingTriggerCheckpointClear: false,
+      recordingTriggerBerryCollect: true, recordingTriggerGoldenDeath: true, recordingPreRollSeconds: 5,
+      recordingPostRollSeconds: 3, recordingAudioFullMixTrack: true, recordingAudioMusicTrack: false,
+      recordingAudioSfxTrack: false, recordingAudioAmbienceTrack: false, recordingRecordMutedAudio: false,
+      recordingAudioFullMixLevel: 100, recordingAudioMusicLevel: 100, recordingAudioSfxLevel: 100,
+      recordingAudioAmbienceLevel: 100, recordingQualityPreset: "Balanced", recordingRateControl: "Crf",
+      recordingKeyframeIntervalSeconds: 2, recordingDroppedFrameWarning: true, recordingAutoRemux: true,
+      recordingClipBrowserSort: "Date", recordingClipBrowserFilter: "All", recordingFramerate: 60,
+      recordingEndscreenDurationSeconds: 3.4, recordingBitrateMbps: 30, recordingResolutionX: 1920,
+      recordingResolutionY: 1080, recordingHidePreview: false, recordingCodec: "Libx264", recordingPreset: "Cpu"
+    };
+  }
+  return {};
+}
+
+function autoKillArea(): Record<string, unknown> {
+  return {
+    x: 0, y: 0, width: 0, height: 0, speedCondition: false, minSpeed: 0, maxSpeed: 1000,
+    horizontalSpeedCondition: false, minHorizontalSpeed: 0, maxHorizontalSpeed: 1000,
+    verticalSpeedCondition: false, minVerticalSpeed: 0, maxVerticalSpeed: 1000,
+    dashCountCondition: false, dashCount: 0, groundCondition: "Any", horizontalDirection: "Any",
+    verticalDirection: "Any", playerStateCondition: false, playerState: 0, invertConditions: false
+  };
+}
+
+function hudLabelStyle(): Record<string, unknown> {
+  return {
+    offsetX: 0, offsetY: 0, scale: 100, opacity: 100, lineSpacing: 100,
+    shadow: true, shadowColor: 0, shadowOpacity: 85, shadowOffsetX: 2, shadowOffsetY: 2
+  };
+}
+
 export const archiveValidationFixtures: ArchiveFixture[] = [
   {
     name: "valid StartPos setup archive",
     entries: setupArchive({
-      manifest: { Target: { MapSid: mapSid } },
-      setup: { Name: "Beginner StartPos", Section: "StartPos" }
+      section: "StartPos",
+      setup: {
+        startPositions: {
+          "1": {
+            room: "a-00", areaSid: mapSid, x: 48, y: 128, usesSpawnConfig: false,
+            dashes: -1, staminaPercent: -1, facing: "Current", idle: true, grab: false
+          }
+        }
+      }
     }),
     ok: true,
     section: "StartPos",
     mapSid
   },
   {
-    name: "valid AutoKill setup archive",
+    name: "valid archive with seven fractional UTC digits",
     entries: setupArchive({
-      manifest: { Target: { MapSid: mapSid } },
-      setup: { Name: "Beginner AutoKill", Section: "AutoKill" }
+      section: "AutoKill",
+      manifest: { createdAt: "2026-01-01T00:00:00.1234567Z" },
+      setup: { createdUtc: "2026-01-01T00:00:00.1234567Z" }
     }),
     ok: true,
     section: "AutoKill",
     mapSid
   },
   {
-    name: "valid AutoDeafen setup archive",
+    name: "archive timestamps must use a zero UTC offset",
     entries: setupArchive({
-      manifest: { Target: { MapSid: mapSid } },
-      setup: { Name: "Beginner AutoDeafen", Section: "AutoDeafen" }
+      section: "AutoKill",
+      manifest: { createdAt: "2026-01-01T01:00:00.000+01:00" }
     }),
+    ok: false,
+    reasons: ["manifest.createdAt must be an ISO timestamp."]
+  },
+  {
+    name: "archive timestamps reject explicit plus-zero offsets",
+    entries: setupArchive({
+      section: "AutoKill",
+      manifest: { createdAt: "2026-01-01T00:00:00.000+00:00" }
+    }),
+    ok: false,
+    reasons: ["manifest.createdAt must be an ISO timestamp."]
+  },
+  {
+    name: "archive timestamps reject impossible calendar dates",
+    entries: setupArchive({
+      section: "AutoKill",
+      manifest: { createdAt: "2026-02-29T00:00:00Z" }
+    }),
+    ok: false,
+    reasons: ["manifest.createdAt must be an ISO timestamp."]
+  },
+  {
+    name: "setup and manifest timestamps must match exactly",
+    entries: setupArchive({
+      section: "AutoKill",
+      setup: { createdUtc: "2026-01-02T00:00:00.000Z" }
+    }),
+    ok: false,
+    reasons: ["setup.createdUtc must match manifest.createdAt."]
+  },
+  {
+    name: "valid AutoKill setup archive",
+    entries: setupArchive({ section: "AutoKill" }),
+    ok: true,
+    section: "AutoKill",
+    mapSid
+  },
+  {
+    name: "valid AutoDeafen setup archive",
+    entries: setupArchive({ section: "AutoDeafen" }),
     ok: true,
     section: "AutoDeafen",
     mapSid
@@ -43,28 +189,20 @@ export const archiveValidationFixtures: ArchiveFixture[] = [
   {
     name: "removed profile archive contract",
     entries: {
-      "manifest.json": { Kind: "profile" },
-      "profile.json": { Format: "akron-profile-v1", Section: "StartPos" }
+      "manifest.json": { kind: "profile" },
+      "profile.json": { format: "akron-profile-v1", section: "StartPos" }
     },
     ok: false,
-    reasons: [
-      "Archive contains unexpected file: profile.json",
-      "Missing setup.json.",
-      "manifest.format must be akron-archive.",
-      "manifest.kind must be setup."
-    ]
+    reasons: ["Archive contains unexpected file: profile.json"]
   },
   {
     name: "missing current archive and setup format markers",
     entries: {
-      "manifest.json": { Kind: "setup" },
-      "setup.json": { Section: "StartPos" }
+      "manifest.json": { kind: "setup" },
+      "setup.json": { section: "StartPos" }
     },
     ok: false,
-    reasons: [
-      "manifest.format must be akron-archive.",
-      "setup.json format must be akron-setup-v1."
-    ]
+    reasons: ["manifest.json is missing key: format."]
   },
   {
     name: "absolute archive path",
@@ -81,90 +219,109 @@ export const archiveValidationFixtures: ArchiveFixture[] = [
   {
     name: "map-specific setup without target map SID",
     entries: setupArchive({
-      setup: { Section: "AutoKill" }
+      section: "AutoKill",
+      mapSid: ""
     }),
     ok: false,
     reasons: ["Map-specific pack is missing a target map SID."]
   },
   {
     name: "unsupported Whole setup pack",
-    entries: setupArchive({
-      setup: { Section: "Whole" }
-    }),
+    entries: setupArchive({ section: "Whole" }),
     ok: false,
     section: "Whole",
     reasons: ["Whole setup packs are not accepted publicly yet."]
   },
   {
-    name: "suspicious command text",
+    name: "PascalCase setup keys are rejected",
     entries: setupArchive({
-      setup: { Section: "Hud", Note: "run powershell -enc bad" }
+      section: "StartPos",
+      setup: { Name: "legacy" }
     }),
     ok: false,
-    reasons: ["Config contains suspicious secret-like, command-like, or non-GameBanana URL text."]
+    reasons: ["setup.json contains unknown key: Name."]
   },
   {
-    name: "extra file and oversized text",
+    name: "extra file fails fast",
     entries: {
-      ...setupArchive({
-        setup: { Section: "Hud", Note: "x".repeat(10_001) }
-      }),
+      ...setupArchive({ section: "StartPos" }),
       "extra.json": { bad: true }
     },
     ok: false,
-    reasons: [
-      "Archive contains too many files.",
-      "Archive contains unexpected file: extra.json",
-      "Config contains an unusually large text value."
-    ]
+    reasons: ["Archive contains unexpected file: extra.json"]
   },
   {
     name: "unsupported setup payload format",
     entries: {
-      "manifest.json": { Format: "akron-archive", Kind: "setup" },
-      "setup.json": { Format: "unknown-format", Section: "Hud" }
+      ...setupArchive({ section: "StartPos" }),
+      "setup.json": {
+        format: "unknown-format",
+        name: "Bad",
+        createdUtc: "2026-01-01T00:00:00.000Z",
+        section: "StartPos",
+        state: {},
+        startPositions: {}
+      }
     },
     ok: false,
-    reasons: ["setup.json format must be akron-setup-v1."]
+    reasons: ["setup.format must be akron-setup-v2."]
   },
   {
-    name: "manifest setup scope mismatch",
+    name: "forbidden local path state",
     entries: setupArchive({
-      manifest: { Section: "StartPos", Target: { MapSid: mapSid } },
-      setup: { Section: "AutoKill" }
+      section: "Recorder",
+      state: { recordingOutputFolder: "/tmp/export" }
     }),
     ok: false,
-    section: "AutoKill",
-    mapSid,
-    reasons: ["Manifest/setup scope mismatch."]
+    reasons: ["Config contains forbidden key: recordingOutputFolder."]
   }
 ];
 
 function setupArchive(parts: {
+  section: string;
+  mapSid?: string;
   manifest?: Record<string, unknown>;
+  state?: Record<string, unknown>;
   setup?: Record<string, unknown>;
 }): Record<string, unknown> {
   return {
     "manifest.json": {
-      Format: "akron-archive",
-      Kind: "setup",
+      format: "akron-archive",
+      formatVersion: 1,
+      kind: "setup",
+      kindVersion: 1,
+      createdBy: "Akron",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      target: { game: "Celeste", mapSid: parts.mapSid ?? mapSid },
       ...parts.manifest
     },
     "setup.json": {
-      Format: "akron-setup-v1",
+      format: "akron-setup-v2",
+      name: `${parts.section} Test Pack`,
+      createdUtc: "2026-01-01T00:00:00.000Z",
+      section: parts.section,
+      state: parts.state ?? canonicalStateForSection(parts.section),
+      ...(parts.section === "StartPos" ? { startPositions: {} } : {}),
+      ...(parts.section === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {}),
       ...parts.setup
     }
   };
 }
 
 export function zipJson(entries: Record<string, unknown>): Buffer {
+  return zipText(Object.fromEntries(
+    Object.entries(entries).map(([name, value]) => [name, JSON.stringify(value)])
+  ));
+}
+
+export function zipText(entries: Record<string, string>): Buffer {
   const fileRecords: Array<{ name: Buffer; body: Buffer; crc: number; offset: number }> = [];
   const localParts: Buffer[] = [];
   let offset = 0;
 
   for (const [nameText, value] of Object.entries(entries)) {
     const name = Buffer.from(nameText);
-    const body = Buffer.from(JSON.stringify(value), "utf8");
+    const body = Buffer.from(value, "utf8");
     const crc = crc32(body);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);

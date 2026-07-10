@@ -1,17 +1,21 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { akrMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
-import { catalogCaptureTransformAttempts } from "../src/upload-worker-cloudflare.js";
+import { catalogCaptureTransformAttempts, enforceEdgeRateLimit } from "../src/upload-worker-cloudflare.js";
 import {
   createUploadWorker,
+  buildPublication,
   InMemoryUploadStore,
+  maxBatchDeclaredBytes,
+  shouldDeleteQuarantineBatch,
   signBotRequest,
+  type CatalogPack,
   type CatalogPublication,
   type PublishCatalogEntryInput,
   type UploadBatchRecord,
   type UploadObjectRecord
 } from "../src/upload-worker.js";
-import { zipJson } from "./archive-fixtures.js";
+import { canonicalStateForSection, zipJson } from "./archive-fixtures.js";
 
 const baseUrl = "https://uploads.example.test";
 const botSecret = "test-secret";
@@ -19,8 +23,61 @@ const installId = "install-123";
 const mapSid = "SpringCollab2020/1-Beginner";
 
 describe("upload worker", () => {
+  it("enforces the route-specific Cloudflare edge rate limits", async () => {
+    const calls: Record<string, string[]> = { prepare: [], object: [], complete: [], attribution: [] };
+    const limiter = (name: keyof typeof calls, success = true) => ({
+      async limit(input: { key: string }): Promise<{ success: boolean }> {
+        calls[name].push(input.key);
+        return { success };
+      }
+    });
+    const env = {
+      UPLOAD_PREPARE_RATE_LIMITER: limiter("prepare"),
+      UPLOAD_OBJECT_RATE_LIMITER: limiter("object"),
+      UPLOAD_COMPLETE_RATE_LIMITER: limiter("complete", false),
+      UPLOAD_ATTRIBUTION_RATE_LIMITER: limiter("attribution")
+    };
+    const request = (method: string, path: string) => new Request(`${baseUrl}${path}`, {
+      method,
+      headers: { "cf-connecting-ip": "203.0.113.42" }
+    });
+
+    expect(await enforceEdgeRateLimit(request("POST", "/uploads/prepare"), env)).toBeUndefined();
+    expect(await enforceEdgeRateLimit(request("PUT", "/uploads/objects/object-id?token=value"), env)).toBeUndefined();
+    const blocked = await enforceEdgeRateLimit(request("POST", "/uploads/complete"), env);
+    expect(blocked?.status).toBe(429);
+    expect(blocked?.headers.get("retry-after")).toBe("60");
+    await expect(blocked?.json()).resolves.toEqual({ error: "edge_rate_limit_exceeded" });
+    expect(await enforceEdgeRateLimit(request("POST", "/bot/attribution/submission/confirm"), env)).toBeUndefined();
+    expect(await enforceEdgeRateLimit(request("GET", "/uploads/challenge"), env)).toBeUndefined();
+
+    expect(Object.fromEntries(Object.entries(calls).map(([name, keys]) => [name, keys.length]))).toEqual({
+      prepare: 1,
+      object: 1,
+      complete: 1,
+      attribution: 1
+    });
+    expect(new Set(Object.values(calls).flat()).size).toBe(1);
+    expect(calls.prepare[0]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("fails closed before a limited route reaches storage without Cloudflare identity", async () => {
+    let calls = 0;
+    const limiter = { async limit(): Promise<{ success: boolean }> { calls += 1; return { success: true }; } };
+    const response = await enforceEdgeRateLimit(new Request(`${baseUrl}/uploads/prepare`, { method: "POST" }), {
+      UPLOAD_PREPARE_RATE_LIMITER: limiter,
+      UPLOAD_OBJECT_RATE_LIMITER: limiter,
+      UPLOAD_COMPLETE_RATE_LIMITER: limiter,
+      UPLOAD_ATTRIBUTION_RATE_LIMITER: limiter
+    });
+
+    expect(response?.status).toBe(403);
+    await expect(response?.json()).resolves.toEqual({ error: "network_identity_required" });
+    expect(calls).toBe(0);
+  });
+
   it("tries progressively smaller public capture transforms", () => {
-    expect(catalogCaptureTransformAttempts[0]).toEqual({ width: 4096, quality: 82 });
+    expect(catalogCaptureTransformAttempts[0]).toEqual({ width: 2048, quality: 82 });
     expect(catalogCaptureTransformAttempts.length).toBeGreaterThan(1);
 
     for (let index = 1; index < catalogCaptureTransformAttempts.length; index++) {
@@ -44,6 +101,7 @@ describe("upload worker", () => {
       limits: {
         packMaxBytes: akrMaxBytes,
         captureMaxBytes: imageSourceMaxBytes,
+        batchMaxBytes: maxBatchDeclaredBytes,
         capturesMaxCount: 10,
         titleMaxLength: 120,
         descriptionMaxLength: 1_000,
@@ -55,10 +113,135 @@ describe("upload worker", () => {
     });
   });
 
+  it("fails closed when public prepare requests lack a trusted network identity", async () => {
+    const worker = testWorker();
+    const response = await worker.fetch(new Request(`${baseUrl}/uploads/prepare`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        installId,
+        termsVersion: 1,
+        submissions: [submissionInput()]
+      })
+    }));
+
+    expect(response.status).toBe(403);
+    await expectJson(response, { error: "network_identity_required" });
+  });
+
+  it("rejects aggregate batches before reserving storage", async () => {
+    const worker = testWorker();
+    const response = await prepare(worker, {
+      captures: [
+        { roomName: "a", sizeBytes: imageSourceMaxBytes, contentType: "image/png" },
+        { roomName: "b", sizeBytes: imageSourceMaxBytes, contentType: "image/png" },
+        { roomName: "c", sizeBytes: imageSourceMaxBytes, contentType: "image/png" }
+      ],
+      submissions: [submissionInput({ packSizeBytes: 1 })]
+    });
+
+    expect(response.status).toBe(413);
+    await expectJson(response, { error: "batch_too_large", maxBytes: maxBatchDeclaredBytes });
+  });
+
+  it("enforces store-backed prepare quotas per install and network", async () => {
+    const worker = testWorker();
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      expect((await prepare(worker, { captures: [] })).status).toBe(201);
+    }
+
+    const blocked = await prepare(worker, { captures: [] });
+    expect(blocked.status).toBe(429);
+    await expectJson(blocked, { error: "upload_quota_exceeded" });
+  });
+
+  it("keeps quota reservations after an expired prepared batch is reclaimed", async () => {
+    const store = new InMemoryUploadStore();
+    const created = new Date("2026-01-01T00:00:00.000Z");
+    const reservation = {
+      reservationId: "batch-1", installIdHash: "install", networkKeyHash: "network", reservedBytes: 100,
+      createdUtc: created.toISOString(), expiresUtc: "2026-01-01T01:00:00.000Z",
+      windowStartUtc: "2025-12-31T23:00:00.000Z", maxInstallReservations: 1, maxInstallBytes: 1_000,
+      maxNetworkReservations: 1, maxNetworkBytes: 1_000
+    };
+    expect(await store.reserveUploadQuota(reservation)).toBe(true);
+    await store.putBatch({
+      id: "batch-1", installIdHash: "install", termsVersion: 1, status: "prepared",
+      createdUtc: created.toISOString(), updatedUtc: created.toISOString(), expiresUtc: "2026-01-01T00:30:00.000Z",
+      submissions: []
+    });
+
+    await store.cleanupExpired(new Date("2026-01-01T00:31:00.000Z"), 10);
+    expect(await store.reserveUploadQuota({ ...reservation, reservationId: "batch-2" })).toBe(false);
+    await store.cleanupExpired(new Date("2026-01-01T01:01:00.000Z"), 10);
+    expect(await store.reserveUploadQuota({
+      ...reservation, reservationId: "batch-3", createdUtc: "2026-01-01T01:01:00.000Z",
+      expiresUtc: "2026-01-01T02:01:00.000Z", windowStartUtc: "2026-01-01T00:01:00.000Z"
+    })).toBe(true);
+  });
+
+  it("groups rotating IPv6 addresses by /64 for network quotas", async () => {
+    const worker = testWorker();
+    const prepareFrom = async (attempt: number): Promise<Response> => worker.fetch(new Request(`${baseUrl}/uploads/prepare`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": `2001:db8:abcd:1234::${attempt.toString(16)}`
+      },
+      body: JSON.stringify({
+        installId: `installation-${attempt}`,
+        termsVersion: 1,
+        captures: [],
+        submissions: [submissionInput()]
+      })
+    }));
+
+    for (let attempt = 1; attempt <= 12; attempt += 1) {
+      expect((await prepareFrom(attempt)).status).toBe(201);
+    }
+    expect((await prepareFrom(13)).status).toBe(429);
+  });
+
+  it("bounds public JSON before parsing", async () => {
+    const worker = testWorker();
+    const response = await worker.fetch(new Request(`${baseUrl}/uploads/prepare`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(256 * 1024),
+        "cf-connecting-ip": "203.0.113.10"
+      },
+      body: "{}"
+    }));
+
+    expect(response.status).toBe(413);
+    await expectJson(response, { error: "json_body_too_large" });
+  });
+
+  it("rejects oversized bot JSON before signature verification", async () => {
+    const worker = testWorker();
+    const response = await worker.fetch(new Request(`${baseUrl}/bot/jobs/claim`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(8 * 1024 * 1024),
+        "x-akron-timestamp": "2026-01-01T00:00:00.000Z",
+        "x-akron-nonce": "00000000-0000-4000-8000-000000000000",
+        "x-akron-signature": "a".repeat(64)
+      },
+      body: "{}"
+    }));
+
+    expect(response.status).toBe(413);
+    await expectJson(response, { error: "json_body_too_large" });
+  });
+
   it("indexes delivered moderation jobs before Cloudflare claim limits are applied", () => {
     const workerSource = readFileSync("src/upload-worker-cloudflare.ts", "utf8");
     const migrationSource = readFileSync("migrations/0001_uploads.sql", "utf8");
+    const securityMigrationSource = readFileSync("migrations/0002_runtime_security.sql", "utf8");
     const wranglerSource = readFileSync("wrangler.uploads.example.toml", "utf8");
+    const productionWranglerSource = readFileSync("wrangler.uploads.toml", "utf8");
 
     expect(migrationSource).toContain("moderation_delivered_utc TEXT");
     expect(workerSource).toContain("WHERE moderation_delivered_utc IS NULL");
@@ -71,9 +254,15 @@ describe("upload worker", () => {
     expect(workerSource).toContain("acquireCatalogLock");
     expect(workerSource).toContain("upload_catalog_locks");
     expect(migrationSource).toContain("CREATE TABLE IF NOT EXISTS upload_catalog_locks");
+    expect(securityMigrationSource).toContain("CREATE TABLE IF NOT EXISTS upload_quota_reservations");
+    expect(securityMigrationSource).toContain("CREATE TABLE IF NOT EXISTS upload_attribution_deliveries");
+    expect(workerSource).toContain("async scheduled(");
+    expect(workerSource).toContain("BOT_HMAC_SECRET.length < 32");
     expect(wranglerSource).toContain("binding = \"UPLOAD_QUARANTINE_BUCKET\"");
     expect(wranglerSource).toContain("binding = \"UPLOAD_PUBLIC_BUCKET\"");
     expect(wranglerSource).toContain("UPLOAD_PUBLIC_UPLOAD_BASE_URL");
+    expect(wranglerSource).toContain("crons = [\"17 4 * * *\"]");
+    expect(productionWranglerSource).toContain("crons = [\"17 4 * * *\"]");
   });
 
   it("rejects unsupported sections before allocating uploads", async () => {
@@ -120,7 +309,10 @@ describe("upload worker", () => {
 
     const response = await worker.fetch(new Request("https://akron-upload-worker.example.workers.dev/uploads/prepare", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "203.0.113.10"
+      },
       body: JSON.stringify({
         installId,
         termsVersion: 1,
@@ -436,7 +628,7 @@ describe("upload worker", () => {
     });
 
     expect(firstComplete.status).toBe(500);
-    await expectJson(firstComplete, { error: "internal_error", message: "Transient pack read failed." });
+    await expectJson(firstComplete, { error: "internal_error" });
     expect((await retryableStatus.json() as UploadStatusBody).status).toBe("prepared");
     expect(secondComplete.status).toBe(200);
     expect((await secondComplete.json() as UploadStatusBody).status).toBe("queued");
@@ -575,6 +767,21 @@ describe("upload worker", () => {
     const claimedAgain = await signedBotJson(worker, "/bot/jobs/claim", { limit: 1 }, "nonce-requeue-claim-again");
     const body = await claimedAgain.json() as { jobs: Array<{ submissionId: string }> };
     expect(body.jobs.map(job => job.submissionId)).toEqual([submissionId]);
+  });
+
+  it("bounds repeated moderation delivery attempts", async () => {
+    const worker = testWorker();
+    const prepared = await prepareAndUpload(worker, { pack: validArchive("StartPos"), section: "StartPos" });
+    await postJson(worker, "/uploads/complete", { installId, batchId: prepared.batchId });
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const claimed = await signedBotJson(worker, "/bot/jobs/claim", { limit: 1 }, `bounded-claim-${attempt}`);
+      expect((await claimed.json() as { jobs: unknown[] }).jobs).toHaveLength(1);
+      await signedBotJson(worker, "/bot/jobs/requeue", { submissionIds: [submissionId] }, `bounded-requeue-${attempt}`);
+    }
+    const exhausted = await signedBotJson(worker, "/bot/jobs/claim", { limit: 1 }, "bounded-claim-exhausted");
+    expect((await exhausted.json() as { jobs: unknown[] }).jobs).toEqual([]);
   });
 
   it("reclaims reviewing jobs after the moderation claim lease expires", async () => {
@@ -1105,6 +1312,58 @@ describe("upload worker", () => {
     });
   });
 
+  it("serializes forum metadata and upload publication through one catalog writer", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({ store, botSecret, now: () => new Date("2026-01-01T00:00:00.000Z") });
+    const submission: UploadBatchRecord["submissions"][number] = {
+      id: "upload-entry", batchId: "batch", section: "StartPos", mapSid, mapUrl: "", title: "Upload Entry",
+      description: "Upload path", packObjectId: "upload-pack", captures: [], attribution: { mode: "anonymous" },
+      status: "moderating", validationReasons: []
+    };
+    const forumEntry: CatalogPack = {
+      id: "forum-entry", title: "Forum Entry", description: "Forum path", section: "StartPos", mapSid, mapUrl: "",
+      downloadUrl: "https://akron.example.test/maps/map/forum.akr", authorName: "Forum Author", authorAvatarUrl: "",
+      imageUrl: "", images: [], downloadCount: 0, updatedUtc: "2026-01-01T00:00:00.000Z", tags: ["startpos"],
+      sha256: "b".repeat(64), sizeBytes: 128
+    };
+
+    const [, forumResponse] = await Promise.all([
+      store.publishCatalogEntry({
+        submission,
+        pack: {
+          id: "upload-pack", tokenHash: "token", kind: "pack", batchId: "batch", submissionId: submission.id,
+          maxBytes: 128, contentType: "application/octet-stream", uploadedBytes: 128, bytes: Buffer.alloc(128)
+        },
+        captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: []
+      }),
+      signedBotJson(worker, "/bot/catalog/entries", { entry: forumEntry }, "forum-catalog-entry")
+    ]);
+
+    expect(forumResponse.status).toBe(200);
+    expect(store.getCatalogIndexForTesting().packs.map(pack => pack.id).sort()).toEqual(["forum-entry", "upload-entry-uploadentry"]);
+  });
+
+  it("removes newly uploaded public objects when catalog commit fails", async () => {
+    const store = new FailingCatalogMetadataStore();
+    const submission: UploadBatchRecord["submissions"][number] = {
+      id: "orphan-test", batchId: "batch", section: "StartPos", mapSid, mapUrl: "", title: "Orphan Test",
+      description: "", packObjectId: "pack", captures: [], attribution: { mode: "anonymous" }, status: "moderating",
+      validationReasons: []
+    };
+    const packBytes = Buffer.alloc(64);
+    const publication = buildPublication(submission, [], new Date("2026-01-01T00:00:00.000Z"), "https://akron.example.test", packBytes);
+
+    await expect(store.publishCatalogEntry({
+      submission,
+      pack: {
+        id: "pack", tokenHash: "token", kind: "pack", batchId: "batch", submissionId: submission.id,
+        maxBytes: 64, contentType: "application/octet-stream", uploadedBytes: 64, bytes: packBytes
+      },
+      captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: []
+    })).rejects.toThrow("Catalog commit failed");
+    expect(store.getPublicObjectForTesting(publication.packKey)).toBeUndefined();
+  });
+
   it("rejects optimized captures that do not belong to the submission", async () => {
     const store = new InMemoryUploadStore();
     const worker = createUploadWorker({
@@ -1135,7 +1394,7 @@ describe("upload worker", () => {
     }, "repair-optimized");
 
     expect(optimized.status).toBe(404);
-    await expectJson(optimized, { error: "submission_not_found" });
+    await expectJson(optimized, { error: "capture_not_found" });
   });
 
   it("preserves sibling moderation updates while saving an approved submission", async () => {
@@ -1293,6 +1552,21 @@ describe("upload worker", () => {
     expect(statusBody.status).toBe("published");
   });
 
+  it("does not expire a live queued sibling with an attribution batch", () => {
+    const now = new Date("2026-01-02T00:00:00.000Z");
+    const batch: UploadBatchRecord = {
+      id: "mixed-attribution", installIdHash: "install", termsVersion: 1, status: "awaiting_attribution",
+      createdUtc: "2026-01-01T00:00:00.000Z", updatedUtc: "2026-01-01T00:00:00.000Z",
+      expiresUtc: "2026-01-01T01:00:00.000Z",
+      submissions: [
+        { id: "waiting", batchId: "mixed-attribution", section: "StartPos", mapSid, mapUrl: "", title: "Waiting", description: "", packObjectId: "waiting-pack", captures: [], attribution: { mode: "discord", discordUserId: "user", confirmed: false }, status: "awaiting_attribution", validationReasons: [] },
+        { id: "live", batchId: "mixed-attribution", section: "StartPos", mapSid, mapUrl: "", title: "Live", description: "", packObjectId: "live-pack", captures: [], attribution: { mode: "anonymous" }, status: "queued", queuedUtc: "2026-01-01T23:00:00.000Z", validationReasons: [] }
+      ]
+    };
+
+    expect(shouldDeleteQuarantineBatch(batch, now)).toBe(false);
+  });
+
   it("rejects replayed signed bot actions", async () => {
     const worker = testWorker();
 
@@ -1442,17 +1716,31 @@ class TinyPackCapUploadStore extends InMemoryUploadStore {
   }
 }
 
+class FailingCatalogMetadataStore extends InMemoryUploadStore {
+  override async publishCatalogMetadata(): Promise<void> {
+    throw new Error("Catalog commit failed");
+  }
+}
+
 function validArchive(section: string): Buffer {
   return zipJson({
     "manifest.json": {
-      Format: "akron-archive",
-      Kind: "setup",
-      Target: { MapSid: mapSid }
+      format: "akron-archive",
+      formatVersion: 1,
+      kind: "setup",
+      kindVersion: 1,
+      createdBy: "Akron",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      target: { game: "Celeste", mapSid }
     },
     "setup.json": {
-      Format: "akron-setup-v1",
-      Name: `${section} Test Pack`,
-      Section: section
+      format: "akron-setup-v2",
+      name: `${section} Test Pack`,
+      createdUtc: "2026-01-01T00:00:00.000Z",
+      section,
+      state: canonicalStateForSection(section),
+      ...(section === "StartPos" ? { startPositions: {} } : {}),
+      ...(section === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {})
     }
   });
 }
@@ -1540,7 +1828,10 @@ function uploadRequest(url: string, bytes: Buffer, contentType: string, declared
 async function postJson(worker: TestWorker, path: string, body: unknown): Promise<Response> {
   return worker.fetch(new Request(`${baseUrl}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "cf-connecting-ip": "203.0.113.10"
+    },
     body: JSON.stringify(body)
   }));
 }

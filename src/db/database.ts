@@ -1,17 +1,28 @@
 import Database from "better-sqlite3";
 import { dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
 
 export type AkronDatabase = ReturnType<typeof createDatabase>["db"];
 
 export function createDatabase(path: string) {
-  mkdirSync(dirname(path), { recursive: true });
+  const directory = dirname(path);
+  const directoryAlreadyExisted = existsSync(directory);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (!directoryAlreadyExisted) {
+    chmodSync(directory, 0o700);
+  }
   const sqlite = new Database(path);
+  chmodSync(path, 0o600);
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
   runMigrations(sqlite);
+  for (const sqlitePath of [path, `${path}-wal`, `${path}-shm`]) {
+    if (existsSync(sqlitePath)) {
+      chmodSync(sqlitePath, 0o600);
+    }
+  }
   return {
     sqlite,
     db: drizzle(sqlite, { schema })
@@ -85,6 +96,16 @@ function runMigrations(sqlite: Database.Database): void {
       created_utc TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS upload_discord_publications (
+      submission_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL DEFAULT '',
+      message_id TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      updated_utc TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS github_links (
       discord_thread_id TEXT PRIMARY KEY,
       github_issue_number INTEGER NOT NULL UNIQUE,
@@ -113,6 +134,10 @@ function runMigrations(sqlite: Database.Database): void {
       decided_utc TEXT,
       decided_by TEXT NOT NULL DEFAULT ''
     );
+    DROP INDEX IF EXISTS playtester_applications_one_open_idx;
+    CREATE UNIQUE INDEX playtester_applications_one_open_idx
+      ON playtester_applications(user_id)
+      WHERE status IN ('creating_thread', 'open', 'accepting', 'denying');
 
     CREATE TABLE IF NOT EXISTS tracked_playtesters (
       user_id TEXT PRIMARY KEY,

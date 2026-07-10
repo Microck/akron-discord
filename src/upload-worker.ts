@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { validateAkrArchive } from "./submissions/archive.js";
 import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js";
 import { sectionTag } from "./submissions/sections.js";
@@ -29,6 +30,8 @@ export type CatalogPublication = {
   downloadUrl: string;
   images: CatalogImage[];
   publishedUtc: string;
+  sha256: string;
+  sizeBytes: number;
 };
 
 export type CatalogImage = {
@@ -122,6 +125,8 @@ export type UploadSubmissionRecord = {
   validationReasons: string[];
   archiveFacts?: Record<string, unknown>;
   aiReview?: UploadAiReview;
+  queuedUtc?: string;
+  moderationAttempts?: number;
   reviewClaimedUtc?: string;
   moderationDeliveredUtc?: string;
   publication?: CatalogPublication;
@@ -147,16 +152,39 @@ export type UploadWorkerStore = {
   tryReserveModerationAction(batch: UploadBatchRecord, submissionId: string, now: Date): Promise<boolean>;
   claimModerationJobs(limit: number, now: Date): Promise<Array<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord }>>;
   putBatch(batch: UploadBatchRecord): Promise<void>;
+  mutateSubmission(
+    submissionId: string,
+    now: Date,
+    mutate: (submission: UploadSubmissionRecord) => void
+  ): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined>;
   putObject(record: UploadObjectRecord): Promise<void>;
   getObject(id: string, options?: { includeBytes?: boolean }): Promise<UploadObjectRecord | undefined>;
   getUploadedObjectBody(id: string): Promise<UploadedObjectBody | undefined>;
   putUploadedObject(id: string, upload: PendingUploadedObjectBody): Promise<UploadedObjectWriteResult>;
   publishCatalogEntry(input: PublishCatalogEntryInput): Promise<CatalogPublication>;
+  publishCatalogMetadata(entry: CatalogPack): Promise<void>;
   recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined>;
   putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined>;
   recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined>;
   deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined>;
+  reserveUploadQuota(input: UploadQuotaReservationInput): Promise<boolean>;
+  cleanupExpired(now: Date, limit: number): Promise<number>;
+  recordAttributionDelivery(submissionId: string, now: Date): Promise<void>;
   rememberBotNonce(nonce: string, expiresUtc: string): Promise<boolean>;
+};
+
+export type UploadQuotaReservationInput = {
+  reservationId: string;
+  installIdHash: string;
+  networkKeyHash: string;
+  reservedBytes: number;
+  createdUtc: string;
+  expiresUtc: string;
+  windowStartUtc: string;
+  maxInstallReservations: number;
+  maxInstallBytes: number;
+  maxNetworkReservations: number;
+  maxNetworkBytes: number;
 };
 
 export type PublishCatalogEntryInput = {
@@ -226,6 +254,17 @@ const maxMapUrlLength = 512;
 const maxRoomNameLength = 200;
 const maxSubmissionsPerBatch = 8;
 const maxCapturesPerBatch = 10;
+export const maxBatchDeclaredBytes = 64 * 1024 * 1024;
+const publicJsonMaxBytes = 128 * 1024;
+const botJsonMaxBytes = 6 * 1024 * 1024;
+const uploadQuotaWindowMs = 60 * 60 * 1000;
+const maxInstallReservationsPerWindow = 4;
+const maxInstallBytesPerWindow = 128 * 1024 * 1024;
+const maxNetworkReservationsPerWindow = 12;
+const maxNetworkBytesPerWindow = 512 * 1024 * 1024;
+const attributionDeliveryCooldownMs = 24 * 60 * 60 * 1000;
+const abandonedReviewRetentionMs = 7 * 24 * 60 * 60 * 1000;
+const maxModerationAttempts = 5;
 const botSignatureWindowMs = 5 * 60 * 1000;
 const jsonContentType = { "content-type": "application/json; charset=utf-8" };
 const allowedCaptureContentTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
@@ -248,6 +287,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             limits: {
               packMaxBytes: akrMaxBytes,
               captureMaxBytes: imageSourceMaxBytes,
+              batchMaxBytes: maxBatchDeclaredBytes,
               capturesMaxCount: maxCapturesPerBatch,
               titleMaxLength: maxTitleLength,
               descriptionMaxLength: maxDescriptionLength,
@@ -260,7 +300,15 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
         }
 
         if (request.method === "POST" && url.pathname === "/uploads/prepare") {
-          return await prepareUpload({ request, origin: uploadOrigin, store: options.store, now, id, termsVersion });
+          return await prepareUpload({
+            request,
+            origin: uploadOrigin,
+            store: options.store,
+            now,
+            id,
+            termsVersion,
+            botSecret: options.botSecret
+          });
         }
 
         const objectMatch = url.pathname.match(/^\/uploads\/objects\/([^/]+)$/);
@@ -457,13 +505,23 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
           });
         }
 
+        if (request.method === "POST" && url.pathname === "/bot/catalog/entries") {
+          const body = await readSignedJson(request, options.botSecret, now, options.store);
+          if (body instanceof Response) {
+            return body;
+          }
+          const entry = readCatalogPack(body.entry);
+          await options.store.publishCatalogMetadata(entry);
+          return json({ ok: true, entryId: entry.id });
+        }
+
         return json({ error: "not_found" }, 404);
       } catch (error) {
         if (error instanceof HttpError) {
           return json({ error: error.code }, error.status);
         }
-        const message = error instanceof Error ? error.message : "Unexpected upload worker error.";
-        return json({ error: "internal_error", message }, 500);
+        console.error("Upload worker request failed.", error);
+        return json({ error: "internal_error" }, 500);
       }
     }
   };
@@ -473,8 +531,11 @@ export class InMemoryUploadStore implements UploadWorkerStore {
   private readonly batches = new Map<string, UploadBatchRecord>();
   private readonly objects = new Map<string, UploadObjectRecord>();
   private readonly botNonces = new Map<string, string>();
+  private readonly quotaReservations = new Map<string, UploadQuotaReservationInput>();
+  private readonly attributionDeliveries = new Map<string, string>();
   private readonly publicObjects = new Map<string, { bytes: Buffer; contentType: string }>();
   private catalogIndex: CatalogIndex = emptyCatalogIndex();
+  private catalogMutationTail: Promise<void> = Promise.resolve();
 
   async getBatch(id: string): Promise<UploadBatchRecord | undefined> {
     return clone(this.batches.get(id));
@@ -521,6 +582,7 @@ export class InMemoryUploadStore implements UploadWorkerStore {
 
     const nowIso = now.toISOString();
     submission.status = "moderating";
+    submission.reviewClaimedUtc = nowIso;
     current.updatedUtc = nowIso;
     current.status = deriveBatchStatus(current);
     this.batches.set(current.id, clone(current));
@@ -530,10 +592,25 @@ export class InMemoryUploadStore implements UploadWorkerStore {
   async claimModerationJobs(limit: number, now: Date): Promise<Array<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord }>> {
     const jobs: Array<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord }> = [];
     const nowIso = now.toISOString();
+    const claimedAttributionUsers = new Set<string>();
     for (const [batchId, batch] of this.batches.entries()) {
+      if (batch.status === "awaiting_attribution" && Date.parse(batch.expiresUtc) <= now.getTime()) {
+        continue;
+      }
       for (const submission of batch.submissions) {
-        if (isClaimableModerationStatus(submission, now)) {
+        const attributionUserId = submission.attribution.mode === "discord" && !submission.attribution.confirmed
+          ? submission.attribution.discordUserId
+          : "";
+        if (attributionUserId) {
+          const deliveredAt = Date.parse(this.attributionDeliveries.get(attributionUserId) ?? "");
+          if (claimedAttributionUsers.has(attributionUserId) ||
+              (Number.isFinite(deliveredAt) && deliveredAt > now.getTime() - attributionDeliveryCooldownMs)) {
+            continue;
+          }
+        }
+        if ((submission.moderationAttempts ?? 0) < maxModerationAttempts && isClaimableModerationStatus(submission, now)) {
           submission.status = "reviewing";
+          submission.moderationAttempts = (submission.moderationAttempts ?? 0) + 1;
           submission.reviewClaimedUtc = nowIso;
           delete submission.moderationDeliveredUtc;
           batch.updatedUtc = nowIso;
@@ -543,6 +620,9 @@ export class InMemoryUploadStore implements UploadWorkerStore {
           const claimedSubmission = claimedBatch.submissions.find(candidate => candidate.id === submission.id);
           if (claimedSubmission) {
             jobs.push({ batch: claimedBatch, submission: claimedSubmission });
+            if (attributionUserId) {
+              claimedAttributionUsers.add(attributionUserId);
+            }
           }
           if (jobs.length >= limit) {
             return jobs;
@@ -555,6 +635,23 @@ export class InMemoryUploadStore implements UploadWorkerStore {
 
   async putBatch(batch: UploadBatchRecord): Promise<void> {
     this.batches.set(batch.id, clone(batch));
+  }
+
+  async mutateSubmission(
+    submissionId: string,
+    now: Date,
+    mutate: (submission: UploadSubmissionRecord) => void
+  ): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined> {
+    const batch = [...this.batches.values()].find(candidate => candidate.submissions.some(submission => submission.id === submissionId));
+    const submission = batch?.submissions.find(candidate => candidate.id === submissionId);
+    if (!batch || !submission) return undefined;
+    mutate(submission);
+    batch.updatedUtc = now.toISOString();
+    batch.status = deriveBatchStatus(batch);
+    this.batches.set(batch.id, clone(batch));
+    const savedBatch = clone(batch);
+    const savedSubmission = savedBatch.submissions.find(candidate => candidate.id === submissionId);
+    return savedSubmission ? { batch: savedBatch, submission: savedSubmission } : undefined;
   }
 
   async putObject(record: UploadObjectRecord): Promise<void> {
@@ -617,48 +714,51 @@ export class InMemoryUploadStore implements UploadWorkerStore {
         contentType: optimized?.contentType ?? capture.contentType
       });
     }
-    const publication = buildPublication(input.submission, publicCaptures, input.now, "https://akron.example.test");
-    this.publicObjects.set(publication.packKey, {
-      bytes: Buffer.from(packBytes),
-      contentType: "application/octet-stream"
-    });
-    for (const [index, image] of publication.images.entries()) {
-      const capture = publicCaptures[index];
-      if (!capture?.bytes) {
-        continue;
-      }
-      this.publicObjects.set(image.key, {
-        bytes: Buffer.from(capture.bytes),
-        contentType: capture.contentType
+    const publication = buildPublication(input.submission, publicCaptures, input.now, "https://akron.example.test", packBytes);
+    const writtenKeys: string[] = [];
+    try {
+      this.publicObjects.set(publication.packKey, {
+        bytes: Buffer.from(packBytes),
+        contentType: "application/octet-stream"
       });
+      writtenKeys.push(publication.packKey);
+      for (const [index, image] of publication.images.entries()) {
+        const capture = publicCaptures[index];
+        if (!capture?.bytes) throw new Error("Cannot publish missing optimized capture bytes.");
+        this.publicObjects.set(image.key, {
+          bytes: Buffer.from(capture.bytes),
+          contentType: capture.contentType
+        });
+        writtenKeys.push(image.key);
+      }
+      await this.publishCatalogMetadata(buildCatalogPack(input.submission, publication, input.now));
+    } catch (error) {
+      for (const key of writtenKeys) this.publicObjects.delete(key);
+      throw error;
     }
-    this.catalogIndex = mergeCatalogIndex(this.catalogIndex, buildCatalogPack(input.submission, publication, input.now));
     return publication;
   }
 
+  async publishCatalogMetadata(entry: CatalogPack): Promise<void> {
+    const mutation = this.catalogMutationTail.then(() => {
+      this.catalogIndex = mergeCatalogIndex(this.catalogIndex, entry);
+    });
+    this.catalogMutationTail = mutation.then(() => undefined, () => undefined);
+    await mutation;
+  }
+
   async recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined> {
-    for (const [batchId, batch] of this.batches.entries()) {
-      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
-      if (!submission) {
-        continue;
-      }
+    const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
       submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
-      batch.updatedUtc = input.now.toISOString();
-      this.batches.set(batchId, clone(batch));
-      return clone(submission);
-    }
-    return undefined;
+    });
+    return saved?.submission;
   }
 
   async putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined> {
-    for (const [batchId, batch] of this.batches.entries()) {
-      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
-      if (!submission) {
-        continue;
-      }
+    const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
       const capture = submission.captures.find(candidate => candidate.objectId === input.objectId);
       if (!capture) {
-        return undefined;
+        throw new HttpError(404, "capture_not_found");
       }
       capture.optimized = {
         bytes: Buffer.from(input.bytes),
@@ -666,19 +766,12 @@ export class InMemoryUploadStore implements UploadWorkerStore {
         uploadedBytes: input.bytes.length,
         extension: "webp"
       };
-      batch.updatedUtc = input.now.toISOString();
-      this.batches.set(batchId, clone(batch));
-      return clone(submission);
-    }
-    return undefined;
+    });
+    return saved?.submission;
   }
 
   async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
-    for (const [batchId, batch] of this.batches.entries()) {
-      const submission = batch.submissions.find(candidate => candidate.id === input.submissionId);
-      if (!submission) {
-        continue;
-      }
+    const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
       submission.discord = {
         ...submission.discord,
         [input.kind]: {
@@ -686,11 +779,8 @@ export class InMemoryUploadStore implements UploadWorkerStore {
           postedUtc: input.now.toISOString()
         }
       };
-      batch.updatedUtc = input.now.toISOString();
-      this.batches.set(batchId, clone(batch));
-      return clone(submission);
-    }
-    return undefined;
+    });
+    return saved?.submission;
   }
 
   async deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined> {
@@ -749,6 +839,82 @@ export class InMemoryUploadStore implements UploadWorkerStore {
     return undefined;
   }
 
+  async reserveUploadQuota(input: UploadQuotaReservationInput): Promise<boolean> {
+    if (this.quotaReservations.has(input.reservationId)) {
+      return false;
+    }
+
+    const active = [...this.quotaReservations.values()].filter(reservation =>
+      reservation.createdUtc >= input.windowStartUtc
+    );
+    const install = active.filter(reservation => reservation.installIdHash === input.installIdHash);
+    const network = active.filter(reservation => reservation.networkKeyHash === input.networkKeyHash);
+    const installBytes = install.reduce((sum, reservation) => sum + reservation.reservedBytes, 0);
+    const networkBytes = network.reduce((sum, reservation) => sum + reservation.reservedBytes, 0);
+    if (install.length >= input.maxInstallReservations ||
+        installBytes + input.reservedBytes > input.maxInstallBytes ||
+        network.length >= input.maxNetworkReservations ||
+        networkBytes + input.reservedBytes > input.maxNetworkBytes) {
+      return false;
+    }
+
+    this.quotaReservations.set(input.reservationId, clone(input));
+    return true;
+  }
+
+  async cleanupExpired(now: Date, limit: number): Promise<number> {
+    let deleted = 0;
+    for (const [batchId, batch] of this.batches.entries()) {
+      if (deleted >= limit || !shouldDeleteQuarantineBatch(batch, now)) {
+        continue;
+      }
+      for (const [objectId, object] of this.objects.entries()) {
+        if (object.batchId === batchId) {
+          this.objects.delete(objectId);
+        }
+      }
+      if (batch.submissions.some(submission => submission.status === "published")) {
+        for (const submission of batch.submissions) {
+          if (isAbandonedModerationSubmission(submission, batch, now) ||
+              (submission.status === "awaiting_attribution" && Date.parse(batch.expiresUtc) <= now.getTime())) {
+            submission.status = "withdrawn";
+            delete submission.reviewClaimedUtc;
+            delete submission.moderationDeliveredUtc;
+          }
+        }
+        batch.status = deriveBatchStatus(batch);
+        batch.updatedUtc = now.toISOString();
+        this.batches.set(batchId, clone(batch));
+      } else {
+        this.batches.delete(batchId);
+      }
+      deleted += 1;
+    }
+    for (const [reservationId, reservation] of this.quotaReservations.entries()) {
+      if (Date.parse(reservation.expiresUtc) <= now.getTime()) {
+        this.quotaReservations.delete(reservationId);
+      }
+    }
+    for (const [nonce, expiresUtc] of this.botNonces.entries()) {
+      if (Date.parse(expiresUtc) <= now.getTime()) {
+        this.botNonces.delete(nonce);
+      }
+    }
+    for (const [userId, deliveredUtc] of this.attributionDeliveries.entries()) {
+      if (Date.parse(deliveredUtc) <= now.getTime() - attributionDeliveryCooldownMs) {
+        this.attributionDeliveries.delete(userId);
+      }
+    }
+    return deleted;
+  }
+
+  async recordAttributionDelivery(submissionId: string, now: Date): Promise<void> {
+    const found = await this.findSubmission(submissionId);
+    if (found?.submission.attribution.mode === "discord") {
+      this.attributionDeliveries.set(found.submission.attribution.discordUserId, now.toISOString());
+    }
+  }
+
   getPublicObjectForTesting(key: string): { bytes: Buffer; contentType: string } | undefined {
     return clone(this.publicObjects.get(key));
   }
@@ -786,9 +952,11 @@ async function prepareUpload(input: {
   now: () => Date;
   id: () => string;
   termsVersion: number;
+  botSecret: string;
 }): Promise<Response> {
+  const networkKey = readTrustedNetworkKey(input.request);
   const body = await readJsonObject(input.request);
-  const installId = readRequiredString(body, "installId");
+  const installId = readBoundedString(body, "installId", 256);
   const termsVersion = readRequiredNumber(body, "termsVersion");
   if (termsVersion !== input.termsVersion) {
     return json({ error: "terms_outdated", termsVersion: input.termsVersion }, 409);
@@ -803,21 +971,24 @@ async function prepareUpload(input: {
   }
 
   const batchId = input.id();
-  const createdUtc = input.now().toISOString();
-  const expiresUtc = new Date(input.now().getTime() + preparedUploadTtlMs).toISOString();
+  const preparedAt = input.now();
+  const createdUtc = preparedAt.toISOString();
+  const expiresUtc = new Date(preparedAt.getTime() + preparedUploadTtlMs).toISOString();
   const captureInputs = readCaptureInputs(body);
   if (captureInputs.length > maxCapturesPerBatch) {
     return json({ error: "too_many_captures", maxCaptures: maxCapturesPerBatch }, 413);
   }
   const captureObjects: UploadObjectRecord[] = [];
   const responseCaptures: PreparedCaptureObject[] = [];
+  let declaredBytes = 0;
   for (const rawCapture of captureInputs) {
     const capture = readObject(rawCapture, "capture");
     const captureSizeBytes = readRequiredNumber(capture, "sizeBytes");
     const captureContentType = normalizeContentType(readRequiredString(capture, "contentType"));
-    if (captureSizeBytes <= 0 || captureSizeBytes > imageSourceMaxBytes) {
+    if (!Number.isSafeInteger(captureSizeBytes) || captureSizeBytes <= 0 || captureSizeBytes > imageSourceMaxBytes) {
       return json({ error: "capture_too_large", maxBytes: imageSourceMaxBytes }, 413);
     }
+    declaredBytes += captureSizeBytes;
     if (!allowedCaptureContentTypes.has(captureContentType)) {
       return json({ error: "capture_type_unsupported" }, 415);
     }
@@ -828,7 +999,7 @@ async function prepareUpload(input: {
       token: captureToken,
       kind: "capture",
       batchId,
-      maxBytes: imageSourceMaxBytes,
+      maxBytes: captureSizeBytes,
       contentType: captureContentType
     });
     captureObjects.push(captureObject);
@@ -851,8 +1022,12 @@ async function prepareUpload(input: {
     const title = readBoundedString(submission, "title", maxTitleLength);
     const description = readBoundedString(submission, "description", maxDescriptionLength);
     const packSizeBytes = readRequiredNumber(submission, "packSizeBytes");
-    if (packSizeBytes <= 0 || packSizeBytes > akrMaxBytes) {
+    if (!Number.isSafeInteger(packSizeBytes) || packSizeBytes <= 0 || packSizeBytes > akrMaxBytes) {
       return json({ error: "pack_too_large", maxBytes: akrMaxBytes }, 413);
+    }
+    declaredBytes += packSizeBytes;
+    if (declaredBytes > maxBatchDeclaredBytes) {
+      return json({ error: "batch_too_large", maxBytes: maxBatchDeclaredBytes }, 413);
     }
 
     const attribution = readAttribution(submission.attribution);
@@ -864,7 +1039,7 @@ async function prepareUpload(input: {
       kind: "pack",
       batchId,
       submissionId,
-      maxBytes: akrMaxBytes,
+      maxBytes: packSizeBytes,
       contentType: "application/octet-stream"
     });
 
@@ -896,9 +1071,31 @@ async function prepareUpload(input: {
     packObjects.push(packObject);
   }
 
+  // Cleanup is bounded so one request cannot turn retention work into an
+  // unbounded public endpoint. Failure is intentionally fatal: accepting more
+  // storage while retention is broken would make the quota ineffective.
+  await input.store.cleanupExpired(preparedAt, 10);
+  const installIdHash = hashInstallId(installId);
+  const quotaReserved = await input.store.reserveUploadQuota({
+    reservationId: batchId,
+    installIdHash,
+    networkKeyHash: hashNetworkKey(networkKey, input.botSecret),
+    reservedBytes: declaredBytes,
+    createdUtc,
+    expiresUtc: new Date(preparedAt.getTime() + uploadQuotaWindowMs).toISOString(),
+    windowStartUtc: new Date(preparedAt.getTime() - uploadQuotaWindowMs).toISOString(),
+    maxInstallReservations: maxInstallReservationsPerWindow,
+    maxInstallBytes: maxInstallBytesPerWindow,
+    maxNetworkReservations: maxNetworkReservationsPerWindow,
+    maxNetworkBytes: maxNetworkBytesPerWindow
+  });
+  if (!quotaReserved) {
+    return json({ error: "upload_quota_exceeded" }, 429);
+  }
+
   await input.store.putBatch({
     id: batchId,
-    installIdHash: hashInstallId(installId),
+    installIdHash,
     termsVersion,
     status: "prepared",
     createdUtc,
@@ -1097,6 +1294,8 @@ async function completeUpload(input: {
       } else {
         submission.status = "queued";
       }
+      submission.queuedUtc ??= input.now().toISOString();
+      submission.moderationAttempts ??= 0;
     }
 
     batch.status = batch.submissions.every(submission => submission.status === "rejected")
@@ -1105,6 +1304,9 @@ async function completeUpload(input: {
         ? "awaiting_attribution"
         : "queued";
     batch.updatedUtc = input.now().toISOString();
+    if (hasPendingAttribution) {
+      batch.expiresUtc = new Date(input.now().getTime() + attributionTtlMs).toISOString();
+    }
     await input.store.putBatch(batch);
     return json(publicBatchStatus(batch));
   } catch (error) {
@@ -1146,13 +1348,14 @@ async function updateClientSubmissionStatus(input: {
   if (found.submission.status === "reviewing" || found.submission.status === "moderating") {
     return json({ error: "submission_locked", status: found.submission.status }, 409);
   }
-  found.submission.status = input.nextStatus;
-  const savedBatch = await saveSubmissionUpdate({
-    store: input.store,
-    batch: found.batch,
-    submission: found.submission,
-    now: input.now
+  const saved = await input.store.mutateSubmission(input.submissionId, input.now(), submission => {
+    if (submission.status === "published" || submission.status === "deleted" ||
+        submission.status === "reviewing" || submission.status === "moderating") {
+      throw new HttpError(409, "submission_locked");
+    }
+    submission.status = input.nextStatus;
   });
+  const savedBatch = saved?.batch ?? found.batch;
   return json(publicBatchStatus(savedBatch));
 }
 
@@ -1177,41 +1380,22 @@ async function convertSubmissionToAnonymous(input: {
   if (found.submission.status === "moderating") {
     return json({ error: "submission_locked", status: found.submission.status }, 409);
   }
-  const shouldQueueForModeration = found.submission.attribution.mode === "discord" &&
-    !found.submission.attribution.confirmed &&
-    (found.submission.status === "awaiting_attribution" || found.submission.status === "reviewing");
-  found.submission.attribution = { mode: "anonymous" };
-  if (shouldQueueForModeration) {
-    found.submission.status = "queued";
-    delete found.submission.reviewClaimedUtc;
-    delete found.submission.moderationDeliveredUtc;
-  }
-  const savedBatch = await saveSubmissionUpdate({
-    store: input.store,
-    batch: found.batch,
-    submission: found.submission,
-    now: input.now
+  const saved = await input.store.mutateSubmission(input.submissionId, input.now(), submission => {
+    if (submission.status === "published" || submission.status === "deleted" || submission.status === "moderating") {
+      throw new HttpError(409, "submission_locked");
+    }
+    const shouldQueueForModeration = submission.attribution.mode === "discord" &&
+      !submission.attribution.confirmed &&
+      (submission.status === "awaiting_attribution" || submission.status === "reviewing");
+    submission.attribution = { mode: "anonymous" };
+    if (shouldQueueForModeration) {
+      submission.status = "queued";
+      delete submission.reviewClaimedUtc;
+      delete submission.moderationDeliveredUtc;
+    }
   });
+  const savedBatch = saved?.batch ?? found.batch;
   return json(publicBatchStatus(savedBatch));
-}
-
-async function saveSubmissionUpdate(input: {
-  store: UploadWorkerStore;
-  batch: UploadBatchRecord;
-  submission: UploadSubmissionRecord;
-  now: () => Date;
-}): Promise<UploadBatchRecord> {
-  const current = await input.store.getBatch(input.batch.id) ?? input.batch;
-  const submissionIndex = current.submissions.findIndex(candidate => candidate.id === input.submission.id);
-  if (submissionIndex >= 0) {
-    // Moderation operates on a snapshot from findSubmission. Reload before writing
-    // so concurrent moderation of sibling submissions does not revert their state.
-    current.submissions[submissionIndex] = clone(input.submission);
-  }
-  current.updatedUtc = input.now().toISOString();
-  current.status = deriveBatchStatus(current);
-  await input.store.putBatch(current);
-  return current;
 }
 
 async function confirmAttribution(input: {
@@ -1228,18 +1412,21 @@ async function confirmAttribution(input: {
   if (found.submission.attribution.mode !== "discord" || found.submission.attribution.discordUserId !== discordUserId) {
     return json({ error: "attribution_user_mismatch" }, 403);
   }
-  found.submission.attribution = { ...found.submission.attribution, confirmed: true };
-  if (found.submission.status === "awaiting_attribution" || found.submission.status === "reviewing") {
-    found.submission.status = "queued";
-    delete found.submission.reviewClaimedUtc;
-    delete found.submission.moderationDeliveredUtc;
+  if (Date.parse(found.batch.expiresUtc) <= input.now().getTime()) {
+    return json({ error: "attribution_expired" }, 410);
   }
-  const savedBatch = await saveSubmissionUpdate({
-    store: input.store,
-    batch: found.batch,
-    submission: found.submission,
-    now: input.now
+  const saved = await input.store.mutateSubmission(input.submissionId, input.now(), submission => {
+    if (submission.attribution.mode !== "discord" || submission.attribution.discordUserId !== discordUserId) {
+      throw new HttpError(403, "attribution_user_mismatch");
+    }
+    submission.attribution = { ...submission.attribution, confirmed: true };
+    if (submission.status === "awaiting_attribution" || submission.status === "reviewing") {
+      submission.status = "queued";
+      delete submission.reviewClaimedUtc;
+      delete submission.moderationDeliveredUtc;
+    }
   });
+  const savedBatch = saved?.batch ?? found.batch;
   return json(publicBatchStatus(savedBatch));
 }
 
@@ -1280,12 +1467,8 @@ async function applyModerationAction(input: {
       const pack = await input.store.getObject(found.submission.packObjectId);
       const captureRecords = await loadSubmissionCaptureObjects(input.store, found.submission, false);
       if (!pack?.bytes || captureRecords.some(capture => !isUploadedObjectReady(capture))) {
-        found.submission.status = "reviewing";
-        await saveSubmissionUpdate({
-          store: input.store,
-          batch: found.batch,
-          submission: found.submission,
-          now: input.now
+        await input.store.mutateSubmission(input.submissionId, input.now(), submission => {
+          submission.status = "reviewing";
         });
         return json({ error: "upload_objects_missing", submissionId: found.submission.id }, 409);
       }
@@ -1300,12 +1483,8 @@ async function applyModerationAction(input: {
       });
       found.submission.status = "published";
     } catch (error) {
-      found.submission.status = "reviewing";
-      await saveSubmissionUpdate({
-        store: input.store,
-        batch: found.batch,
-        submission: found.submission,
-        now: input.now
+      await input.store.mutateSubmission(input.submissionId, input.now(), submission => {
+        submission.status = "reviewing";
       });
       throw error;
     }
@@ -1319,12 +1498,12 @@ async function applyModerationAction(input: {
     return json({ error: "moderation_action_unknown" }, 404);
   }
 
-  const savedBatch = await saveSubmissionUpdate({
-    store: input.store,
-    batch: found.batch,
-    submission: found.submission,
-    now: input.now
+  const saved = await input.store.mutateSubmission(input.submissionId, input.now(), submission => {
+    submission.status = found.submission.status;
+    submission.publication = found.submission.publication;
+    submission.validationReasons = [...found.submission.validationReasons];
   });
+  const savedBatch = saved?.batch ?? found.batch;
   return json(botBatchStatus(savedBatch));
 }
 
@@ -1337,13 +1516,12 @@ async function acknowledgeDeliveredModerationJobs(input: {
     .filter((value): value is string => typeof value === "string" && value.trim() !== "")
     .map(value => value.trim());
   for (const submissionId of submissionIds) {
-    const found = await findSubmission(input.store, submissionId);
-    if (!found || found.submission.status !== "reviewing") {
-      continue;
+    const saved = await input.store.mutateSubmission(submissionId, input.now(), submission => {
+      if (submission.status === "reviewing") submission.moderationDeliveredUtc = input.now().toISOString();
+    });
+    if (saved?.submission.status === "reviewing" && saved.submission.moderationDeliveredUtc) {
+      await input.store.recordAttributionDelivery(submissionId, input.now());
     }
-    found.submission.moderationDeliveredUtc = input.now().toISOString();
-    found.batch.updatedUtc = input.now().toISOString();
-    await input.store.putBatch(found.batch);
   }
 
   return json({ ok: true, delivered: submissionIds.length });
@@ -1484,16 +1662,14 @@ async function requeueModerationJobs(input: {
     .filter((value): value is string => typeof value === "string" && value.trim() !== "")
     .map(value => value.trim());
   for (const submissionId of submissionIds) {
-    const found = await findSubmission(input.store, submissionId);
-    if (!found || found.submission.status !== "reviewing") {
-      continue;
-    }
-    found.submission.status = found.submission.attribution.mode === "discord" && !found.submission.attribution.confirmed
-      ? "awaiting_attribution"
-      : "queued";
-    found.batch.updatedUtc = input.now().toISOString();
-    found.batch.status = deriveBatchStatus(found.batch);
-    await input.store.putBatch(found.batch);
+    await input.store.mutateSubmission(submissionId, input.now(), submission => {
+      if (submission.status !== "reviewing") return;
+      submission.status = submission.attribution.mode === "discord" && !submission.attribution.confirmed
+        ? "awaiting_attribution"
+        : "queued";
+      delete submission.reviewClaimedUtc;
+      delete submission.moderationDeliveredUtc;
+    });
   }
 
   return json({ ok: true, requeued: submissionIds.length });
@@ -1572,16 +1748,29 @@ async function readSignedJson(
   now: () => Date,
   store: UploadWorkerStore
 ): Promise<Record<string, unknown> | Response> {
-  const bodyText = await request.text();
+  const declaredLength = readContentLength(request);
+  if (declaredLength !== undefined && declaredLength > botJsonMaxBytes) {
+    return json({ error: "json_body_too_large" }, 413);
+  }
   const timestamp = request.headers.get("x-akron-timestamp") ?? "";
   const nonce = request.headers.get("x-akron-nonce") ?? "";
   const signature = request.headers.get("x-akron-signature") ?? "";
   const requestTime = Date.parse(timestamp);
-  if (!timestamp || !nonce || !signature || !Number.isFinite(requestTime)) {
+  if (!timestamp || timestamp.length > 64 || !/^[!-~]{1,128}$/.test(nonce) || !/^[a-f0-9]{64}$/i.test(signature) || !Number.isFinite(requestTime)) {
     return json({ error: "bot_signature_missing" }, 401);
   }
   if (Math.abs(now().getTime() - requestTime) > botSignatureWindowMs) {
     return json({ error: "bot_signature_expired" }, 401);
+  }
+
+  let bodyText: string;
+  try {
+    bodyText = await readBoundedRequestText(request, botJsonMaxBytes);
+  } catch (error) {
+    if (error instanceof UploadTooLargeError) {
+      return json({ error: "json_body_too_large" }, 413);
+    }
+    throw error;
   }
 
   const expected = signBotRequest({
@@ -1729,7 +1918,7 @@ function isClaimableModerationStatus(submission: UploadSubmissionRecord, now: Da
   if (submission.status === "queued" || submission.status === "awaiting_attribution") {
     return true;
   }
-  if (submission.status !== "reviewing") {
+  if (submission.status !== "reviewing" && submission.status !== "moderating") {
     return false;
   }
   if (submission.moderationDeliveredUtc) {
@@ -1774,21 +1963,24 @@ export type CatalogPack = {
   id: string;
   title: string;
   description: string;
-  section: UploadSection;
+  section: AkronProfileSection;
   mapSid: string;
   mapUrl: string;
   downloadUrl: string;
   authorName: string;
   authorAvatarUrl: string;
   images: Array<{ url: string; roomName: string }>;
+  imageUrl?: string;
   downloadCount: number;
   updatedUtc: string;
   tags: string[];
+  sha256: string;
+  sizeBytes: number;
 };
 
 export type CatalogIndex = {
-  format: "akron-community-pack-index-v1";
-  version: 1;
+  format: "akron-community-pack-index-v2";
+  version: 2;
   packs: CatalogPack[];
 };
 
@@ -1796,15 +1988,17 @@ export function buildPublication(
   submission: UploadSubmissionRecord,
   captures: UploadObjectRecord[],
   now: Date,
-  publicBaseUrl: string
+  publicBaseUrl: string,
+  packBytes: Buffer
 ): CatalogPublication {
   const mapSlug = slugMapSid(submission.mapSid);
   const packId = buildPackId(submission);
-  const packKey = `packs/${mapSlug}/${packId}.akr`;
+  const revision = createHash("sha256").update(packBytes).digest("hex").slice(0, 16);
+  const packKey = `packs/${mapSlug}/${packId}-${revision}.akr`;
   const images = captures.map((capture, index) => {
     const roomName = submission.captures[index]?.roomName ?? "";
     const imageName = imageNameForCapture(roomName, index);
-    const key = `captures/${mapSlug}/${packId}/${imageName}.${imageExtensionForContentType(capture.contentType)}`;
+    const key = `captures/${mapSlug}/${packId}-${revision}/${imageName}.${imageExtensionForContentType(capture.contentType)}`;
     return {
       key,
       url: publicAssetUrl(publicBaseUrl, key),
@@ -1816,7 +2010,9 @@ export function buildPublication(
     packKey,
     downloadUrl: publicAssetUrl(publicBaseUrl, packKey),
     images,
-    publishedUtc: now.toISOString()
+    publishedUtc: now.toISOString(),
+    sha256: createHash("sha256").update(packBytes).digest("hex"),
+    sizeBytes: packBytes.length
   };
 }
 
@@ -1835,7 +2031,9 @@ export function buildCatalogPack(submission: UploadSubmissionRecord, publication
     images: publication.images.map(image => ({ url: image.url, roomName: image.roomName })),
     downloadCount: 0,
     updatedUtc: now.toISOString(),
-    tags: [sectionTag(submission.section), mapSlug]
+    tags: [sectionTag(submission.section), mapSlug],
+    sha256: publication.sha256,
+    sizeBytes: publication.sizeBytes
   };
 }
 
@@ -1852,11 +2050,11 @@ export function mergeCatalogIndex(index: CatalogIndex, entry: CatalogPack): Cata
   const packs = index.packs.filter(pack => pack.id !== entry.id);
   packs.push(entry);
   packs.sort((left, right) => left.title.localeCompare(right.title));
-  return { format: "akron-community-pack-index-v1", version: 1, packs };
+  return { format: "akron-community-pack-index-v2", version: 2, packs };
 }
 
 export function emptyCatalogIndex(): CatalogIndex {
-  return { format: "akron-community-pack-index-v1", version: 1, packs: [] };
+  return { format: "akron-community-pack-index-v2", version: 2, packs: [] };
 }
 
 function buildPackId(submission: UploadSubmissionRecord): string {
@@ -1959,6 +2157,47 @@ function readAttribution(source: unknown): UploadAttribution {
   throw new HttpError(400, "attribution_mode_unsupported");
 }
 
+function readCatalogPack(source: unknown): CatalogPack {
+  const entry = readObject(source, "entry");
+  const section = readUploadSection(entry);
+  const sha256 = readRequiredString(entry, "sha256");
+  const sizeBytes = readRequiredNumber(entry, "sizeBytes");
+  if (!/^[a-f0-9]{64}$/.test(sha256) || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > akrMaxBytes) {
+    throw new HttpError(400, "catalog_integrity_invalid");
+  }
+  const images = readArray(entry.images ?? [], "images").map(rawImage => {
+    const image = readObject(rawImage, "image");
+    return {
+      url: readBoundedString(image, "url", 2048),
+      roomName: readOptionalBoundedString(image, "roomName", maxRoomNameLength)
+    };
+  });
+  if (images.length > 16) throw new HttpError(400, "catalog_images_invalid");
+  const tags = readArray(entry.tags ?? [], "tags").map(value => {
+    if (typeof value !== "string" || value.length === 0 || value.length > 64) throw new HttpError(400, "catalog_tags_invalid");
+    return value;
+  });
+  if (tags.length > 32) throw new HttpError(400, "catalog_tags_invalid");
+  return {
+    id: readBoundedString(entry, "id", 256),
+    title: readBoundedString(entry, "title", 256),
+    description: readOptionalBoundedString(entry, "description", 1_000),
+    section,
+    mapSid: readBoundedString(entry, "mapSid", 256),
+    mapUrl: readOptionalMapUrl(entry),
+    downloadUrl: readBoundedString(entry, "downloadUrl", 2048),
+    authorName: readBoundedString(entry, "authorName", 256),
+    authorAvatarUrl: readOptionalBoundedString(entry, "authorAvatarUrl", 2048),
+    imageUrl: readOptionalBoundedString(entry, "imageUrl", 2048) || undefined,
+    images,
+    downloadCount: Math.max(0, Math.trunc(readOptionalNumber(entry, "downloadCount"))),
+    updatedUtc: readBoundedString(entry, "updatedUtc", 64),
+    tags,
+    sha256,
+    sizeBytes
+  };
+}
+
 function readDiscordUserId(source: Record<string, unknown>): string {
   const value = readRequiredString(source, "discordUserId");
   if (!/^\d{15,25}$/.test(value)) {
@@ -1968,7 +2207,18 @@ function readDiscordUserId(source: Record<string, unknown>): string {
 }
 
 async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
-  return parseJsonObject(await request.text());
+  const declaredLength = readContentLength(request);
+  if (declaredLength !== undefined && declaredLength > publicJsonMaxBytes) {
+    throw new HttpError(413, "json_body_too_large");
+  }
+  try {
+    return parseJsonObject(await readBoundedRequestText(request, publicJsonMaxBytes));
+  } catch (error) {
+    if (error instanceof UploadTooLargeError) {
+      throw new HttpError(413, "json_body_too_large");
+    }
+    throw error;
+  }
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -2054,7 +2304,7 @@ function readOptionalNumber(source: Record<string, unknown>, key: string): numbe
 
 function readContentLength(request: Request): number | undefined {
   const value = request.headers.get("content-length");
-  if (!value) {
+  if (!value || !/^\d+$/.test(value)) {
     return undefined;
   }
   const parsed = Number.parseInt(value, 10);
@@ -2067,6 +2317,41 @@ function normalizeContentType(value: string): string {
 
 function hashInstallId(installId: string): string {
   return createHash("sha256").update(`install:${installId}`).digest("hex");
+}
+
+function readTrustedNetworkKey(request: Request): string {
+  const value = request.headers.get("cf-connecting-ip")?.trim() ?? "";
+  const ipVersion = isIP(value);
+  if (!ipVersion || value.length > 64) {
+    throw new HttpError(403, "network_identity_required");
+  }
+  return ipVersion === 6 ? ipv6NetworkPrefix(value) : value;
+}
+
+function ipv6NetworkPrefix(address: string): string {
+  let normalized = address.toLowerCase();
+  const ipv4Tail = normalized.match(/(?:^|:)(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (ipv4Tail && isIP(ipv4Tail) === 4) {
+    const octets = ipv4Tail.split(".").map(Number);
+    const ipv4Hextets = [
+      ((octets[0] ?? 0) << 8 | (octets[1] ?? 0)).toString(16),
+      ((octets[2] ?? 0) << 8 | (octets[3] ?? 0)).toString(16)
+    ];
+    normalized = normalized.slice(0, -ipv4Tail.length) + ipv4Hextets.join(":");
+  }
+  const [leftText, rightText = ""] = normalized.split("::", 2);
+  const left = leftText ? leftText.split(":") : [];
+  const right = rightText ? rightText.split(":") : [];
+  const zeroCount = Math.max(0, 8 - left.length - right.length);
+  const hextets = [...left, ...Array.from({ length: zeroCount }, () => "0"), ...right]
+    .map(part => Number.parseInt(part || "0", 16).toString(16));
+  return hextets.slice(0, 4).join(":") + "::/64";
+}
+
+function hashNetworkKey(networkKey: string, secret: string): string {
+  // IP addresses have low entropy and a plain digest is reversible by brute
+  // force. Key the digest so the quota table does not become an IP inventory.
+  return createHmac("sha256", secret).update(`network:${networkKey}`).digest("hex");
 }
 
 function hashToken(token: string): string {
@@ -2086,9 +2371,55 @@ function signSourceObject(secret: string, objectId: string, expires: string): st
 }
 
 function safeEqualHex(left: string, right: string): boolean {
+  if (!/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) {
+    return false;
+  }
   const leftBuffer = Buffer.from(left, "hex");
   const rightBuffer = Buffer.from(right, "hex");
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+async function readBoundedRequestText(request: Request, maxBytes: number): Promise<string> {
+  if (!request.body) {
+    return "";
+  }
+  return (await bufferFromBody(request.body, maxBytes)).toString("utf8");
+}
+
+export function shouldDeleteQuarantineBatch(batch: UploadBatchRecord, now: Date): boolean {
+  const expiresAt = Date.parse(batch.expiresUtc);
+  if (batch.status === "prepared" && Number.isFinite(expiresAt) && expiresAt <= now.getTime()) {
+    return true;
+  }
+
+  if (batch.status === "awaiting_attribution" && Number.isFinite(expiresAt) && expiresAt <= now.getTime() &&
+      batch.submissions.every(submission => !["queued", "reviewing", "moderating"].includes(submission.status))) {
+    return true;
+  }
+
+  const activeModeration = batch.submissions.filter(submission =>
+    ["queued", "reviewing", "moderating"].includes(submission.status)
+  );
+  if (activeModeration.length > 0) {
+    return activeModeration.every(submission => isAbandonedModerationSubmission(submission, batch, now));
+  }
+
+  const terminalRetentionMs = batch.status === "published" ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  if (!["published", "rejected", "changes_requested", "withdrawn", "deleted"].includes(batch.status)) {
+    return false;
+  }
+  const updatedAt = Date.parse(batch.updatedUtc);
+  return Number.isFinite(updatedAt) && updatedAt <= now.getTime() - terminalRetentionMs;
+}
+
+function isAbandonedModerationSubmission(
+  submission: UploadSubmissionRecord,
+  batch: UploadBatchRecord,
+  now: Date
+): boolean {
+  if (!["queued", "reviewing", "moderating"].includes(submission.status)) return false;
+  const queuedAt = Date.parse(submission.queuedUtc ?? batch.createdUtc);
+  return Number.isFinite(queuedAt) && queuedAt <= now.getTime() - abandonedReviewRetentionMs;
 }
 
 async function bufferFromBody(body: Buffer | ReadableStream<Uint8Array>, maxBytes?: number): Promise<Buffer> {
