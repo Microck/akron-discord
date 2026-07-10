@@ -6,6 +6,7 @@ import {
   emptyCatalogIndex,
   mergeCatalogIndex,
   moderationClaimLeaseMs,
+  shouldDeleteQuarantineBatch,
   type CatalogIndex,
   type CatalogPack,
   type DeletedUploadSubmission,
@@ -17,23 +18,40 @@ import {
   type RecordDiscordMessageInput,
   type UploadBatchRecord,
   type UploadObjectRecord,
+  type UploadQuotaReservationInput,
   type UploadedObjectBody,
   type UploadedObjectWriteResult,
   type UploadSubmissionRecord,
   type UploadWorkerStore,
   UploadTooLargeError
 } from "./upload-worker.js";
+import { createHash, randomUUID } from "node:crypto";
 import { catalogImageMaxBytes } from "./submissions/types.js";
 
 export type CloudflareUploadEnv = {
   UPLOAD_DB: D1Database;
   UPLOAD_QUARANTINE_BUCKET: R2Bucket;
   UPLOAD_PUBLIC_BUCKET: R2Bucket;
+  UPLOAD_PREPARE_RATE_LIMITER: RateLimitBinding;
+  UPLOAD_OBJECT_RATE_LIMITER: RateLimitBinding;
+  UPLOAD_COMPLETE_RATE_LIMITER: RateLimitBinding;
+  UPLOAD_ATTRIBUTION_RATE_LIMITER: RateLimitBinding;
   BOT_HMAC_SECRET: string;
   UPLOAD_TERMS_VERSION?: string;
   UPLOAD_PUBLIC_BASE_URL?: string;
   UPLOAD_PUBLIC_UPLOAD_BASE_URL?: string;
 };
+
+type RateLimitBinding = {
+  limit(input: { key: string }): Promise<{ success: boolean }>;
+};
+
+type EdgeRateLimitEnv = Pick<CloudflareUploadEnv,
+  | "UPLOAD_PREPARE_RATE_LIMITER"
+  | "UPLOAD_OBJECT_RATE_LIMITER"
+  | "UPLOAD_COMPLETE_RATE_LIMITER"
+  | "UPLOAD_ATTRIBUTION_RATE_LIMITER"
+>;
 
 type D1Database = {
   prepare(query: string): D1PreparedStatement;
@@ -51,6 +69,11 @@ type D1RunResult = {
   meta?: {
     changes?: number;
   };
+};
+
+type DurableLock = {
+  assertOwned(): Promise<void>;
+  release(): Promise<void>;
 };
 
 type R2Bucket = {
@@ -85,12 +108,11 @@ type ImageTransformInit = RequestInit & {
 };
 
 export const catalogCaptureTransformAttempts = [
-  { width: 4096, quality: 82 },
-  { width: 3584, quality: 78 },
-  { width: 3072, quality: 74 },
-  { width: 2560, quality: 70 },
-  { width: 2048, quality: 66 },
-  { width: 1536, quality: 62 }
+  { width: 2048, quality: 82 },
+  { width: 1792, quality: 78 },
+  { width: 1536, quality: 74 },
+  { width: 1280, quality: 70 },
+  { width: 1024, quality: 66 }
 ] as const;
 
 type BatchRow = {
@@ -118,6 +140,16 @@ const optimizedCapturePrefix = "quarantine/optimized-captures";
 
 export default {
   async fetch(request: Request, env: CloudflareUploadEnv): Promise<Response> {
+    if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
+      return new Response(JSON.stringify({ error: "upload_service_unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json; charset=utf-8" }
+      });
+    }
+    const rateLimitResponse = await enforceEdgeRateLimit(request, env);
+    if (rateLimitResponse) {
+      return rateLimitResponse;
+    }
     const worker = createUploadWorker({
       store: new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL),
       botSecret: env.BOT_HMAC_SECRET,
@@ -125,8 +157,62 @@ export default {
       termsVersion: readTermsVersion(env.UPLOAD_TERMS_VERSION)
     });
     return worker.fetch(request);
+  },
+
+  async scheduled(_controller: unknown, env: CloudflareUploadEnv): Promise<void> {
+    if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
+      throw new Error("BOT_HMAC_SECRET must be at least 32 characters.");
+    }
+    const store = new CloudflareUploadStore(
+      env.UPLOAD_DB,
+      env.UPLOAD_QUARANTINE_BUCKET,
+      env.UPLOAD_PUBLIC_BUCKET,
+      env.UPLOAD_PUBLIC_BASE_URL
+    );
+    await store.cleanupExpired(new Date(), 100);
   }
 };
+
+export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitEnv): Promise<Response | undefined> {
+  const url = new URL(request.url);
+  const limiter = edgeLimiterForRequest(request.method, url.pathname, env);
+  if (limiter === undefined) {
+    return undefined;
+  }
+  if (limiter === null) {
+    return edgeError("upload_service_unavailable", 503);
+  }
+
+  // Cloudflare supplies this header at the Worker boundary. Hashing keeps the
+  // transient counter key from containing the client's raw network address.
+  const clientAddress = request.headers.get("cf-connecting-ip")?.trim();
+  if (!clientAddress) {
+    return edgeError("network_identity_required", 403);
+  }
+  const key = createHash("sha256").update(clientAddress).digest("hex");
+  try {
+    const decision = await limiter.limit({ key });
+    return decision.success ? undefined : edgeError("edge_rate_limit_exceeded", 429, { "retry-after": "60" });
+  } catch (error) {
+    console.error("Upload edge rate limiter failed.", error);
+    return edgeError("upload_service_unavailable", 503);
+  }
+}
+
+function edgeLimiterForRequest(method: string, pathname: string, env: EdgeRateLimitEnv): RateLimitBinding | null | undefined {
+  if (method === "POST" && pathname === "/uploads/prepare") return env.UPLOAD_PREPARE_RATE_LIMITER ?? null;
+  if (method === "PUT" && /^\/uploads\/objects\/[^/]+$/.test(pathname)) return env.UPLOAD_OBJECT_RATE_LIMITER ?? null;
+  if (method === "POST" && pathname === "/uploads/complete") return env.UPLOAD_COMPLETE_RATE_LIMITER ?? null;
+  if (method === "POST" && /^\/bot\/attribution\/[^/]+\/confirm$/.test(pathname)) return env.UPLOAD_ATTRIBUTION_RATE_LIMITER ?? null;
+  return undefined;
+}
+
+function edgeError(error: string, status: number, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", ...headers }
+  });
+}
 
 export class CloudflareUploadStore implements UploadWorkerStore {
   constructor(
@@ -178,43 +264,46 @@ export class CloudflareUploadStore implements UploadWorkerStore {
   }
 
   async tryBeginCompletion(batch: UploadBatchRecord): Promise<boolean> {
-    const locked = await this.db
-      .prepare([
-        "UPDATE upload_batches",
-        "SET status = ?, updated_utc = ?, payload_json = ?",
-        "WHERE id = ? AND status = 'prepared'"
-      ].join(" "))
-      .bind(batch.status, batch.updatedUtc, JSON.stringify(batch), batch.id)
-      .run();
-    return (locked.meta?.changes ?? 0) === 1;
+    const release = await this.acquireBatchLock(batch.id);
+    try {
+      const locked = await this.db
+        .prepare([
+          "UPDATE upload_batches",
+          "SET status = ?, updated_utc = ?, payload_json = ?",
+          "WHERE id = ? AND status = 'prepared'"
+        ].join(" "))
+        .bind(batch.status, batch.updatedUtc, JSON.stringify(batch), batch.id)
+        .run();
+      return (locked.meta?.changes ?? 0) === 1;
+    } finally {
+      await release();
+    }
   }
 
   async tryReserveModerationAction(batch: UploadBatchRecord, submissionId: string, now: Date): Promise<boolean> {
     const nowIso = now.toISOString();
-    const reserved = await this.db
-      .prepare([
-        "UPDATE upload_submissions",
-        "SET status = 'moderating', updated_utc = ?",
-        "WHERE id = ? AND status IN ('queued', 'reviewing', 'awaiting_attribution')"
-      ].join(" "))
-      .bind(nowIso, submissionId)
-      .run();
-    if ((reserved.meta?.changes ?? 0) !== 1) {
-      return false;
-    }
-
-    const current = await this.getBatch(batch.id);
-    const submission = current?.submissions.find(candidate => candidate.id === submissionId);
-    if (!current || !submission) {
-      return false;
-    }
-    if (submission) {
+    const release = await this.acquireBatchLock(batch.id);
+    try {
+      const row = await this.db.prepare("SELECT status FROM upload_submissions WHERE id = ? AND batch_id = ?")
+        .bind(submissionId, batch.id).first<{ status: string }>();
+      if (!row || !["queued", "reviewing", "awaiting_attribution"].includes(row.status)) return false;
+      const current = await this.getBatch(batch.id);
+      const submission = current?.submissions.find(candidate => candidate.id === submissionId);
+      if (!current || !submission) return false;
       submission.status = "moderating";
+      submission.reviewClaimedUtc = nowIso;
+      current.updatedUtc = nowIso;
+      current.status = deriveBatchStatusForStore(current);
+      await this.db.batch([
+        this.db.prepare("UPDATE upload_submissions SET status = 'moderating', updated_utc = ? WHERE id = ? AND batch_id = ?")
+          .bind(nowIso, submissionId, batch.id),
+        this.db.prepare("UPDATE upload_batches SET status = ?, updated_utc = ?, payload_json = ? WHERE id = ?")
+          .bind(current.status, nowIso, JSON.stringify(current), current.id)
+      ]);
+      return true;
+    } finally {
+      await release();
     }
-    current.updatedUtc = nowIso;
-    current.status = deriveBatchStatusForStore(current);
-    await this.putBatchPayload(current);
-    return true;
   }
 
   async claimModerationJobs(limit: number, now: Date): Promise<Array<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord }>> {
@@ -224,57 +313,69 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       .prepare([
         "SELECT id FROM upload_submissions",
         "WHERE moderation_delivered_utc IS NULL",
+        "AND moderation_attempts < 5",
         "AND (status IN ('queued', 'awaiting_attribution')",
-        "OR (status = 'reviewing' AND updated_utc <= ?))",
+        "OR (status IN ('reviewing', 'moderating') AND updated_utc <= ?))",
+        "AND EXISTS (SELECT 1 FROM upload_batches batch WHERE batch.id = upload_submissions.batch_id",
+        "AND (upload_submissions.status != 'awaiting_attribution' OR batch.expires_utc > ?))",
+        "AND (attribution_discord_user_id IS NULL OR NOT EXISTS (",
+        "SELECT 1 FROM upload_attribution_deliveries delivered",
+        "WHERE delivered.discord_user_id = upload_submissions.attribution_discord_user_id",
+        "AND delivered.delivered_utc > ?))",
+        "AND (attribution_discord_user_id IS NULL OR id = (",
+        "SELECT MIN(candidate.id) FROM upload_submissions candidate",
+        "WHERE candidate.attribution_discord_user_id = upload_submissions.attribution_discord_user_id",
+        "AND candidate.moderation_delivered_utc IS NULL",
+        "AND (candidate.status IN ('queued', 'awaiting_attribution')",
+        "OR (candidate.status IN ('reviewing', 'moderating') AND candidate.updated_utc <= ?))))",
         "ORDER BY updated_utc ASC",
         "LIMIT ?"
       ].join(" "))
-      .bind(leaseCutoffUtc, limit)
+      .bind(
+        leaseCutoffUtc,
+        nowIso,
+        new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
+        leaseCutoffUtc,
+        limit
+      )
       .all<{ id: string }>();
     const jobs: Array<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord }> = [];
     for (const row of rows.results) {
-      const job = await this.findSubmission(row.id);
-      if (!job || !isClaimableModerationJob(job.submission, now)) {
-        continue;
+      const initial = await this.findSubmission(row.id);
+      if (!initial) continue;
+      const release = await this.acquireBatchLock(initial.batch.id);
+      try {
+        const job = await this.findSubmission(row.id);
+        const normalized = await this.db.prepare(
+          "SELECT status, updated_utc, moderation_delivered_utc, moderation_attempts FROM upload_submissions WHERE id = ?"
+        ).bind(row.id).first<{ status: string; updated_utc: string; moderation_delivered_utc: string | null; moderation_attempts: number }>();
+        if (!job || !normalized || normalized.moderation_delivered_utc ||
+            normalized.moderation_attempts >= 5 ||
+            !(normalized.status === "queued" || normalized.status === "awaiting_attribution" ||
+              (["reviewing", "moderating"].includes(normalized.status) && normalized.updated_utc <= leaseCutoffUtc))) continue;
+        job.submission.status = "reviewing";
+        job.submission.moderationAttempts = (job.submission.moderationAttempts ?? 0) + 1;
+        job.submission.reviewClaimedUtc = nowIso;
+        delete job.submission.moderationDeliveredUtc;
+        job.batch.updatedUtc = nowIso;
+        job.batch.status = deriveBatchStatusForStore(job.batch);
+        await this.db.batch([
+          this.db.prepare("UPDATE upload_submissions SET status = 'reviewing', updated_utc = ?, moderation_delivered_utc = NULL, moderation_attempts = moderation_attempts + 1 WHERE id = ?")
+            .bind(nowIso, row.id),
+          this.db.prepare("UPDATE upload_batches SET status = ?, updated_utc = ?, payload_json = ? WHERE id = ?")
+            .bind(job.batch.status, nowIso, JSON.stringify(job.batch), job.batch.id)
+        ]);
+        jobs.push(job);
+      } finally {
+        await release();
       }
-
-      const claimed = await this.db
-        .prepare([
-          "UPDATE upload_submissions",
-          "SET status = 'reviewing', updated_utc = ?, moderation_delivered_utc = NULL",
-          "WHERE id = ? AND moderation_delivered_utc IS NULL",
-          "AND (status IN ('queued', 'awaiting_attribution')",
-          "OR (status = 'reviewing' AND updated_utc <= ?))"
-        ].join(" "))
-        .bind(nowIso, row.id, leaseCutoffUtc)
-        .run();
-      if ((claimed.meta?.changes ?? 0) !== 1) {
-        continue;
-      }
-
-      job.submission.status = "reviewing";
-      job.submission.reviewClaimedUtc = nowIso;
-      delete job.submission.moderationDeliveredUtc;
-      job.batch.updatedUtc = nowIso;
-      job.batch.status = deriveBatchStatusForStore(job.batch);
-      await this.putBatchPayload(job.batch);
-      jobs.push(job);
     }
     return jobs;
   }
 
-  private async putBatchPayload(batch: UploadBatchRecord): Promise<void> {
-    await this.db
-      .prepare([
-        "UPDATE upload_batches",
-        "SET status = ?, updated_utc = ?, payload_json = ?",
-        "WHERE id = ?"
-      ].join(" "))
-      .bind(batch.status, batch.updatedUtc, JSON.stringify(batch), batch.id)
-      .run();
-  }
-
   async putBatch(batch: UploadBatchRecord): Promise<void> {
+    const release = await this.acquireBatchLock(batch.id);
+    try {
     const statements: D1PreparedStatement[] = [
       this.db
         .prepare([
@@ -303,15 +404,18 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     for (const submission of batch.submissions) {
       statements.push(this.db
         .prepare([
-          "INSERT INTO upload_submissions (id, batch_id, section, status, map_sid, updated_utc, moderation_delivered_utc)",
-          "VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO upload_submissions (id, batch_id, section, status, map_sid, updated_utc, moderation_delivered_utc, attribution_discord_user_id, queued_utc, moderation_attempts)",
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           "ON CONFLICT(id) DO UPDATE SET",
           "batch_id = excluded.batch_id,",
           "section = excluded.section,",
           "status = excluded.status,",
           "map_sid = excluded.map_sid,",
           "updated_utc = excluded.updated_utc,",
-          "moderation_delivered_utc = excluded.moderation_delivered_utc"
+          "moderation_delivered_utc = excluded.moderation_delivered_utc,",
+          "attribution_discord_user_id = excluded.attribution_discord_user_id,",
+          "queued_utc = excluded.queued_utc,",
+          "moderation_attempts = excluded.moderation_attempts"
         ].join(" "))
         .bind(
           submission.id,
@@ -320,11 +424,64 @@ export class CloudflareUploadStore implements UploadWorkerStore {
           submission.status,
           submission.mapSid,
           submission.reviewClaimedUtc ?? batch.updatedUtc,
-          submission.moderationDeliveredUtc ?? null
+          submission.moderationDeliveredUtc ?? null,
+          submission.attribution.mode === "discord" && !submission.attribution.confirmed
+            ? submission.attribution.discordUserId
+            : null,
+          submission.queuedUtc ?? null,
+          submission.moderationAttempts ?? 0
         )
       );
     }
     await this.db.batch(statements);
+    } finally {
+      await release();
+    }
+  }
+
+  async mutateSubmission(
+    submissionId: string,
+    now: Date,
+    mutate: (submission: UploadSubmissionRecord) => void
+  ): Promise<{ batch: UploadBatchRecord; submission: UploadSubmissionRecord } | undefined> {
+    const row = await this.db.prepare("SELECT batch_id FROM upload_submissions WHERE id = ?")
+      .bind(submissionId).first<{ batch_id: string }>();
+    if (!row) return undefined;
+    const batchId = row.batch_id;
+    const release = await this.acquireBatchLock(batchId);
+    try {
+      const current = await this.getBatch(batchId);
+      const index = current?.submissions.findIndex(candidate => candidate.id === submissionId) ?? -1;
+      if (!current || index < 0) return undefined;
+      const submission = current.submissions[index];
+      if (!submission) return undefined;
+      mutate(submission);
+      current.updatedUtc = now.toISOString();
+      current.status = deriveBatchStatusForStore(current);
+      await this.db.batch([
+        this.db.prepare([
+          "UPDATE upload_batches SET status = ?, updated_utc = ?, payload_json = ? WHERE id = ?"
+        ].join(" ")).bind(current.status, current.updatedUtc, JSON.stringify(current), current.id),
+        this.db.prepare([
+          "UPDATE upload_submissions SET status = ?, updated_utc = ?, moderation_delivered_utc = ?, attribution_discord_user_id = ?, queued_utc = ?, moderation_attempts = ?",
+          "WHERE id = ? AND batch_id = ?"
+        ].join(" ")).bind(
+          submission.status,
+          submission.reviewClaimedUtc ?? current.updatedUtc,
+          submission.moderationDeliveredUtc ?? null,
+          submission.attribution.mode === "discord" && !submission.attribution.confirmed
+            ? submission.attribution.discordUserId
+            : null,
+          submission.queuedUtc ?? null,
+          submission.moderationAttempts ?? 0,
+          submission.id,
+          current.id
+        )
+      ]);
+      return { batch: current, submission: structuredClone(submission) };
+    } finally {
+      await release();
+    }
   }
 
   async putObject(record: UploadObjectRecord): Promise<void> {
@@ -408,23 +565,29 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
   async putUploadedObject(id: string, upload: PendingUploadedObjectBody): Promise<UploadedObjectWriteResult> {
     const row = await this.db
-      .prepare("SELECT r2_key, max_bytes FROM upload_objects WHERE id = ?")
+      .prepare("SELECT r2_key, max_bytes, batch_id FROM upload_objects WHERE id = ?")
       .bind(id)
-      .first<{ r2_key: string; max_bytes: number }>();
+      .first<{ r2_key: string; max_bytes: number; batch_id: string }>();
     if (!row) {
       throw new Error("Upload object does not exist.");
     }
 
-    const reserved = await this.db
-      .prepare([
-        "UPDATE upload_objects",
-        "SET uploaded_bytes = -1",
-        "WHERE id = ?",
-        "AND uploaded_bytes IS NULL",
-        "AND EXISTS (SELECT 1 FROM upload_batches WHERE upload_batches.id = upload_objects.batch_id AND upload_batches.status = 'prepared')"
-      ].join(" "))
-      .bind(id)
-      .run();
+    const release = await this.acquireBatchLock(row.batch_id);
+    let reserved: D1RunResult;
+    try {
+      reserved = await this.db
+        .prepare([
+          "UPDATE upload_objects",
+          "SET uploaded_bytes = -1",
+          "WHERE id = ?",
+          "AND uploaded_bytes IS NULL",
+          "AND EXISTS (SELECT 1 FROM upload_batches WHERE upload_batches.id = upload_objects.batch_id AND upload_batches.status = 'prepared')"
+        ].join(" "))
+        .bind(id)
+        .run();
+    } finally {
+      await release();
+    }
     if ((reserved.meta?.changes ?? 0) !== 1) {
       return { ok: false };
     }
@@ -463,50 +626,67 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     }
 
     const publicCaptures = await this.publicCapturesForPublication(input);
-    const publication = buildPublication(input.submission, publicCaptures, input.now, this.publicBaseUrl);
-    await this.publicBucket.put(publication.packKey, packBytes, {
-      httpMetadata: { contentType: "application/octet-stream" }
-    });
-    for (const [index, image] of publication.images.entries()) {
-      const capture = publicCaptures[index];
-      if (!capture?.bytes) {
-        throw new Error("Cannot publish missing optimized capture bytes.");
-      }
-      await this.publicBucket.put(image.key, capture.bytes, {
-        httpMetadata: { contentType: capture.contentType }
-      });
-    }
-
-    const releaseCatalogLock = await this.acquireCatalogLock();
+    const publication = buildPublication(input.submission, publicCaptures, input.now, this.publicBaseUrl, packBytes);
+    const createdKeys: string[] = [];
     try {
-      const entry = await this.fillCatalogMapUrl(buildCatalogPack(input.submission, publication, input.now));
-      const nextIndex = await this.upsertCatalogEntry(entry);
-      try {
-        await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
-          httpMetadata: { contentType: "application/json" }
+      const packAlreadyExists = await this.publicBucket.get(publication.packKey) !== null;
+      await this.publicBucket.put(publication.packKey, packBytes, {
+        httpMetadata: { contentType: "application/octet-stream" }
+      });
+      if (!packAlreadyExists) createdKeys.push(publication.packKey);
+      for (const [index, image] of publication.images.entries()) {
+        const capture = publicCaptures[index];
+        if (!capture?.bytes) throw new Error("Cannot publish missing optimized capture bytes.");
+        const imageAlreadyExists = await this.publicBucket.get(image.key) !== null;
+        await this.publicBucket.put(image.key, capture.bytes, {
+          httpMetadata: { contentType: capture.contentType }
         });
-      } catch (error) {
-        await this.deleteCatalogEntry(entry.id);
-        throw error;
+        if (!imageAlreadyExists) createdKeys.push(image.key);
       }
+      const entry = await this.fillCatalogMapUrl(buildCatalogPack(input.submission, publication, input.now));
+      await this.publishCatalogMetadata(entry);
     } catch (error) {
+      for (const key of createdKeys) await this.publicBucket.delete(key);
       throw error;
-    } finally {
-      await releaseCatalogLock();
     }
     return publication;
   }
 
-  async recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined> {
-    const found = await this.findSubmission(input.submissionId);
-    if (!found) {
-      return undefined;
+  async publishCatalogMetadata(entry: CatalogPack): Promise<void> {
+    const catalogLock = await this.acquireCatalogLock();
+    try {
+      const normalizedEntry = await this.fillCatalogMapUrl(entry);
+      const previousRow = await this.db
+        .prepare("SELECT entry_json FROM upload_catalog_entries WHERE id = ?")
+        .bind(normalizedEntry.id)
+        .first<CatalogEntryRow>();
+      const nextIndex = await this.upsertCatalogEntry(normalizedEntry);
+      try {
+        await catalogLock.assertOwned();
+        await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
+          httpMetadata: { contentType: "application/json" }
+        });
+      } catch (error) {
+        try {
+          if (previousRow) {
+            await this.upsertCatalogEntry(JSON.parse(previousRow.entry_json) as CatalogPack);
+          } else {
+            await this.deleteCatalogEntry(normalizedEntry.id);
+          }
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], "Catalog index write and metadata rollback both failed.");
+        }
+        throw error;
+      }
+    } finally {
+      await catalogLock.release();
     }
+  }
 
-    found.submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
-    found.batch.updatedUtc = input.now.toISOString();
-    await this.putBatchPayload(found.batch);
-    return found.submission;
+  async recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined> {
+    return (await this.mutateSubmission(input.submissionId, input.now, submission => {
+      submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
+    }))?.submission;
   }
 
   async putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined> {
@@ -519,37 +699,46 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     if (!capture) {
       return undefined;
     }
-    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}/${capture.objectId}.webp`;
+    const revision = createHash("sha256").update(input.bytes).digest("hex").slice(0, 16);
+    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}/${capture.objectId}-${revision}.webp`;
     await this.quarantineBucket.put(r2Key, input.bytes, {
       httpMetadata: { contentType: input.contentType }
     });
-    capture.optimized = {
-      r2Key,
-      contentType: input.contentType,
-      uploadedBytes: input.bytes.length,
-      extension: "webp"
-    };
-    found.batch.updatedUtc = input.now.toISOString();
-    await this.putBatchPayload(found.batch);
-    return found.submission;
+    let previousKey: string | undefined;
+    try {
+      const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
+        const currentCapture = submission.captures.find(candidate => candidate.objectId === input.objectId);
+        if (!currentCapture) throw new Error("Capture no longer exists.");
+        previousKey = currentCapture.optimized?.r2Key;
+        currentCapture.optimized = {
+          r2Key,
+          contentType: input.contentType,
+          uploadedBytes: input.bytes.length,
+          extension: "webp"
+        };
+      });
+      if (!saved) {
+        await this.quarantineBucket.delete(r2Key);
+        return undefined;
+      }
+      if (previousKey && previousKey !== r2Key) await this.quarantineBucket.delete(previousKey);
+      return saved.submission;
+    } catch (error) {
+      await this.quarantineBucket.delete(r2Key);
+      throw error;
+    }
   }
 
   async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
-    const found = await this.findSubmission(input.submissionId);
-    if (!found) {
-      return undefined;
-    }
-
-    found.submission.discord = {
-      ...found.submission.discord,
-      [input.kind]: {
-        ...input.message,
-        postedUtc: input.now.toISOString()
-      }
-    };
-    found.batch.updatedUtc = input.now.toISOString();
-    await this.putBatchPayload(found.batch);
-    return found.submission;
+    return (await this.mutateSubmission(input.submissionId, input.now, submission => {
+      submission.discord = {
+        ...submission.discord,
+        [input.kind]: {
+          ...input.message,
+          postedUtc: input.now.toISOString()
+        }
+      };
+    }))?.submission;
   }
 
   async deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined> {
@@ -561,19 +750,34 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     const previousStatus = found.submission.status;
     const publication = found.submission.publication;
     const discord = found.submission.discord;
-    const nowIso = input.now.toISOString();
     if (publication) {
-      const releaseCatalogLock = await this.acquireCatalogLock();
+      const catalogLock = await this.acquireCatalogLock();
       try {
         if (publication.packId) {
+          const previousRow = await this.db
+            .prepare("SELECT entry_json FROM upload_catalog_entries WHERE id = ?")
+            .bind(publication.packId)
+            .first<CatalogEntryRow>();
           await this.deleteCatalogEntry(publication.packId);
           const nextIndex = await this.catalogIndexWithoutEntry(publication.packId);
-          await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
-            httpMetadata: { contentType: "application/json" }
-          });
+          try {
+            await catalogLock.assertOwned();
+            await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
+              httpMetadata: { contentType: "application/json" }
+            });
+          } catch (error) {
+            try {
+              if (previousRow) {
+                await this.upsertCatalogEntry(JSON.parse(previousRow.entry_json) as CatalogPack);
+              }
+            } catch (rollbackError) {
+              throw new AggregateError([error, rollbackError], "Catalog index write and metadata rollback both failed.");
+            }
+            throw error;
+          }
         }
       } finally {
-        await releaseCatalogLock();
+        await catalogLock.release();
       }
 
       if (publication.packKey) {
@@ -586,20 +790,13 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
     await this.deleteQuarantineObjectsForSubmission(found.batch, found.submission);
 
-    found.submission.status = "deleted";
-    if (input.reason) {
-      found.submission.validationReasons.push(input.reason);
-    }
-    delete found.submission.publication;
-    delete found.submission.reviewClaimedUtc;
-    delete found.submission.moderationDeliveredUtc;
-    found.batch.updatedUtc = nowIso;
-    found.batch.status = deriveBatchStatusForStore(found.batch);
-    await this.putBatchPayload(found.batch);
-    await this.db
-      .prepare("UPDATE upload_submissions SET status = 'deleted', updated_utc = ?, moderation_delivered_utc = NULL WHERE id = ?")
-      .bind(nowIso, found.submission.id)
-      .run();
+    await this.mutateSubmission(input.submissionId, input.now, submission => {
+      submission.status = "deleted";
+      if (input.reason) submission.validationReasons.push(input.reason);
+      delete submission.publication;
+      delete submission.reviewClaimedUtc;
+      delete submission.moderationDeliveredUtc;
+    });
 
     return {
       batchId: found.batch.id,
@@ -608,6 +805,148 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       publication,
       discord
     };
+  }
+
+  async reserveUploadQuota(input: UploadQuotaReservationInput): Promise<boolean> {
+    const reserved = await this.db
+      .prepare([
+        "INSERT INTO upload_quota_reservations",
+        "(id, install_id_hash, network_key_hash, reserved_bytes, created_utc, expires_utc)",
+        "SELECT ?, ?, ?, ?, ?, ?",
+        "WHERE (SELECT COUNT(*) FROM upload_quota_reservations WHERE install_id_hash = ? AND created_utc >= ?) < ?",
+        "AND COALESCE((SELECT SUM(reserved_bytes) FROM upload_quota_reservations WHERE install_id_hash = ? AND created_utc >= ?), 0) + ? <= ?",
+        "AND (SELECT COUNT(*) FROM upload_quota_reservations WHERE network_key_hash = ? AND created_utc >= ?) < ?",
+        "AND COALESCE((SELECT SUM(reserved_bytes) FROM upload_quota_reservations WHERE network_key_hash = ? AND created_utc >= ?), 0) + ? <= ?"
+      ].join(" "))
+      .bind(
+        input.reservationId,
+        input.installIdHash,
+        input.networkKeyHash,
+        input.reservedBytes,
+        input.createdUtc,
+        input.expiresUtc,
+        input.installIdHash,
+        input.windowStartUtc,
+        input.maxInstallReservations,
+        input.installIdHash,
+        input.windowStartUtc,
+        input.reservedBytes,
+        input.maxInstallBytes,
+        input.networkKeyHash,
+        input.windowStartUtc,
+        input.maxNetworkReservations,
+        input.networkKeyHash,
+        input.windowStartUtc,
+        input.reservedBytes,
+        input.maxNetworkBytes
+      )
+      .run();
+    return (reserved.meta?.changes ?? 0) === 1;
+  }
+
+  async cleanupExpired(now: Date, limit: number): Promise<number> {
+    const terminalCutoffUtc = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+    const abandonedReviewCutoffUtc = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const publishedCutoffUtc = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const rows = await this.db
+      .prepare([
+        "SELECT payload_json FROM upload_batches",
+        "WHERE ((status IN ('prepared', 'awaiting_attribution') AND expires_utc <= ?)",
+        "OR (status IN ('rejected', 'changes_requested', 'withdrawn', 'deleted') AND updated_utc <= ?)",
+        "OR (status IN ('queued', 'reviewing', 'moderating') AND EXISTS (",
+        "SELECT 1 FROM upload_submissions active WHERE active.batch_id = upload_batches.id",
+        "AND active.status IN ('queued', 'reviewing', 'moderating')",
+        "AND COALESCE(active.queued_utc, upload_batches.created_utc) <= ?))",
+        "OR (status = 'published' AND updated_utc <= ?))",
+        "ORDER BY updated_utc ASC LIMIT ?"
+      ].join(" "))
+      .bind(now.toISOString(), terminalCutoffUtc, abandonedReviewCutoffUtc, publishedCutoffUtc, Math.max(1, Math.min(limit, 100)))
+      .all<BatchRow>();
+
+    let cleaned = 0;
+    for (const row of rows.results) {
+      const candidate = JSON.parse(row.payload_json) as UploadBatchRecord;
+      const release = await this.acquireBatchLock(candidate.id);
+      try {
+        const batch = await this.getBatch(candidate.id);
+        if (!batch || !shouldDeleteQuarantineBatch(batch, now)) continue;
+        const uploading = await this.db.prepare(
+          "SELECT id FROM upload_objects WHERE batch_id = ? AND uploaded_bytes = -1 LIMIT 1"
+        ).bind(batch.id).first<{ id: string }>();
+        if (uploading) continue;
+        const objects = await this.db
+          .prepare("SELECT r2_key FROM upload_objects WHERE batch_id = ?")
+          .bind(batch.id)
+          .all<{ r2_key: string }>();
+        for (const object of objects.results) {
+          await this.quarantineBucket.delete(object.r2_key);
+        }
+        for (const submission of batch.submissions) {
+          for (const capture of submission.captures) {
+            if (capture.optimized?.r2Key) await this.quarantineBucket.delete(capture.optimized.r2Key);
+          }
+        }
+        if (batch.submissions.some(submission => submission.status === "published")) {
+          const staleCutoff = now.getTime() - 7 * 24 * 60 * 60 * 1000;
+          const withdrawnIds: string[] = [];
+          for (const submission of batch.submissions) {
+            const queuedAt = Date.parse(submission.queuedUtc ?? batch.createdUtc);
+            if (["queued", "reviewing", "moderating"].includes(submission.status) &&
+                Number.isFinite(queuedAt) && queuedAt <= staleCutoff) {
+              submission.status = "withdrawn";
+              delete submission.reviewClaimedUtc;
+              delete submission.moderationDeliveredUtc;
+              withdrawnIds.push(submission.id);
+            } else if (submission.status === "awaiting_attribution" && Date.parse(batch.expiresUtc) <= now.getTime()) {
+              submission.status = "withdrawn";
+              delete submission.reviewClaimedUtc;
+              delete submission.moderationDeliveredUtc;
+              withdrawnIds.push(submission.id);
+            }
+          }
+          batch.status = deriveBatchStatusForStore(batch);
+          batch.updatedUtc = now.toISOString();
+          await this.db.batch([
+            this.db.prepare("DELETE FROM upload_objects WHERE batch_id = ?").bind(batch.id),
+            ...withdrawnIds.map(id => this.db.prepare([
+              "UPDATE upload_submissions SET status = 'withdrawn', updated_utc = ?, moderation_delivered_utc = NULL",
+              "WHERE id = ? AND batch_id = ?"
+            ].join(" ")).bind(batch.updatedUtc, id, batch.id)),
+            this.db.prepare("UPDATE upload_batches SET status = ?, updated_utc = ?, payload_json = ? WHERE id = ?")
+              .bind(batch.status, batch.updatedUtc, JSON.stringify(batch), batch.id)
+          ]);
+        } else {
+          await this.db.prepare("DELETE FROM upload_batches WHERE id = ?").bind(batch.id).run();
+        }
+        cleaned += 1;
+      } finally {
+        await release();
+      }
+    }
+
+    await this.db.prepare("DELETE FROM upload_quota_reservations WHERE expires_utc <= ?").bind(now.toISOString()).run();
+    await this.db.prepare("DELETE FROM upload_bot_nonces WHERE expires_utc <= ?").bind(now.toISOString()).run();
+    await this.db
+      .prepare("DELETE FROM upload_attribution_deliveries WHERE delivered_utc <= ?")
+      .bind(new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString())
+      .run();
+    return cleaned;
+  }
+
+  async recordAttributionDelivery(submissionId: string, now: Date): Promise<void> {
+    const found = await this.findSubmission(submissionId);
+    if (found?.submission.attribution.mode !== "discord") {
+      return;
+    }
+    await this.db
+      .prepare([
+        "INSERT INTO upload_attribution_deliveries (discord_user_id, submission_id, delivered_utc)",
+        "VALUES (?, ?, ?)",
+        "ON CONFLICT(discord_user_id) DO UPDATE SET",
+        "submission_id = excluded.submission_id, delivered_utc = excluded.delivered_utc"
+      ].join(" "))
+      .bind(found.submission.attribution.discordUserId, submissionId, now.toISOString())
+      .run();
   }
 
   async rememberBotNonce(nonce: string, expiresUtc: string): Promise<boolean> {
@@ -706,8 +1045,76 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       .run();
   }
 
-  private async acquireCatalogLock(): Promise<() => Promise<void>> {
+  private async acquireCatalogLock(): Promise<DurableLock> {
     const lockId = "catalog-index";
+    const ownerToken = randomUUID();
+    const leaseMs = 30_000;
+    const renewEveryMs = 10_000;
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const attemptNow = new Date();
+      const lockedUntilUtc = new Date(attemptNow.getTime() + leaseMs).toISOString();
+      const acquired = await this.db
+        .prepare([
+          "INSERT INTO upload_catalog_locks (id, locked_until_utc, owner_token)",
+          "VALUES (?, ?, ?)",
+          "ON CONFLICT(id) DO UPDATE SET",
+          "locked_until_utc = excluded.locked_until_utc, owner_token = excluded.owner_token",
+          "WHERE upload_catalog_locks.locked_until_utc <= ?"
+        ].join(" "))
+        .bind(lockId, lockedUntilUtc, ownerToken, attemptNow.toISOString())
+        .run();
+      if ((acquired.meta?.changes ?? 0) !== 1) {
+        await sleep(100);
+        continue;
+      }
+
+      let renewalFailure: unknown;
+      let renewal = Promise.resolve();
+      const renew = async (): Promise<void> => {
+        const now = new Date();
+        const renewed = await this.db
+          .prepare([
+            "UPDATE upload_catalog_locks SET locked_until_utc = ?",
+            "WHERE id = ? AND owner_token = ? AND locked_until_utc > ?"
+          ].join(" "))
+          .bind(new Date(now.getTime() + leaseMs).toISOString(), lockId, ownerToken, now.toISOString())
+          .run();
+        if ((renewed.meta?.changes ?? 0) !== 1) {
+          throw new Error(`Lost durable lock ${lockId}.`);
+        }
+      };
+      const heartbeat = setInterval(() => {
+        renewal = renewal.then(renew).catch(error => {
+          renewalFailure = error;
+        });
+      }, renewEveryMs);
+
+      return {
+        assertOwned: async () => {
+          await renewal;
+          if (renewalFailure) throw renewalFailure;
+          await renew();
+        },
+        release: async () => {
+          clearInterval(heartbeat);
+          await renewal;
+          await this.db
+            .prepare("DELETE FROM upload_catalog_locks WHERE id = ? AND owner_token = ?")
+            .bind(lockId, ownerToken)
+            .run();
+        }
+      };
+    }
+
+    throw new Error(`Timed out waiting for durable lock ${lockId}.`);
+  }
+
+  private async acquireBatchLock(batchId: string): Promise<() => Promise<void>> {
+    return this.acquireNamedLock(`batch:${batchId}`);
+  }
+
+  private async acquireNamedLock(lockId: string): Promise<() => Promise<void>> {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const attemptNow = new Date();
       const lockedUntilUtc = new Date(attemptNow.getTime() + 30_000).toISOString();
@@ -733,7 +1140,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       await sleep(100);
     }
 
-    throw new Error("Timed out waiting for catalog index lock.");
+    throw new Error(`Timed out waiting for durable lock ${lockId}.`);
   }
 
   private async fillCatalogMapUrl(entry: CatalogPack): Promise<CatalogPack> {
@@ -754,7 +1161,8 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
     const text = Buffer.from(await existing.arrayBuffer()).toString("utf8");
     const parsed = JSON.parse(text) as CatalogIndex;
-    if (parsed.format !== "akron-community-pack-index-v1" || parsed.version !== 1 || !Array.isArray(parsed.packs)) {
+    if (parsed.format !== "akron-community-pack-index-v2" || parsed.version !== 2 || !Array.isArray(parsed.packs) ||
+        parsed.packs.some(pack => !/^[a-f0-9]{64}$/.test(pack.sha256) || !Number.isSafeInteger(pack.sizeBytes) || pack.sizeBytes <= 0)) {
       throw new Error("Existing catalog/index.json has an unsupported format.");
     }
     return parsed;
@@ -768,6 +1176,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     let smallestBytes = Number.POSITIVE_INFINITY;
     for (const attempt of catalogCaptureTransformAttempts) {
       const response = await fetch(sourceUrl, {
+        signal: AbortSignal.timeout(15_000),
         cf: {
           image: {
             fit: "scale-down",
@@ -782,11 +1191,11 @@ export class CloudflareUploadStore implements UploadWorkerStore {
         throw new Error("Cloudflare image transform failed with HTTP " + response.status + ".");
       }
 
-      const bytes = Buffer.from(await response.arrayBuffer());
-      smallestBytes = Math.min(smallestBytes, bytes.length);
-      if (bytes.length > catalogImageMaxBytes) {
+      const bytes = await readResponseWithinLimit(response, catalogImageMaxBytes);
+      if (!bytes) {
         continue;
       }
+      smallestBytes = Math.min(smallestBytes, bytes.length);
 
       return {
         ...capture,
@@ -864,6 +1273,35 @@ async function bodyWithKnownLength(
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function readResponseWithinLimit(response: Response, maxBytes: number): Promise<Buffer | undefined> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  if (!response.body) {
+    return Buffer.alloc(0);
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      bytes += next.value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel();
+        return undefined;
+      }
+      chunks.push(Buffer.from(next.value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
 }
 
 function buildUploadObjectKey(record: UploadObjectRecord): string {

@@ -71,6 +71,16 @@ export const auditLogs = sqliteTable("audit_logs", {
   createdUtc: text("created_utc").notNull()
 });
 
+export const uploadDiscordPublications = sqliteTable("upload_discord_publications", {
+  submissionId: text("submission_id").primaryKey(),
+  guildId: text("guild_id").notNull(),
+  channelId: text("channel_id").notNull(),
+  threadId: text("thread_id").notNull().default(""),
+  messageId: text("message_id").notNull().default(""),
+  status: text("status").notNull(),
+  updatedUtc: text("updated_utc").notNull()
+});
+
 export const githubLinks = sqliteTable(
   "github_links",
   {

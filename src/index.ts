@@ -61,7 +61,7 @@ client.on(Events.InteractionCreate, async interaction => {
       return;
     }
 
-    if (interaction.isButton() && await handleUploadModerationInteraction({ interaction, config })) {
+    if (interaction.isButton() && await handleUploadModerationInteraction({ interaction, config, db: database.db })) {
       return;
     }
 

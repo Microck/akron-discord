@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import {
   signBotRequest,
+  type CatalogPack,
   type CatalogPublication,
   type DeletedUploadSubmission,
   type UploadAiReview,
@@ -88,6 +89,7 @@ export type UploadWorkerClient = {
   recordDiscordMessage(input: UploadWorkerDiscordMessageInput): Promise<void>;
   deleteSubmission(submissionId: string, reason?: string): Promise<DeletedUploadSubmission>;
   deleteSubmissionByDiscordThread(threadId: string, reason?: string): Promise<DeletedUploadSubmission>;
+  publishCatalogEntry(entry: CatalogPack): Promise<void>;
 };
 
 export function hasUploadWorkerConfig(config: AppConfig): boolean {
@@ -163,6 +165,9 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
         throw new Error("Upload Worker delete response did not include deletion metadata.");
       }
       return body.deleted;
+    },
+    async publishCatalogEntry(entry: CatalogPack): Promise<void> {
+      await signedJson(fetchImpl, baseUrl, secret, "/bot/catalog/entries", { entry });
     }
   };
 }

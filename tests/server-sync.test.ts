@@ -62,6 +62,19 @@ describe("server sync permission policy", () => {
     expect(hasFlag(tester.allow, PermissionsBitField.Flags.ViewChannel)).toBe(true);
     expect(hasFlag(tester.allow, PermissionsBitField.Flags.SendMessages)).toBe(true);
   });
+
+  it("keeps playtest announcements read-only for Tester", () => {
+    const tester = overwriteFor("tester-role", buildPermissionOverwrites("guild", roles, channelSpec({
+      name: "announcements",
+      category: "playtesters",
+      visibility: "tester",
+      type: ChannelType.GuildText
+    })));
+
+  expect(hasFlag(tester.allow, PermissionsBitField.Flags.ViewChannel)).toBe(true);
+  expect(hasFlag(tester.deny, PermissionsBitField.Flags.SendMessages)).toBe(true);
+  expect(hasFlag(tester.deny, PermissionsBitField.Flags.AttachFiles)).toBe(true);
+});
 });
 
 function channelSpec(overrides: Partial<ChannelSpec>): ChannelSpec {

@@ -1,4 +1,4 @@
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -82,12 +82,16 @@ export async function handlePlaytestingMessage(input: {
   config: AppConfig;
   db: AkronDatabase;
 }): Promise<void> {
-  const { message, db } = input;
+  const { message, config, db } = input;
   if (!message.guild || message.author.bot) {
     return;
   }
 
   if (isPlaytestReleaseMessage(message)) {
+    const member = message.member ?? await message.guild.members.fetch(message.author.id).catch(() => null);
+    if (!member || !isModerator(member, config)) {
+      return;
+    }
     await recordPlaytestRelease(message, db);
     return;
   }
@@ -167,6 +171,16 @@ async function handleApplicationModal(interaction: ModalSubmitInteraction, db: A
     return;
   }
 
+  await recoverPlaytesterApplicationReview({
+    db,
+    userId: interaction.user.id,
+    threadExists: async threadId => Boolean(await reviewForum.threads.fetch(threadId).catch(() => null)),
+    findThreadId: async applicationId => {
+      const active = await reviewForum.threads.fetchActive().catch(() => null);
+      return active?.threads.find(thread => thread.name.startsWith(`Playtester application ${applicationId} -`))?.id;
+    }
+  });
+
   const openApplication = await db.query.playtesterApplications.findFirst({
     where: and(eq(playtesterApplications.userId, interaction.user.id), eq(playtesterApplications.status, "open"))
   });
@@ -175,41 +189,91 @@ async function handleApplicationModal(interaction: ModalSubmitInteraction, db: A
     return;
   }
 
-  const now = utcNow();
-  const applicationRows = await db
-    .insert(playtesterApplications)
-    .values({
-      userId: interaction.user.id,
-      username: interaction.user.tag,
-      status: "open",
-      why: interaction.fields.getTextInputValue(whyInputId).trim(),
-      contribution: interaction.fields.getTextInputValue(contributionInputId).trim(),
-      availability: interaction.fields.getTextInputValue(availabilityInputId).trim(),
-      createdUtc: now
-    })
-    .returning({ id: playtesterApplications.id });
-  const applicationId = applicationRows[0]?.id;
-  if (!applicationId) {
-    throw new Error("Playtester application insert did not return an id.");
+  let applicationId: number;
+  try {
+    applicationId = await createPlaytesterApplicationReview({
+      db,
+      application: {
+        userId: interaction.user.id,
+        username: interaction.user.tag,
+        why: interaction.fields.getTextInputValue(whyInputId).trim(),
+        contribution: interaction.fields.getTextInputValue(contributionInputId).trim(),
+        availability: interaction.fields.getTextInputValue(availabilityInputId).trim()
+      },
+      createThread: async id => await reviewForum.threads.create({
+        name: `Playtester application ${id} - ${interaction.user.username}`,
+        message: {
+          embeds: [buildApplicationEmbed(id, interaction)],
+          components: [buildReviewButtons(id)]
+        },
+        appliedTags: tagId(reviewForum, "Open") ? [tagId(reviewForum, "Open") as string] : [],
+        reason: "Akron playtester application"
+      })
+    });
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      await interaction.editReply("You already have an open playtester application.");
+      return;
+    }
+    throw error;
   }
 
-  const openTagId = tagId(reviewForum, "Open");
-  const thread = await reviewForum.threads.create({
-    name: `Playtester application - ${interaction.user.username}`,
-    message: {
-      embeds: [buildApplicationEmbed(applicationId, interaction)],
-      components: [buildReviewButtons(applicationId)]
-    },
-    appliedTags: openTagId ? [openTagId] : [],
-    reason: "Akron playtester application"
-  });
-
-  await db
-    .update(playtesterApplications)
-    .set({ reviewThreadId: thread.id })
-    .where(eq(playtesterApplications.id, applicationId));
-
   await interaction.editReply("Your playtester application was sent to staff.");
+}
+
+export async function createPlaytesterApplicationReview(input: {
+  db: AkronDatabase;
+  application: Pick<typeof playtesterApplications.$inferInsert, "userId" | "username" | "why" | "contribution" | "availability">;
+  createThread: (applicationId: number) => Promise<{ id: string; delete(reason?: string): Promise<unknown> }>;
+}): Promise<number> {
+  const rows = await input.db.insert(playtesterApplications).values({
+    ...input.application,
+    status: "creating_thread",
+    createdUtc: utcNow()
+  }).returning({ id: playtesterApplications.id });
+  const applicationId = rows[0]?.id;
+  if (!applicationId) throw new Error("Playtester application insert did not return an id.");
+
+  let thread: Awaited<ReturnType<typeof input.createThread>> | undefined;
+  let threadIdPersisted = false;
+  try {
+    thread = await input.createThread(applicationId);
+    await input.db.update(playtesterApplications)
+      .set({ reviewThreadId: thread.id })
+      .where(and(eq(playtesterApplications.id, applicationId), eq(playtesterApplications.status, "creating_thread")));
+    threadIdPersisted = true;
+    await input.db.update(playtesterApplications)
+      .set({ status: "open" })
+      .where(and(eq(playtesterApplications.id, applicationId), eq(playtesterApplications.status, "creating_thread")));
+    return applicationId;
+  } catch (error) {
+    if (!threadIdPersisted) {
+      if (thread) await thread.delete("Akron playtester application rollback").catch(() => undefined);
+      await input.db.delete(playtesterApplications).where(eq(playtesterApplications.id, applicationId)).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+export async function recoverPlaytesterApplicationReview(input: {
+  db: AkronDatabase;
+  userId: string;
+  threadExists: (threadId: string) => Promise<boolean>;
+  findThreadId?: (applicationId: number) => Promise<string | undefined>;
+}): Promise<"recovered" | "removed" | "none"> {
+  const application = await input.db.query.playtesterApplications.findFirst({
+    where: and(eq(playtesterApplications.userId, input.userId), eq(playtesterApplications.status, "creating_thread"))
+  });
+  if (!application) return "none";
+  const reviewThreadId = application.reviewThreadId || await input.findThreadId?.(application.id) || "";
+  if (reviewThreadId && await input.threadExists(reviewThreadId)) {
+    await input.db.update(playtesterApplications).set({ status: "open", reviewThreadId })
+      .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "creating_thread")));
+    return "recovered";
+  }
+  await input.db.delete(playtesterApplications)
+    .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "creating_thread")));
+  return "removed";
 }
 
 async function handleAcceptButton(
@@ -223,9 +287,26 @@ async function handleAcceptButton(
   }
   await interaction.deferReply({ ephemeral: true });
 
-  const application = await db.query.playtesterApplications.findFirst({
+  let application = await db.query.playtesterApplications.findFirst({
     where: eq(playtesterApplications.id, applicationId)
   });
+  if (application && await reconcileFinalApplicationDecision(application, interaction)) {
+    await interaction.editReply("Application was already accepted. The review thread is now reconciled.");
+    return;
+  }
+  if (application?.status === "accepting" && interaction.guild) {
+    const role = await findRole(interaction.guild, "Tester");
+    const applicant = await interaction.guild.members.fetch(application.userId).catch(() => null);
+    if (role && applicant?.roles.cache.has(role.id)) {
+      await persistAcceptedPlaytester(db, application, interaction.user.id, utcNow());
+      await reconcileApplicationThread(interaction, "Accepted", `<@${application.userId}> was accepted and received Tester.`);
+      await interaction.editReply("Recovered the prior acceptance and confirmed Tester tracking.");
+      return;
+    }
+    await db.update(playtesterApplications).set({ status: "open", decidedBy: "" })
+      .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "accepting")));
+    application = { ...application, status: "open", decidedBy: "" };
+  }
   if (!application || application.status !== "open") {
     await interaction.editReply("This application is no longer open.");
     return;
@@ -239,33 +320,76 @@ async function handleAcceptButton(
     return;
   }
 
-  await member.roles.add(testerRole, "Akron playtester application accepted");
   const now = utcNow();
-  await db
-    .insert(trackedPlaytesters)
-    .values({
-      userId: application.userId,
-      acceptedApplicationId: application.id,
-      acceptedUtc: now,
-      missedReleases: 0,
-      active: 1
-    })
-    .onConflictDoUpdate({
-      target: trackedPlaytesters.userId,
-      set: {
-        acceptedApplicationId: application.id,
-        acceptedUtc: now,
-        missedReleases: 0,
-        active: 1
-      }
-    });
-  await db
+  const reserved = await db
     .update(playtesterApplications)
-    .set({ status: "accepted", decidedUtc: now, decidedBy: interaction.user.id })
-    .where(eq(playtesterApplications.id, application.id));
+    .set({ status: "accepting", decidedBy: interaction.user.id })
+    .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "open")))
+    .returning({ id: playtesterApplications.id });
+  if (reserved.length !== 1) {
+    await interaction.editReply("This application is no longer open.");
+    return;
+  }
 
-  await finishApplicationThread(interaction, "Accepted", `<@${application.userId}> was accepted and received Tester.`);
+  let roleAdded = false;
+  try {
+    await member.roles.add(testerRole, "Akron playtester application accepted");
+    roleAdded = true;
+    await persistAcceptedPlaytester(db, application, interaction.user.id, now);
+  } catch (error) {
+    let rollbackError: unknown;
+    const refreshedMember = roleAdded
+      ? member
+      : await guild.members.fetch(application.userId).catch(() => null);
+    const roleIsPresent = roleAdded || Boolean(refreshedMember?.roles.cache.has(testerRole.id));
+    if (roleIsPresent && refreshedMember) {
+      try {
+        await refreshedMember.roles.remove(testerRole, "Akron playtester acceptance rollback");
+      } catch (caught) {
+        rollbackError = caught;
+      }
+    }
+    if (rollbackError) {
+      // A Tester role without its tracker would silently bypass inactivity
+      // enforcement. If Discord rollback fails, make the granted role the
+      // canonical result and surface the reconciliation failure to staff.
+      await persistAcceptedPlaytester(db, application, interaction.user.id, now);
+      throw new AggregateError([error, rollbackError], "Acceptance failed and role rollback failed; reconciled as accepted.");
+    }
+    await db.delete(trackedPlaytesters).where(and(
+      eq(trackedPlaytesters.userId, application.userId),
+      eq(trackedPlaytesters.acceptedApplicationId, application.id)
+    ));
+    await db
+      .update(playtesterApplications)
+      .set({ status: "open", decidedBy: "" })
+      .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "accepting")));
+    throw error;
+  }
+
+  await reconcileApplicationThread(interaction, "Accepted", `<@${application.userId}> was accepted and received Tester.`);
   await interaction.editReply("Application accepted and Tester role granted.");
+}
+
+async function persistAcceptedPlaytester(
+  db: AkronDatabase,
+  application: typeof playtesterApplications.$inferSelect,
+  decidedBy: string,
+  acceptedUtc: string
+): Promise<void> {
+  await db.insert(trackedPlaytesters).values({
+    userId: application.userId,
+    acceptedApplicationId: application.id,
+    acceptedUtc,
+    missedReleases: 0,
+    active: 1
+  }).onConflictDoUpdate({
+    target: trackedPlaytesters.userId,
+    set: { acceptedApplicationId: application.id, acceptedUtc, missedReleases: 0, active: 1 }
+  });
+  await db.update(playtesterApplications)
+    .set({ status: "accepted", decidedUtc: acceptedUtc, decidedBy })
+    .where(eq(playtesterApplications.id, application.id));
 }
 
 async function handleDenyButton(interaction: ButtonInteraction, config: AppConfig, applicationId: number): Promise<void> {
@@ -289,6 +413,17 @@ async function handleDenyModal(
   const application = await db.query.playtesterApplications.findFirst({
     where: eq(playtesterApplications.id, applicationId)
   });
+  if (application && await reconcileFinalApplicationDecision(application, interaction)) {
+    await interaction.editReply("Application was already denied. The review thread is now reconciled.");
+    return;
+  }
+  if (application?.status === "denying") {
+    await db.update(playtesterApplications).set({ status: "denied", decidedUtc: utcNow() })
+      .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "denying")));
+    await reconcileApplicationThread(interaction, "Denied", `<@${application.userId}> was denied by <@${application.decidedBy}>.\nReason: ${application.denialReason}`);
+    await interaction.editReply("Recovered the prior denial decision.");
+    return;
+  }
   if (!application || application.status !== "open") {
     await interaction.editReply("This application is no longer open.");
     return;
@@ -296,15 +431,24 @@ async function handleDenyModal(
 
   const reason = interaction.fields.getTextInputValue(denialReasonInputId).trim();
   const now = utcNow();
-  await db
+  const reserved = await db
     .update(playtesterApplications)
     .set({
-      status: "denied",
+      status: "denying",
       denialReason: reason,
-      decidedUtc: now,
       decidedBy: interaction.user.id
     })
-    .where(eq(playtesterApplications.id, application.id));
+    .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "open")))
+    .returning({ id: playtesterApplications.id });
+  if (reserved.length !== 1) {
+    await interaction.editReply("This application is no longer open.");
+    return;
+  }
+
+  await db
+    .update(playtesterApplications)
+    .set({ status: "denied", decidedUtc: now })
+    .where(and(eq(playtesterApplications.id, application.id), eq(playtesterApplications.status, "denying")));
 
   const applicant = await interaction.client.users.fetch(application.userId).catch(() => null);
   const dmDelivered = await applicant?.send([
@@ -315,7 +459,7 @@ async function handleDenyModal(
     "You can reapply after 14 days."
   ].join("\n")).then(() => true).catch(() => false) ?? false;
 
-  await finishApplicationThread(
+  await reconcileApplicationThread(
     interaction,
     "Denied",
     `<@${application.userId}> was denied by <@${interaction.user.id}>.\nDM delivery: ${dmDelivered ? "sent" : "failed"}.\nReason: ${reason}`
@@ -426,28 +570,16 @@ async function activityForRelease(db: AkronDatabase, userId: string, releaseId: 
 }
 
 async function incrementActivity(db: AkronDatabase, userId: string, releaseId: number, kind: "chat" | "forum"): Promise<void> {
-  const existing = await db.query.playtestActivity.findFirst({
-    where: and(
-      eq(playtestActivity.userId, userId),
-      eq(playtestActivity.releaseId, releaseId),
-      eq(playtestActivity.kind, kind)
-    )
-  });
-  if (existing) {
-    await db
-      .update(playtestActivity)
-      .set({ count: existing.count + 1, updatedUtc: utcNow() })
-      .where(eq(playtestActivity.id, existing.id));
-    return;
-  }
-
-  await db.insert(playtestActivity).values({
-    userId,
-    releaseId,
-    kind,
-    count: 1,
-    updatedUtc: utcNow()
-  });
+  await db
+    .insert(playtestActivity)
+    .values({ userId, releaseId, kind, count: 1, updatedUtc: utcNow() })
+    .onConflictDoUpdate({
+      target: [playtestActivity.userId, playtestActivity.releaseId, playtestActivity.kind],
+      set: {
+        count: sql`${playtestActivity.count} + 1`,
+        updatedUtc: utcNow()
+      }
+    });
 }
 
 function buildApplicationModal(): ModalBuilder {
@@ -508,7 +640,7 @@ function buildReviewButtons(applicationId: number): ActionRowBuilder<ButtonBuild
   );
 }
 
-async function finishApplicationThread(
+export async function reconcileApplicationThread(
   interaction: ButtonInteraction | ModalSubmitInteraction,
   tagName: "Accepted" | "Denied",
   message: string
@@ -530,6 +662,29 @@ async function finishApplicationThread(
     await thread.setAppliedTags(next, "Akron playtester application reviewed");
   }
   await thread.setArchived(true, "Akron playtester application reviewed");
+}
+
+export async function reconcileFinalApplicationDecision(
+  application: Pick<typeof playtesterApplications.$inferSelect, "status" | "userId" | "decidedBy" | "denialReason">,
+  interaction: ButtonInteraction | ModalSubmitInteraction
+): Promise<boolean> {
+  if (application.status === "accepted") {
+    await reconcileApplicationThread(
+      interaction,
+      "Accepted",
+      `<@${application.userId}> was accepted and received Tester.`
+    );
+    return true;
+  }
+  if (application.status === "denied") {
+    await reconcileApplicationThread(
+      interaction,
+      "Denied",
+      `<@${application.userId}> was denied by <@${application.decidedBy}>.\nReason: ${application.denialReason}`
+    );
+    return true;
+  }
+  return false;
 }
 
 async function requireStaffButton(interaction: ButtonInteraction, config: AppConfig): Promise<boolean> {
@@ -618,6 +773,10 @@ async function memberHasRoleNamed(member: GuildMember | null, name: string): Pro
     return false;
   }
   return member.roles.cache.some(role => role.name === name);
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return /constraint|unique/i.test(error instanceof Error ? error.message : String(error));
 }
 
 function tagId(forum: ForumChannel, name: string): string | undefined {

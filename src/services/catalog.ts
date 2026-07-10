@@ -1,13 +1,15 @@
 import type { S3Client } from "@aws-sdk/client-s3";
+import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
 import { catalogEntries } from "../db/schema.js";
 import { sectionTag } from "../submissions/sections.js";
 import type { AkronProfileSection } from "../submissions/types.js";
-import { formatCatalogBackupTimestamp, utcNow } from "../time.js";
+import { utcNow } from "../time.js";
 import { slugMapSid } from "./map-resolver.js";
-import { getR2Text, putR2Object } from "./r2.js";
+import { deleteR2Object, putR2Object, r2ObjectExists } from "./r2.js";
+import { createUploadWorkerClient } from "./upload-worker-client.js";
 
 export type CatalogPack = {
   id: string;
@@ -20,14 +22,17 @@ export type CatalogPack = {
   authorName: string;
   authorAvatarUrl: string;
   imageUrl: string;
+  images: Array<{ url: string; roomName: string }>;
   downloadCount: number;
   updatedUtc: string;
   tags: string[];
+  sha256: string;
+  sizeBytes: number;
 };
 
 export type CatalogIndex = {
-  format: "akron-community-pack-index-v1";
-  version: 1;
+  format: "akron-community-pack-index-v2";
+  version: 2;
   packs: CatalogPack[];
 };
 
@@ -54,37 +59,56 @@ export type PublishCatalogResult = {
   imageKey: string;
 };
 
-const catalogIndexKey = "catalog/index.json";
+type CatalogPublishDependencies = {
+  publishMetadata?: (entry: CatalogPack) => Promise<void>;
+  reportCacheError?: (error: unknown) => void;
+  reportCleanupError?: (error: unknown) => void;
+};
 
 export async function publishCatalogEntry(
   config: AppConfig,
   db: AkronDatabase,
   client: S3Client,
   input: PublishCatalogInput,
-  now = new Date()
+  now = new Date(),
+  dependencies: CatalogPublishDependencies = {}
 ): Promise<PublishCatalogResult> {
   const existing = await db.query.catalogEntries.findFirst({
     where: eq(catalogEntries.discordThreadId, input.discordThreadId)
   });
   const packId = existing?.id ?? buildPackId(input);
   const mapSlug = slugMapSid(input.mapSid);
-  const packKey = `packs/${mapSlug}/${packId}.akr`;
-  const imageKey = input.image ? `captures/${mapSlug}/${packId}.webp` : "";
+  const sha256 = createHash("sha256").update(input.akrBytes).digest("hex");
+  // Immutable content-addressed keys make rollback safe even when a forum
+  // thread republishes an existing catalog entry with new bytes.
+  const revision = sha256.slice(0, 16);
+  const packKey = `packs/${mapSlug}/${packId}-${revision}.akr`;
+  const imageKey = input.image ? `captures/${mapSlug}/${packId}-${revision}.webp` : "";
   const updatedUtc = now.toISOString();
-
-  const downloadUrl = await putR2Object(config, client, {
-    key: packKey,
-    body: input.akrBytes,
-    contentType: "application/octet-stream"
-  });
-
-  const imageUrl = input.image
-    ? await putR2Object(config, client, {
+  const createdKeys: string[] = [];
+  let downloadUrl = "";
+  let imageUrl = "";
+  try {
+    const packAlreadyExists = await r2ObjectExists(config, client, packKey);
+    downloadUrl = await putR2Object(config, client, {
+      key: packKey,
+      body: input.akrBytes,
+      contentType: "application/octet-stream"
+    });
+    if (!packAlreadyExists) createdKeys.push(packKey);
+    if (input.image) {
+      const imageAlreadyExists = await r2ObjectExists(config, client, imageKey);
+      imageUrl = await putR2Object(config, client, {
         key: imageKey,
         body: input.image.bytes,
         contentType: input.image.contentType
-      })
-    : "";
+      });
+      if (!imageAlreadyExists) createdKeys.push(imageKey);
+    }
+  } catch (error) {
+    await Promise.all(createdKeys.map(key => deleteR2Object(config, client, key).catch(() => undefined)));
+    throw error;
+  }
 
   const entry: CatalogPack = {
     id: packId,
@@ -97,48 +121,26 @@ export async function publishCatalogEntry(
     authorName: input.authorName,
     authorAvatarUrl: input.authorAvatarUrl,
     imageUrl,
+    images: imageUrl ? [{ url: imageUrl, roomName: "" }] : [],
     downloadCount: existing?.downloadCount ?? 0,
     updatedUtc,
-    tags: [sectionTag(input.section), mapSlug].filter(Boolean)
+    tags: [sectionTag(input.section), mapSlug].filter(Boolean),
+    sha256,
+    sizeBytes: input.akrBytes.length
   };
-
-  const previousText = await getR2Text(config, client, catalogIndexKey);
-  if (previousText) {
-    await putR2Object(config, client, {
-      key: `catalog/backups/index-${formatCatalogBackupTimestamp(now)}.json`,
-      body: previousText,
-      contentType: "application/json"
-    });
+  try {
+    await (dependencies.publishMetadata ?? createUploadWorkerClient(config).publishCatalogEntry)(entry);
+  } catch (error) {
+    await Promise.all(createdKeys.map(key => deleteR2Object(config, client, key).catch(() => undefined)));
+    throw error;
   }
 
-  const merged = mergeCatalogIndex(previousText, entry);
-  await putR2Object(config, client, {
-    key: catalogIndexKey,
-    body: JSON.stringify(merged, null, 2) + "\n",
-    contentType: "application/json"
-  });
-
-  await db
-    .insert(catalogEntries)
-    .values({
-      id: entry.id,
-      discordThreadId: input.discordThreadId,
-      title: entry.title,
-      description: entry.description,
-      section: entry.section,
-      mapSid: entry.mapSid,
-      mapUrl: entry.mapUrl,
-      downloadUrl: entry.downloadUrl,
-      authorName: entry.authorName,
-      authorAvatarUrl: entry.authorAvatarUrl,
-      imageUrl: entry.imageUrl,
-      downloadCount: entry.downloadCount,
-      updatedUtc: utcNow(),
-      tagsJson: JSON.stringify(entry.tags)
-    })
-    .onConflictDoUpdate({
-      target: catalogEntries.discordThreadId,
-      set: {
+  try {
+    await db
+      .insert(catalogEntries)
+      .values({
+        id: entry.id,
+        discordThreadId: input.discordThreadId,
         title: entry.title,
         description: entry.description,
         section: entry.section,
@@ -151,8 +153,38 @@ export async function publishCatalogEntry(
         downloadCount: entry.downloadCount,
         updatedUtc: utcNow(),
         tagsJson: JSON.stringify(entry.tags)
-      }
-    });
+      })
+      .onConflictDoUpdate({
+        target: catalogEntries.discordThreadId,
+        set: {
+          title: entry.title,
+          description: entry.description,
+          section: entry.section,
+          mapSid: entry.mapSid,
+          mapUrl: entry.mapUrl,
+          downloadUrl: entry.downloadUrl,
+          authorName: entry.authorName,
+          authorAvatarUrl: entry.authorAvatarUrl,
+          imageUrl: entry.imageUrl,
+          downloadCount: entry.downloadCount,
+          updatedUtc: utcNow(),
+          tagsJson: JSON.stringify(entry.tags)
+        }
+      });
+  } catch (error) {
+    // The Worker index is the publication source of truth. A local cache write
+    // cannot turn an already durable publication into a retryable failure.
+    (dependencies.reportCacheError ?? defaultCatalogErrorReporter)(error);
+  }
+
+  const currentKeys = new Set([packKey, ...(imageKey ? [imageKey] : [])]);
+  const supersededKeys = existing ? catalogObjectKeys(existing).filter(key => !currentKeys.has(key)) : [];
+  const cleanup = await Promise.allSettled(supersededKeys.map(key => deleteR2Object(config, client, key)));
+  for (const failure of cleanup) {
+    if (failure.status === "rejected") {
+      (dependencies.reportCleanupError ?? defaultCatalogErrorReporter)(failure.reason);
+    }
+  }
 
   return { entry, packKey, imageKey };
 }
@@ -162,16 +194,19 @@ export function mergeCatalogIndex(previousText: string | null, entry: CatalogPac
   const packs = previous.packs.filter(pack => pack.id !== entry.id);
   packs.push(entry);
   packs.sort((left, right) => left.title.localeCompare(right.title));
-  return { format: "akron-community-pack-index-v1", version: 1, packs };
+  return { format: "akron-community-pack-index-v2", version: 2, packs };
 }
 
 function parseCatalogIndex(text: string | null): CatalogIndex {
   if (!text) {
-    return { format: "akron-community-pack-index-v1", version: 1, packs: [] };
+    return { format: "akron-community-pack-index-v2", version: 2, packs: [] };
   }
 
   const parsed = JSON.parse(text) as Partial<CatalogIndex>;
-  if (parsed.format !== "akron-community-pack-index-v1" || parsed.version !== 1 || !Array.isArray(parsed.packs)) {
+  if (parsed.format !== "akron-community-pack-index-v2" || parsed.version !== 2 || !Array.isArray(parsed.packs) ||
+      parsed.packs.some(pack => !pack || typeof pack !== "object" ||
+        !/^[a-f0-9]{64}$/.test((pack as Partial<CatalogPack>).sha256 ?? "") ||
+        !Number.isSafeInteger((pack as Partial<CatalogPack>).sizeBytes) || (pack as Partial<CatalogPack>).sizeBytes! <= 0)) {
     throw new Error("Existing catalog/index.json has an unsupported format.");
   }
 
@@ -179,10 +214,45 @@ function parseCatalogIndex(text: string | null): CatalogIndex {
 }
 
 function buildPackId(input: PublishCatalogInput): string {
-  const base = `${input.title}-${input.section}-${input.discordThreadId}`;
+  const base = `${input.section}-${input.discordThreadId}`;
   return base
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 96);
+}
+
+function catalogObjectKeys(entry: typeof catalogEntries.$inferSelect): string[] {
+  const mapSlug = slugMapSid(entry.mapSid);
+  const keys: string[] = [];
+  const packName = safeLastPathSegment(entry.downloadUrl);
+  if (packName?.startsWith(`${entry.id}-`) && packName.endsWith(".akr")) {
+    keys.push(`packs/${mapSlug}/${packName}`);
+  }
+  const imageUrl = entry.imageUrl;
+  if (imageUrl) {
+    const segments = safePathSegments(imageUrl);
+    const rawName = segments.at(-1);
+    const brandedName = rawName === "capture.webp" ? segments.at(-2) + ".webp" : rawName;
+    if (brandedName?.startsWith(`${entry.id}-`) && brandedName.endsWith(".webp")) {
+      keys.push(`captures/${mapSlug}/${brandedName}`);
+    }
+  }
+  return keys;
+}
+
+function safeLastPathSegment(value: string): string | undefined {
+  return safePathSegments(value).at(-1);
+}
+
+function safePathSegments(value: string): string[] {
+  try {
+    return new URL(value).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return [];
+  }
+}
+
+function defaultCatalogErrorReporter(error: unknown): void {
+  console.error("Catalog reconciliation failed after the Worker index was committed.", error);
 }

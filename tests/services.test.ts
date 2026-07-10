@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ChannelType } from "discord.js";
+import { imageSize } from "image-size";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
-import { mergeCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
+import { mergeCatalogIndex, publishCatalogEntry, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
 import { buildFaqEmbed, githubIssuesMarkdownLink } from "../src/content.js";
@@ -12,8 +16,9 @@ import { verifyGithubWebhookSignature } from "../src/github-webhook.js";
 import { formatGithubForumSyncResult } from "../src/commands.js";
 import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
-import { playtestWindowIsActive } from "../src/services/playtesting.js";
-import { optimizeCatalogImage } from "../src/services/image-optimizer.js";
+import { playtestWindowIsActive, reconcileApplicationThread, reconcileFinalApplicationDecision } from "../src/services/playtesting.js";
+import { createDatabase } from "../src/db/database.js";
+import { optimizeCatalogImage, runInImageOptimizationQueue } from "../src/services/image-optimizer.js";
 import { catalogImageMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
 import { createUploadWorkerClient, hasUploadWorkerConfig } from "../src/services/upload-worker-client.js";
 import {
@@ -37,8 +42,8 @@ describe("map resolver helpers", () => {
 describe("catalog index merging", () => {
   it("replaces an existing pack entry and preserves index contract fields", () => {
     const previous = JSON.stringify({
-      format: "akron-community-pack-index-v1",
-      version: 1,
+      format: "akron-community-pack-index-v2",
+      version: 2,
       packs: [
         pack({ id: "same", title: "Old" }),
         pack({ id: "other", title: "Other" })
@@ -47,14 +52,130 @@ describe("catalog index merging", () => {
 
     const merged = mergeCatalogIndex(previous, pack({ id: "same", title: "New" }));
 
-    expect(merged.format).toBe("akron-community-pack-index-v1");
-    expect(merged.version).toBe(1);
+    expect(merged.format).toBe("akron-community-pack-index-v2");
+    expect(merged.version).toBe(2);
     expect(merged.packs.map(entry => entry.id).sort()).toEqual(["other", "same"]);
     expect(merged.packs.find(entry => entry.id === "same")?.title).toBe("New");
   });
 
+  it("rejects the retired v1 catalog without a compatibility bridge", () => {
+    expect(() => mergeCatalogIndex(JSON.stringify({
+      format: "akron-community-pack-index-v1",
+      version: 1,
+      packs: []
+    }), pack({ id: "new" }))).toThrow("unsupported format");
+  });
+
   it("formats catalog backup timestamps without colons", () => {
     expect(formatCatalogBackupTimestamp(new Date("2026-05-20T12:34:56.789Z"))).toBe("2026-05-20T12-34-56Z");
+  });
+});
+
+describe("forum catalog publication reconciliation", () => {
+  it("returns a durable Worker publication when the local SQLite cache write fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-cache-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const r2 = new TestS3();
+    const cacheErrors: unknown[] = [];
+    let workerCommitted = false;
+    try {
+      database.sqlite.exec([
+        "CREATE TRIGGER fail_catalog_cache BEFORE INSERT ON catalog_entries",
+        "BEGIN SELECT RAISE(ABORT, 'cache failed'); END;"
+      ].join(" "));
+      const published = await publishCatalogEntry(
+        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
+        database.db,
+        r2 as never,
+        catalogPublishInput(),
+        new Date("2026-01-01T00:00:00.000Z"),
+        {
+          async publishMetadata() { workerCommitted = true; },
+          reportCacheError(error) { cacheErrors.push(error); }
+        }
+      );
+
+      expect(workerCommitted).toBe(true);
+      expect(cacheErrors).toHaveLength(1);
+      expect(published.entry.downloadUrl).toContain("/maps/map-sid/");
+      expect(r2.objects.has(published.packKey)).toBe(true);
+      expect(database.sqlite.prepare("SELECT COUNT(*) AS count FROM catalog_entries").get()).toEqual({ count: 0 });
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes superseded immutable assets only after the new Worker index commits", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-superseded-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const r2 = new TestS3();
+    const events: string[] = [];
+    r2.events = events;
+    const oldPackKey = "packs/map-sid/existing-oldrevision.akr";
+    const oldImageKey = "captures/map-sid/existing-oldrevision.webp";
+    r2.objects.set(oldPackKey, Buffer.from("old"));
+    r2.objects.set(oldImageKey, Buffer.from("old"));
+    database.sqlite.prepare([
+      "INSERT INTO catalog_entries",
+      "(id, discord_thread_id, title, description, section, map_sid, map_url, download_url, author_name, author_avatar_url, image_url, download_count, updated_utc, tags_json)",
+      "VALUES ('existing', 'thread', 'Old', '', 'StartPos', 'Map/Sid', '', ?, 'Author', '', ?, 0, '2025-01-01T00:00:00Z', '[]')"
+    ].join(" ")).run(
+      "https://akron.micr.dev/maps/map-sid/existing-oldrevision.akr",
+      "https://akron.micr.dev/maps/map-sid/existing-oldrevision/capture.webp"
+    );
+    try {
+      const published = await publishCatalogEntry(
+        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
+        database.db,
+        r2 as never,
+        catalogPublishInput({ image: { bytes: Buffer.from("new-image"), contentType: "image/webp", extension: "webp" } }),
+        new Date("2026-01-01T00:00:00.000Z"),
+        { async publishMetadata() { events.push("worker-commit"); } }
+      );
+
+      expect(r2.objects.has(published.packKey)).toBe(true);
+      expect(r2.objects.has(published.imageKey)).toBe(true);
+      expect(r2.objects.has(oldPackKey)).toBe(false);
+      expect(r2.objects.has(oldImageKey)).toBe(false);
+      expect(events.indexOf("worker-commit")).toBeLessThan(events.indexOf(`delete:${oldPackKey}`));
+      expect(events.indexOf("worker-commit")).toBeLessThan(events.indexOf(`delete:${oldImageKey}`));
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves pre-existing content-addressed assets when metadata retry fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-retry-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const r2 = new TestS3();
+    const input = catalogPublishInput({ image: { bytes: Buffer.from("image"), contentType: "image/webp", extension: "webp" } });
+    try {
+      const first = await publishCatalogEntry(
+        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
+        database.db,
+        r2 as never,
+        input,
+        new Date("2026-01-01T00:00:00.000Z"),
+        { async publishMetadata() {} }
+      );
+
+      await expect(publishCatalogEntry(
+        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
+        database.db,
+        r2 as never,
+        input,
+        new Date("2026-01-01T00:00:00.000Z"),
+        { async publishMetadata() { throw new Error("metadata failed"); } }
+      )).rejects.toThrow("metadata failed");
+
+      expect(r2.objects.has(first.packKey)).toBe(true);
+      expect(r2.objects.has(first.imageKey)).toBe(true);
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -224,6 +345,50 @@ describe("FAQ embed", () => {
 });
 
 describe("catalog image optimization", () => {
+  it("serializes forum and upload image work through one bounded process queue", async () => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let active = 0;
+    let maximumActive = 0;
+    const work = (gate?: Promise<void>) => runInImageOptimizationQueue(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await gate;
+      active -= 1;
+    });
+
+    const first = work(firstGate);
+    const second = work(Promise.resolve());
+    expect(active).toBe(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(maximumActive).toBe(1);
+  });
+
+  it("rejects image work when the shared pending queue is full", async () => {
+    let releaseActive: () => void = () => {};
+    const activeGate = new Promise<void>(resolve => { releaseActive = resolve; });
+    const active = runInImageOptimizationQueue(() => activeGate);
+    const pending = Array.from({ length: 8 }, () => runInImageOptimizationQueue(async () => undefined));
+
+    await expect(runInImageOptimizationQueue(async () => undefined)).rejects.toThrow("queue is full");
+    releaseActive();
+    await Promise.all([active, ...pending]);
+  });
+
+  it("audits catalog approval before Discord publication as separate outcomes", async () => {
+    const source = await readFile("src/services/upload-moderation.ts", "utf8");
+    const catalogAudit = source.indexOf('action: "upload_catalog_approve"');
+    const discordPublish = source.indexOf("await publishApprovedUploadToDiscord");
+    const discordAudit = source.indexOf('action: "upload_discord_publish"');
+
+    expect(catalogAudit).toBeGreaterThan(0);
+    expect(discordPublish).toBeGreaterThan(catalogAudit);
+    expect(discordAudit).toBeGreaterThan(discordPublish);
+    expect(source).toContain('uploadWasApproved ? "upload_discord_publish" : "upload_catalog_approve"');
+  });
+
   it("rejects capture sources above the upload budget before decoding", async () => {
     await expect(optimizeCatalogImage({
       bytes: Buffer.allocUnsafe(imageSourceMaxBytes + 1),
@@ -244,6 +409,9 @@ describe("catalog image optimization", () => {
     expect(optimized.extension).toBe("webp");
     expect(optimized.bytes.length).toBeGreaterThan(0);
     expect(optimized.bytes.length).toBeLessThanOrEqual(catalogImageMaxBytes);
+    const dimensions = imageSize(optimized.bytes);
+    expect(dimensions.width).toBeLessThanOrEqual(2048);
+    expect(dimensions.height).toBeLessThanOrEqual(2048);
     expect(optimized.bytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
     expect(optimized.bytes.subarray(8, 12).toString("ascii")).toBe("WEBP");
   }, 15_000);
@@ -322,7 +490,9 @@ describe("upload worker client", () => {
                 packKey: "packs/map/pack.akr",
                 downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
                 images: [],
-                publishedUtc: "2026-01-01T00:00:00.000Z"
+                publishedUtc: "2026-01-01T00:00:00.000Z",
+                sha256: "a".repeat(64),
+                sizeBytes: 512
               }
             }]
           });
@@ -562,19 +732,19 @@ describe("upload moderation messages", () => {
       }
     };
     const client = {
-      users: {
-        async fetch(discordUserId: string): Promise<unknown> {
-          expect(discordUserId).toBe("123456789012345678");
-          return {
-            async send(): Promise<void> {
-              throw deliveryError;
-            }
-          };
-        }
-      },
       guilds: {
         async fetch(): Promise<unknown> {
           return {
+            members: {
+              async fetch(discordUserId: string): Promise<unknown> {
+                expect(discordUserId).toBe("123456789012345678");
+                return {
+                  async send(): Promise<void> {
+                    throw deliveryError;
+                  }
+                };
+              }
+            },
             channels: {
               async fetch(): Promise<unknown> {
                 return {
@@ -644,6 +814,7 @@ describe("upload moderation messages", () => {
     const recordCalls: unknown[] = [];
     const createdThreads: unknown[] = [];
     const starterMessage = { id: "starter-message" };
+    let createdThread: unknown;
     const forum = {
       id: "forum-startpos",
       name: "startpos-packs",
@@ -652,12 +823,16 @@ describe("upload moderation messages", () => {
       threads: {
         async create(input: unknown): Promise<unknown> {
           createdThreads.push(input);
-          return {
+          createdThread = {
             id: "thread-id",
             async fetchStarterMessage(): Promise<unknown> {
               return starterMessage;
             }
           };
+          return createdThread;
+        },
+        async fetch(id: string): Promise<unknown> {
+          return id === "thread-id" ? createdThread : null;
         }
       }
     };
@@ -681,12 +856,15 @@ describe("upload moderation messages", () => {
     const worker = {
       async recordDiscordMessage(input: unknown): Promise<void> {
         recordCalls.push(input);
+        if (recordCalls.length === 1) throw new Error("Worker record failed.");
       }
     };
-
-    await publishApprovedUploadToDiscord({
+    const directory = mkdtempSync(join(tmpdir(), "akron-discord-publication-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const publishInput = {
       client: client as never,
       config: config({ discordGuildId: "guild" }),
+      db: database.db,
       worker: worker as never,
       submissionId: "submission",
       status: {
@@ -712,11 +890,20 @@ describe("upload moderation messages", () => {
             packKey: "packs/map/pack.akr",
             downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
             images: [],
-            publishedUtc: "2026-01-01T00:00:00.000Z"
+            publishedUtc: "2026-01-01T00:00:00.000Z",
+            sha256: "a".repeat(64),
+            sizeBytes: 512
           }
         }]
       }
-    });
+    };
+    try {
+      await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Worker record failed");
+      await publishApprovedUploadToDiscord(publishInput);
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
 
     expect(createdThreads).toHaveLength(1);
     expect(createdThreads[0]).toMatchObject({
@@ -734,6 +921,13 @@ describe("upload moderation messages", () => {
       channelId: "forum-startpos",
       threadId: "thread-id",
       messageId: "starter-message"
+    }, {
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum-startpos",
+      threadId: "thread-id",
+      messageId: "starter-message"
     }]);
   });
 });
@@ -742,6 +936,81 @@ describe("playtester activity thresholds", () => {
     expect(playtestWindowIsActive({ forumCount: 1, chatCount: 0 })).toBe(true);
     expect(playtestWindowIsActive({ forumCount: 0, chatCount: 3 })).toBe(true);
     expect(playtestWindowIsActive({ forumCount: 0, chatCount: 2 })).toBe(false);
+  });
+
+  it("idempotently reconciles recovered decisions onto the review thread", async () => {
+    const sent: string[] = [];
+    const applied: string[][] = [];
+    const archived: boolean[] = [];
+    const forum = {
+      type: ChannelType.GuildForum,
+      availableTags: [
+        { id: "open", name: "Open" },
+        { id: "accepted", name: "Accepted" }
+      ]
+    };
+    const thread = {
+      parent: forum,
+      appliedTags: ["open"],
+      async send(message: string) { sent.push(message); },
+      async setAppliedTags(tags: string[]) { applied.push(tags); this.appliedTags = tags; },
+      async setArchived(value: boolean) { archived.push(value); }
+    };
+    const interaction = { channel: { ...thread, isThread: () => true } };
+
+    await reconcileApplicationThread(interaction as never, "Accepted", "accepted");
+
+    expect(sent).toEqual(["accepted"]);
+    expect(applied).toEqual([["accepted"]]);
+    expect(archived).toEqual([true]);
+  });
+
+  it("reconciles already-finalized application decisions after a thread-side-effect failure", async () => {
+    const sent: string[] = [];
+    const archived: boolean[] = [];
+    const forum = {
+      type: ChannelType.GuildForum,
+      availableTags: [
+        { id: "open", name: "Open" },
+        { id: "accepted", name: "Accepted" },
+        { id: "denied", name: "Denied" }
+      ]
+    };
+    const buildInteraction = () => {
+      const thread = {
+        parent: forum,
+        appliedTags: ["open"],
+        async send(message: string) { sent.push(message); },
+        async setAppliedTags(tags: string[]) { this.appliedTags = tags; },
+        async setArchived(value: boolean) { archived.push(value); }
+      };
+      return { channel: { ...thread, isThread: () => true } } as never;
+    };
+
+    expect(await reconcileFinalApplicationDecision({
+      status: "accepted",
+      userId: "accepted-user",
+      decidedBy: "staff",
+      denialReason: ""
+    }, buildInteraction())).toBe(true);
+    expect(await reconcileFinalApplicationDecision({
+      status: "denied",
+      userId: "denied-user",
+      decidedBy: "staff",
+      denialReason: "Not enough availability"
+    }, buildInteraction())).toBe(true);
+    expect(await reconcileFinalApplicationDecision({
+      status: "open",
+      userId: "open-user",
+      decidedBy: "",
+      denialReason: ""
+    }, buildInteraction())).toBe(false);
+
+    expect(sent).toEqual([
+      "<@accepted-user> was accepted and received Tester.",
+      "<@denied-user> was denied by <@staff>.\nReason: Not enough availability"
+    ]);
+    expect(archived).toEqual([true, true]);
   });
 });
 
@@ -757,9 +1026,12 @@ function pack(overrides: Partial<CatalogPack>): CatalogPack {
     authorName: "Author",
     authorAvatarUrl: "",
     imageUrl: "",
+    images: [],
     downloadCount: 0,
     updatedUtc: "2026-05-20T00:00:00.000Z",
     tags: ["startpos"],
+    sha256: "a".repeat(64),
+    sizeBytes: 512,
     ...overrides
   };
 }
@@ -818,6 +1090,8 @@ function publishedUploadSubmission() {
       packKey: "packs/map/pack.akr",
       downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
       publishedUtc: "2026-01-01T00:00:00.000Z",
+      sha256: "a".repeat(64),
+      sizeBytes: 512,
       images: [
         {
           key: "captures/map/pack/slot-1.webp",
@@ -832,6 +1106,45 @@ function publishedUploadSubmission() {
       ]
     }
   };
+}
+
+function catalogPublishInput(
+  overrides: Partial<Parameters<typeof publishCatalogEntry>[3]> = {}
+): Parameters<typeof publishCatalogEntry>[3] {
+  return {
+    discordThreadId: "thread",
+    title: "Pack",
+    description: "Description",
+    section: "StartPos",
+    mapSid: "Map/Sid",
+    mapUrl: "https://gamebanana.com/mods/150453",
+    authorName: "Author",
+    authorAvatarUrl: "",
+    akrBytes: Buffer.from("new-pack"),
+    ...overrides
+  };
+}
+
+class TestS3 {
+  readonly objects = new Map<string, Buffer>();
+  events: string[] = [];
+
+  async send(command: unknown): Promise<Record<string, never>> {
+    const typed = command as { constructor: { name: string }; input: { Key?: string; Body?: unknown } };
+    const key = typed.input.Key ?? "";
+    if (typed.constructor.name === "PutObjectCommand") {
+      this.objects.set(key, Buffer.isBuffer(typed.input.Body) ? Buffer.from(typed.input.Body) : Buffer.from(String(typed.input.Body ?? "")));
+      this.events.push(`put:${key}`);
+    } else if (typed.constructor.name === "DeleteObjectCommand") {
+      this.objects.delete(key);
+      this.events.push(`delete:${key}`);
+    } else if (typed.constructor.name === "HeadObjectCommand" && !this.objects.has(key)) {
+      const error = new Error("Not found");
+      error.name = "NotFound";
+      throw error;
+    }
+    return {};
+  }
 }
 
 function config(overrides: Partial<AppConfig>): AppConfig {

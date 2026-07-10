@@ -10,13 +10,20 @@ export async function logAudit(db: AkronDatabase, input: {
   target: string;
   details?: Record<string, unknown>;
 }): Promise<void> {
-  await db.insert(auditLogs).values({
-    actorId: input.actorId,
-    action: input.action,
-    target: input.target,
-    detailsJson: JSON.stringify(input.details ?? {}),
-    createdUtc: utcNow()
-  });
+  try {
+    await db.insert(auditLogs).values({
+      actorId: input.actorId,
+      action: input.action,
+      target: input.target,
+      detailsJson: JSON.stringify(input.details ?? {}),
+      createdUtc: utcNow()
+    });
+  } catch (error) {
+    // Audit persistence is independent from the catalog/Discord side effect.
+    // Retrying a completed side effect because its audit insert failed can
+    // create duplicate publication threads.
+    console.error("Audit log persistence failed.", error);
+  }
 }
 
 export async function sendAuditLog(guild: Guild, content: string): Promise<void> {

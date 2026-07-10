@@ -1,5 +1,7 @@
 export const akrMaxBytes = 4 * 1024 * 1024;
-export const imageSourceMaxBytes = 100 * 1024 * 1024;
+// Source captures are untrusted and decoded by the bot. Keep both the encoded
+// and decoded budgets low enough that one upload cannot dominate the process.
+export const imageSourceMaxBytes = 24 * 1024 * 1024;
 export const catalogImageMaxBytes = 4 * 1024 * 1024;
 export const catalogImageResizeTarget = "4MB";
 

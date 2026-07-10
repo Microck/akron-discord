@@ -1,4 +1,4 @@
-import { GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, NotFound, NoSuchKey, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import type { AppConfig } from "../config.js";
 
 export type R2Object = {
@@ -28,6 +28,18 @@ export async function putR2Object(config: AppConfig, client: S3Client, object: R
   return publicR2Url(config, object.key);
 }
 
+export async function r2ObjectExists(config: AppConfig, client: S3Client, key: string): Promise<boolean> {
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: config.cloudflareR2Bucket, Key: key }));
+    return true;
+  } catch (error) {
+    if (error instanceof NotFound || (error as { name?: string }).name === "NotFound") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 export async function getR2Text(config: AppConfig, client: S3Client, key: string): Promise<string | null> {
   try {
     const result = await client.send(new GetObjectCommand({
@@ -41,6 +53,10 @@ export async function getR2Text(config: AppConfig, client: S3Client, key: string
     }
     throw error;
   }
+}
+
+export async function deleteR2Object(config: AppConfig, client: S3Client, key: string): Promise<void> {
+  await client.send(new DeleteObjectCommand({ Bucket: config.cloudflareR2Bucket, Key: key }));
 }
 
 export function publicR2Url(config: AppConfig, key: string): string {
