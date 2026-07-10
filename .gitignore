@@ -1,7 +1,7 @@
 node_modules/
 dist/
-.env
-.env.local
+.env*
+!.env.example
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal

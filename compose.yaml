@@ -5,6 +5,14 @@ services:
     env_file:
       - .env
     user: "${AKRON_DOCKER_UID:-1000}:${AKRON_DOCKER_GID:-1000}"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     volumes:
       - ./data:/app/data
     ports:
