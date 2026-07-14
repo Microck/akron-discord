@@ -5,7 +5,7 @@ The bot stores files in Cloudflare R2, but public Discord embeds and catalog ent
 ```text
 https://akron.micr.dev/catalog/index.json
 https://akron.micr.dev/maps/<map-id>/<pack-id>.akr
-https://akron.micr.dev/maps/<map-id>/<pack-id>/capture.webp
+https://akron.micr.dev/maps/<map-id>/<pack-id>/captures/<capture-file>.jpg
 https://akron.micr.dev/maps/<map-id>/<pack-id>/captures/<capture-file>
 https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
 ```

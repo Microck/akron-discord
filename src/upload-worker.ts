@@ -69,9 +69,9 @@ export type UploadAiReview = {
 };
 
 export type UploadOptimizedCapture = {
-  contentType: "image/webp";
+  contentType: "image/jpeg";
   uploadedBytes: number;
-  extension: "webp";
+  extension: "jpg";
   r2Key?: string;
   bytes?: Buffer;
 };
@@ -193,6 +193,8 @@ export type PublishCatalogEntryInput = {
   captures: UploadObjectRecord[];
   now: Date;
   captureSourceUrls: string[];
+  authorName: string;
+  authorAvatarUrl: string;
 };
 
 export type RecordAiReviewInput = {
@@ -205,7 +207,7 @@ export type PutOptimizedCaptureInput = {
   submissionId: string;
   objectId: string;
   bytes: Buffer;
-  contentType: "image/webp";
+  contentType: "image/jpeg";
   now: Date;
 };
 
@@ -731,7 +733,13 @@ export class InMemoryUploadStore implements UploadWorkerStore {
         });
         writtenKeys.push(image.key);
       }
-      await this.publishCatalogMetadata(buildCatalogPack(input.submission, publication, input.now));
+      await this.publishCatalogMetadata(buildCatalogPack(
+        input.submission,
+        publication,
+        input.now,
+        input.authorName,
+        input.authorAvatarUrl
+      ));
     } catch (error) {
       for (const key of writtenKeys) this.publicObjects.delete(key);
       throw error;
@@ -764,7 +772,7 @@ export class InMemoryUploadStore implements UploadWorkerStore {
         bytes: Buffer.from(input.bytes),
         contentType: input.contentType,
         uploadedBytes: input.bytes.length,
-        extension: "webp"
+        extension: "jpg"
       };
     });
     return saved?.submission;
@@ -1472,11 +1480,14 @@ async function applyModerationAction(input: {
         });
         return json({ error: "upload_objects_missing", submissionId: found.submission.id }, 409);
       }
+      const author = readCatalogAuthor(input.body, found.submission.attribution);
       found.submission.publication = await input.store.publishCatalogEntry({
         submission: found.submission,
         pack,
         captures: captureRecords.filter((capture): capture is UploadObjectRecord => Boolean(capture)),
         now: input.now(),
+        authorName: author.name,
+        authorAvatarUrl: author.avatarUrl,
         captureSourceUrls: found.submission.captures.map(capture =>
           signedSourceObjectUrl(input.origin, capture.objectId, input.botSecret, input.now())
         )
@@ -1622,7 +1633,7 @@ async function putOptimizedCapture(input: {
   now: () => Date;
 }): Promise<Response> {
   const contentType = normalizeContentType(readRequiredString(input.body, "contentType"));
-  if (contentType !== "image/webp") {
+  if (contentType !== "image/jpeg") {
     return json({ error: "optimized_capture_type_unsupported" }, 415);
   }
 
@@ -2016,7 +2027,13 @@ export function buildPublication(
   };
 }
 
-export function buildCatalogPack(submission: UploadSubmissionRecord, publication: CatalogPublication, now: Date): CatalogPack {
+export function buildCatalogPack(
+  submission: UploadSubmissionRecord,
+  publication: CatalogPublication,
+  now: Date,
+  authorName = authorNameForAttribution(submission.attribution),
+  authorAvatarUrl = ""
+): CatalogPack {
   const mapSlug = slugMapSid(submission.mapSid);
   return {
     id: publication.packId,
@@ -2026,8 +2043,8 @@ export function buildCatalogPack(submission: UploadSubmissionRecord, publication
     mapSid: submission.mapSid,
     mapUrl: submission.mapUrl,
     downloadUrl: publication.downloadUrl,
-    authorName: authorNameForAttribution(submission.attribution),
-    authorAvatarUrl: "",
+    authorName,
+    authorAvatarUrl,
     images: publication.images.map(image => ({ url: image.url, roomName: image.roomName })),
     downloadCount: 0,
     updatedUtc: now.toISOString(),
@@ -2114,6 +2131,27 @@ function authorNameForAttribution(attribution: UploadAttribution): string {
     return `Discord user ${attribution.discordUserId}`;
   }
   return "Anonymous";
+}
+
+function readCatalogAuthor(body: Record<string, unknown>, attribution: UploadAttribution): { name: string; avatarUrl: string } {
+  if (attribution.mode !== "discord") {
+    return { name: "Anonymous", avatarUrl: "" };
+  }
+
+  const name = readBoundedString(body, "authorName", 256);
+  const avatarUrl = readBoundedString(body, "authorAvatarUrl", 2048);
+  let avatar: URL;
+  try {
+    avatar = new URL(avatarUrl);
+  } catch {
+    throw new HttpError(400, "catalog_author_avatar_invalid");
+  }
+  const approvedHost = avatar.hostname === "cdn.discordapp.com" || avatar.hostname === "media.discordapp.net";
+  if (avatar.protocol !== "https:" || avatar.port || !approvedHost ||
+      (!avatar.pathname.startsWith("/avatars/") && !avatar.pathname.startsWith("/embed/avatars/"))) {
+    throw new HttpError(400, "catalog_author_avatar_invalid");
+  }
+  return { name, avatarUrl: avatar.toString() };
 }
 
 function publicAttribution(attribution: UploadAttribution): Record<string, unknown> {

@@ -100,7 +100,7 @@ type ImageTransformInit = RequestInit & {
     image: {
       fit: "scale-down";
       width: number;
-      format: "webp";
+      format: "jpeg";
       quality: number;
       metadata: "none";
     };
@@ -643,7 +643,13 @@ export class CloudflareUploadStore implements UploadWorkerStore {
         });
         if (!imageAlreadyExists) createdKeys.push(image.key);
       }
-      const entry = await this.fillCatalogMapUrl(buildCatalogPack(input.submission, publication, input.now));
+      const entry = await this.fillCatalogMapUrl(buildCatalogPack(
+        input.submission,
+        publication,
+        input.now,
+        input.authorName,
+        input.authorAvatarUrl
+      ));
       await this.publishCatalogMetadata(entry);
     } catch (error) {
       for (const key of createdKeys) await this.publicBucket.delete(key);
@@ -700,7 +706,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
       return undefined;
     }
     const revision = createHash("sha256").update(input.bytes).digest("hex").slice(0, 16);
-    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}/${capture.objectId}-${revision}.webp`;
+    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}/${capture.objectId}-${revision}.jpg`;
     await this.quarantineBucket.put(r2Key, input.bytes, {
       httpMetadata: { contentType: input.contentType }
     });
@@ -714,7 +720,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
           r2Key,
           contentType: input.contentType,
           uploadedBytes: input.bytes.length,
-          extension: "webp"
+          extension: "jpg"
         };
       });
       if (!saved) {
@@ -1181,7 +1187,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
           image: {
             fit: "scale-down",
             width: attempt.width,
-            format: "webp",
+            format: "jpeg",
             quality: attempt.quality,
             metadata: "none"
           }
@@ -1201,7 +1207,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
         ...capture,
         bytes,
         uploadedBytes: bytes.length,
-        contentType: "image/webp"
+        contentType: "image/jpeg"
       };
     }
 
@@ -1219,7 +1225,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
             ...capture,
             bytes: optimizedBytes,
             uploadedBytes: optimizedBytes.length,
-            contentType: optimized?.contentType ?? "image/webp"
+            contentType: optimized?.contentType ?? "image/jpeg"
           }
         : await this.optimizePublicCapture(capture, input.captureSourceUrls[index] ?? "");
       if (!publicCapture) {

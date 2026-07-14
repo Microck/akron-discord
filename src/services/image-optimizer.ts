@@ -26,7 +26,7 @@ export async function optimizeCatalogImage(input: {
   bytes: Buffer;
   contentType: string;
   fileName: string;
-}): Promise<{ bytes: Buffer; contentType: string; extension: "webp" }> {
+}): Promise<{ bytes: Buffer; contentType: string; extension: "jpg" }> {
   return runInImageOptimizationQueue(() => optimizeCatalogImageNow(input));
 }
 
@@ -57,7 +57,7 @@ async function optimizeCatalogImageNow(input: {
   bytes: Buffer;
   contentType: string;
   fileName: string;
-}): Promise<{ bytes: Buffer; contentType: string; extension: "webp" }> {
+}): Promise<{ bytes: Buffer; contentType: string; extension: "jpg" }> {
   if (input.bytes.length > imageSourceMaxBytes) {
     throw new Error(`Map capture exceeds ${imageSourceMaxBytes / 1024 / 1024} MiB.`);
   }
@@ -90,15 +90,15 @@ async function optimizeCatalogImageNow(input: {
         fit: "inside",
         withoutEnlargement: true
       })
-      .webp({
+      .jpeg({
         quality: attempt.quality,
-        effort: 3
+        mozjpeg: true
       })
       .timeout({ seconds: 10 })
       .toBuffer();
 
     if (optimized.length <= catalogImageMaxBytes) {
-      return { bytes: optimized, contentType: "image/webp", extension: "webp" };
+      return { bytes: optimized, contentType: "image/jpeg", extension: "jpg" };
     }
   }
 

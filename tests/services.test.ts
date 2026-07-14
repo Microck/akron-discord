@@ -129,7 +129,7 @@ describe("forum catalog publication reconciliation", () => {
         config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
         database.db,
         r2 as never,
-        catalogPublishInput({ image: { bytes: Buffer.from("new-image"), contentType: "image/webp", extension: "webp" } }),
+        catalogPublishInput({ image: { bytes: Buffer.from("new-image"), contentType: "image/jpeg", extension: "jpg" } }),
         new Date("2026-01-01T00:00:00.000Z"),
         { async publishMetadata() { events.push("worker-commit"); } }
       );
@@ -146,11 +146,55 @@ describe("forum catalog publication reconciliation", () => {
     }
   });
 
+  it.each([
+    {
+      source: "raw R2",
+      imageUrl: "https://pub.example.r2.dev/captures/map-sid/existing-oldrevision/01-preview.jpg"
+    },
+    {
+      source: "branded",
+      imageUrl: "https://akron.micr.dev/maps/map-sid/existing-oldrevision/captures/01-preview.jpg"
+    },
+    {
+      source: "path-prefixed raw R2",
+      imageUrl: "https://pub.example.r2.dev/r2-public/captures/map-sid/existing-oldrevision/01-preview.jpg"
+    }
+  ])("deletes a superseded JPEG published through the $source URL", async ({ imageUrl }) => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-jpeg-cleanup-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const r2 = new TestS3();
+    const oldImageKey = "captures/map-sid/existing-oldrevision/01-preview.jpg";
+    r2.objects.set(oldImageKey, Buffer.from("old"));
+    database.sqlite.prepare([
+      "INSERT INTO catalog_entries",
+      "(id, discord_thread_id, title, description, section, map_sid, map_url, download_url, author_name, author_avatar_url, image_url, download_count, updated_utc, tags_json)",
+      "VALUES ('existing', 'thread', 'Old', '', 'StartPos', 'Map/Sid', '', ?, 'Author', '', ?, 0, '2025-01-01T00:00:00Z', '[]')"
+    ].join(" ")).run(
+      "https://pub.example.r2.dev/packs/map-sid/existing-oldrevision.akr",
+      imageUrl
+    );
+    try {
+      await publishCatalogEntry(
+        config({ cloudflareR2Bucket: "bucket" }),
+        database.db,
+        r2 as never,
+        catalogPublishInput({ image: { bytes: Buffer.from("new-image"), contentType: "image/jpeg", extension: "jpg" } }),
+        new Date("2026-01-01T00:00:00.000Z"),
+        { async publishMetadata() {} }
+      );
+
+      expect(r2.objects.has(oldImageKey)).toBe(false);
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves pre-existing content-addressed assets when metadata retry fails", async () => {
     const directory = mkdtempSync(join(tmpdir(), "akron-catalog-retry-"));
     const database = createDatabase(join(directory, "akron.sqlite"));
     const r2 = new TestS3();
-    const input = catalogPublishInput({ image: { bytes: Buffer.from("image"), contentType: "image/webp", extension: "webp" } });
+    const input = catalogPublishInput({ image: { bytes: Buffer.from("image"), contentType: "image/jpeg", extension: "jpg" } });
     try {
       const first = await publishCatalogEntry(
         config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
@@ -405,15 +449,14 @@ describe("catalog image optimization", () => {
       fileName: "capture.png"
     });
 
-    expect(optimized.contentType).toBe("image/webp");
-    expect(optimized.extension).toBe("webp");
+    expect(optimized.contentType).toBe("image/jpeg");
+    expect(optimized.extension).toBe("jpg");
     expect(optimized.bytes.length).toBeGreaterThan(0);
     expect(optimized.bytes.length).toBeLessThanOrEqual(catalogImageMaxBytes);
     const dimensions = imageSize(optimized.bytes);
     expect(dimensions.width).toBeLessThanOrEqual(2048);
     expect(dimensions.height).toBeLessThanOrEqual(2048);
-    expect(optimized.bytes.subarray(0, 4).toString("ascii")).toBe("RIFF");
-    expect(optimized.bytes.subarray(8, 12).toString("ascii")).toBe("WEBP");
+    expect(optimized.bytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
   }, 15_000);
 });
 
@@ -501,7 +544,10 @@ describe("upload worker client", () => {
       }
     );
 
-    const approved = await client.approve("submission");
+    const approved = await client.approve("submission", {
+      name: "Catalog Author",
+      avatarUrl: "https://cdn.discordapp.com/avatars/123/avatar.jpg"
+    });
     await client.recordDiscordMessage({
       submissionId: "submission",
       kind: "publication",
@@ -516,6 +562,10 @@ describe("upload worker client", () => {
       "/bot/moderation/submission/approve",
       "/bot/discord-messages/submission"
     ]);
+    expect(await requests[0]?.json()).toEqual({
+      authorName: "Catalog Author",
+      authorAvatarUrl: "https://cdn.discordapp.com/avatars/123/avatar.jpg"
+    });
     expect(await requests[1]?.json()).toMatchObject({
       kind: "publication",
       threadId: "thread",
