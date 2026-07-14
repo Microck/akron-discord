@@ -180,7 +180,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
           mapSid: mapIdentity.mapSid,
           mapUrl: mapIdentity.mapUrl,
           authorName: starter.member?.displayName ?? starter.author.username,
-          authorAvatarUrl: starter.author.displayAvatarURL(),
+          authorAvatarUrl: starter.author.displayAvatarURL({ extension: "jpg", size: 128 }),
           akrBytes,
           image: optimizedImage
         });

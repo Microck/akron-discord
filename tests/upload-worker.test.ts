@@ -402,7 +402,7 @@ describe("upload worker", () => {
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
     for (const capture of job?.captures ?? []) {
       const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/${capture.objectId}`, {
-        contentType: "image/webp",
+        contentType: "image/jpeg",
         bytesBase64: Buffer.from(`optimized-${capture.roomName}`).toString("base64")
       }, `ordered-captures-${capture.objectId}`);
       expect(optimized.status).toBe(200);
@@ -412,8 +412,8 @@ describe("upload worker", () => {
 
     expect(publication?.images.map(image => image.roomName)).toEqual(["Slot 1 StartPos", "Slot 2 StartPos"]);
     expect(publication?.images.map(image => image.url)).toEqual([
-      expect.stringMatching(/\/captures\/01-slot-1-startpos\.webp$/),
-      expect.stringMatching(/\/captures\/02-slot-2-startpos\.webp$/)
+      expect.stringMatching(/\/captures\/01-slot-1-startpos\.jpg$/),
+      expect.stringMatching(/\/captures\/02-slot-2-startpos\.jpg$/)
     ]);
     expect(store.getCatalogIndexForTesting().packs[0]?.images).toEqual(publication?.images.map(image => ({
       url: image.url,
@@ -890,7 +890,10 @@ describe("upload worker", () => {
     expect(confirmed.status).toBe(200);
     expect(confirmedBody.status).toBe("queued");
 
-    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-approve");
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {
+      authorName: "Discord Author",
+      authorAvatarUrl: "https://cdn.discordapp.com/avatars/123456789012345678/avatar.jpg"
+    }, "nonce-approve");
     const approvedBody = await approved.json() as UploadStatusBody;
     expect(approved.status).toBe(200);
     expect(approvedBody.status).toBe("published");
@@ -997,7 +1000,10 @@ describe("upload worker", () => {
     await signedBotJson(worker, `/bot/attribution/${submissionId}/confirm`, {
       discordUserId: "123456789012345678"
     }, "nonce-published-confirm");
-    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-published-approve");
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {
+      authorName: "Discord Author",
+      authorAvatarUrl: "https://cdn.discordapp.com/avatars/123456789012345678/avatar.jpg"
+    }, "nonce-published-approve");
     expect(approved.status).toBe(200);
 
     const converted = await postJson(worker, `/uploads/${submissionId}/convert-to-anonymous`, {
@@ -1157,18 +1163,48 @@ describe("upload worker", () => {
 
     const captureObjectId = prepared.captures[0]?.objectId ?? "";
     const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/${captureObjectId}`, {
-      contentType: "image/webp",
-      bytesBase64: Buffer.from("optimized-webp").toString("base64")
+      contentType: "image/jpeg",
+      bytesBase64: Buffer.from("optimized-jpeg").toString("base64")
     }, "nonce-optimized-capture");
     const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-optimized-approve");
     const approvedBody = await approved.json() as UploadStatusBody;
     const publication = approvedBody.submissions[0]?.publication;
 
     expect(optimized.status).toBe(200);
-    expect(publication?.images[0]?.key).toMatch(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.webp$/);
-    expect(publication?.images[0]?.url).toMatch(/\/captures\/01-image\.webp$/);
-    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/webp");
+    expect(publication?.images[0]?.key).toMatch(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.jpg$/);
+    expect(publication?.images[0]?.url).toMatch(/\/captures\/01-image\.jpg$/);
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/jpeg");
     expect(store.getCatalogIndexForTesting().packs[0]?.images[0]?.url).toBe(publication?.images[0]?.url);
+  });
+
+  it("publishes confirmed Discord attribution with the profile metadata supplied by the bot", async () => {
+    const store = new InMemoryUploadStore();
+    const worker = createUploadWorker({
+      store,
+      botSecret,
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const prepared = await prepareAndUpload(worker, {
+      attribution: { mode: "discord", discordUserId: "1267825421781831815" },
+      pack: validArchive("StartPos"),
+      section: "StartPos"
+    });
+    await postJson(worker, "/uploads/complete", { installId, batchId: prepared.batchId });
+    const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    await signedBotJson(worker, `/bot/attribution/${submissionId}/confirm`, {
+      discordUserId: "1267825421781831815"
+    }, "nonce-author-confirm");
+
+    const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {
+      authorName: "Microck",
+      authorAvatarUrl: "https://cdn.discordapp.com/avatars/1267825421781831815/avatar.jpg"
+    }, "nonce-author-approve");
+
+    expect(approved.status).toBe(200);
+    expect(store.getCatalogIndexForTesting().packs[0]).toMatchObject({
+      authorName: "Microck",
+      authorAvatarUrl: "https://cdn.discordapp.com/avatars/1267825421781831815/avatar.jpg"
+    });
   });
 
   it("deletes published uploads from public objects and the catalog", async () => {
@@ -1334,7 +1370,8 @@ describe("upload worker", () => {
           id: "upload-pack", tokenHash: "token", kind: "pack", batchId: "batch", submissionId: submission.id,
           maxBytes: 128, contentType: "application/octet-stream", uploadedBytes: 128, bytes: Buffer.alloc(128)
         },
-        captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: []
+        captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: [],
+        authorName: "Anonymous", authorAvatarUrl: ""
       }),
       signedBotJson(worker, "/bot/catalog/entries", { entry: forumEntry }, "forum-catalog-entry")
     ]);
@@ -1359,7 +1396,8 @@ describe("upload worker", () => {
         id: "pack", tokenHash: "token", kind: "pack", batchId: "batch", submissionId: submission.id,
         maxBytes: 64, contentType: "application/octet-stream", uploadedBytes: 64, bytes: packBytes
       },
-      captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: []
+      captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: [],
+      authorName: "Anonymous", authorAvatarUrl: ""
     })).rejects.toThrow("Catalog commit failed");
     expect(store.getPublicObjectForTesting(publication.packKey)).toBeUndefined();
   });
@@ -1389,8 +1427,8 @@ describe("upload worker", () => {
     });
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
     const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/unknown-capture`, {
-      contentType: "image/webp",
-      bytesBase64: Buffer.from("late-webp").toString("base64")
+      contentType: "image/jpeg",
+      bytesBase64: Buffer.from("late-jpeg").toString("base64")
     }, "repair-optimized");
 
     expect(optimized.status).toBe(404);

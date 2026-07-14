@@ -38,7 +38,7 @@ Public URLs should use the Akron domain instead of raw R2 URLs when `AKRON_PUBLI
 ```text
 https://akron.micr.dev/catalog/index.json
 https://akron.micr.dev/maps/<map-id>/<pack-id>.akr
-https://akron.micr.dev/maps/<map-id>/<pack-id>/capture.webp
+https://akron.micr.dev/maps/<map-id>/<pack-id>/captures/<capture-file>.jpg
 https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
 ```
 
@@ -415,25 +415,25 @@ Automated in-game uploads accept `StartPos`, `AutoKill`, and `AutoDeafen`. The u
 
 ## Image Optimization
 
-Use `optimo` before uploading map capture images to R2.
+Use the shared catalog image optimizer before uploading map capture images to R2. The bot uses Sharp, and the Upload Worker uses Cloudflare Image Transformations.
 
 Pipeline:
 
-1. Download the Discord image attachment to a temporary working directory.
+1. Download the source image within the configured byte limit.
 2. Validate MIME type and decoded dimensions.
-3. Run `optimo` with metadata stripping.
+3. Rotate, resize, strip metadata, and encode as JPEG.
 4. Resize large captures to the catalog storage budget.
 5. Upload only the optimized output to R2.
 6. Store optimized automated-upload previews in ordered `images` entries with their room labels.
 
 Recommended first settings:
 
-- Convert map captures to WebP for catalog images.
+- Convert map captures to JPEG because Celeste's FNA image decoder does not support WebP.
 - Resize to the 4 MiB storage budget so large captures keep as much detail as possible.
 - Strip EXIF metadata.
 - Keep the original Discord attachment only as part of the user-authored forum post, not as the catalog image.
 
-If `optimo` or one of its native dependencies is unavailable, the bot should mark the post `Needs Moderator Review` instead of uploading an unoptimized image.
+If image optimization fails, the bot should mark the post `Needs Moderator Review` instead of uploading an unoptimized image.
 
 ## Submission Guide Content
 
@@ -627,7 +627,7 @@ Catalog path convention:
 catalog/index.json
 catalog/backups/index-YYYY-MM-DDTHH-mm-ssZ.json
 packs/{mapSidSlug}/{packId}.akr
-captures/{mapSidSlug}/{packId}/{roomSlug}.webp
+captures/{mapSidSlug}/{packId}/{roomSlug}.jpg
 ```
 
 Automated multi-image captures are served through Akron-branded URLs using
@@ -654,10 +654,10 @@ Catalog entries must match Akron's current in-game contract:
       "mapUrl": "https://gamebanana.com/mods/150453",
       "downloadUrl": "https://r2.example/akron/packs/example.akr",
       "authorName": "Display Name",
-      "authorAvatarUrl": "",
+      "authorAvatarUrl": "https://cdn.discordapp.com/avatars/example/avatar.jpg",
       "images": [
         {
-          "url": "https://r2.example/akron/captures/example/slot-1.webp",
+          "url": "https://r2.example/akron/captures/example/slot-1.jpg",
           "roomName": "a-00"
         }
       ],

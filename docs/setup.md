@@ -78,7 +78,7 @@ Run with Docker:
 docker compose up -d --build
 ```
 
-The container stores SQLite data in `./data` through the compose volume. It includes ImageMagick, FFmpeg, jpegtran, gifsicle, and svgo for `optimo`.
+The container stores SQLite data in `./data` through the compose volume.
 
 ## Cloudflare R2
 
@@ -140,11 +140,11 @@ General pack forums are scanned but stay Discord-only:
 - `audio-packs`
 - `recorder-packs`
 
-Map captures are optional but strongly recommended. If present, the bot validates the image, optimizes it through `optimo`, converts it to WebP, and uploads only the optimized image to R2.
+Map captures are optional but strongly recommended. If present, the bot validates the image, converts it to JPEG for Celeste/FNA compatibility, and uploads only the optimized image to R2.
 
-The deployment image must include ImageMagick's `magick` binary for `optimo` image conversion. If image optimization fails, the bot keeps the post out of the catalog and marks it `Needs Moderator Review`.
+If image optimization fails, the bot keeps the post out of the catalog and marks it `Needs Moderator Review`.
 
-In-game uploads use the Cloudflare upload Worker instead of Discord attachments. The Worker accepts source captures up to 100 MiB, keeps them in quarantine while moderation and attribution checks run, then uses Cloudflare Image Transformations to publish one canonical WebP capture capped at 4 MiB. Cloudflare Images Free includes 5,000 unique transformations per month for images stored outside Cloudflare Images, so this path stays free as long as approved uploaded captures stay below that monthly volume.
+In-game uploads use the Cloudflare upload Worker instead of Discord attachments. The Worker accepts source captures up to 100 MiB, keeps them in quarantine while moderation and attribution checks run, then uses Cloudflare Image Transformations to publish one canonical JPEG capture capped at 4 MiB. Cloudflare Images Free includes 5,000 unique transformations per month for images stored outside Cloudflare Images, so this path stays free as long as approved uploaded captures stay below that monthly volume.
 
 Current limits:
 
@@ -154,7 +154,7 @@ Current limits:
 - Catalog index read by Akron: 1 MiB.
 - Pack download read by Akron: 4 MiB.
 
-Cloudflare R2 Standard storage currently includes 10 GB-month, 1 million Class A operations, 10 million Class B operations, and free Internet egress each month. Publishing writes are Class A operations. Catalog refreshes and pack downloads are Class B operations. Large source captures only live in Discord; the bot stores the optimized WebP in R2.
+Cloudflare R2 Standard storage currently includes 10 GB-month, 1 million Class A operations, 10 million Class B operations, and free Internet egress each month. Publishing writes are Class A operations. Catalog refreshes and pack downloads are Class B operations. Large source captures only live in Discord; the bot stores the optimized JPEG in R2.
 
 ## GitHub Sync
 

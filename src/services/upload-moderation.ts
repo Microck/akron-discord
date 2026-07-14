@@ -246,12 +246,15 @@ export async function handleUploadModerationInteraction(input: {
     if (parsed.action === "confirm") {
       await worker.confirmAttribution(parsed.submissionId, input.interaction.user.id);
     } else if (parsed.action === "approve") {
-      await prepareUploadReviewJob({
+      const job = await prepareUploadReviewJob({
         config: input.config,
         worker,
         job: await worker.getSubmissionContext(parsed.submissionId)
       });
-      const approved = await worker.approve(parsed.submissionId);
+      const approved = await worker.approve(
+        parsed.submissionId,
+        await resolveUploadCatalogAuthor(input.interaction.client as Client<true>, job)
+      );
       uploadWasApproved = true;
       await logAudit(input.db, {
         actorId: input.interaction.user.id,
@@ -341,7 +344,7 @@ async function prepareUploadReviewJob(input: {
     });
     await input.worker.putOptimizedCapture(job.submissionId, captureSource.objectId, {
       bytes: optimized.bytes,
-      contentType: "image/webp"
+      contentType: "image/jpeg"
     });
     job = {
       ...job,
@@ -356,6 +359,19 @@ async function prepareUploadReviewJob(input: {
   return job.captures.length > 0
     ? await input.worker.getSubmissionContext(job.submissionId)
     : job;
+}
+
+async function resolveUploadCatalogAuthor(client: Client<true>, job: UploadWorkerJob) {
+  const discordUserId = job.attribution.mode === "discord" ? job.attribution.discordUserId : undefined;
+  if (!discordUserId) {
+    return undefined;
+  }
+
+  const user = await client.users.fetch(discordUserId);
+  return {
+    name: user.globalName ?? user.username,
+    avatarUrl: user.displayAvatarURL({ extension: "jpg", size: 128 })
+  };
 }
 
 async function fetchCaptureForOptimization(url: string): Promise<{ bytes: Buffer; contentType: string }> {

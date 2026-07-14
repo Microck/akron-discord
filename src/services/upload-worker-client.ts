@@ -75,14 +75,19 @@ export type UploadWorkerDiscordMessageInput = {
   threadId?: string;
 };
 
+export type UploadWorkerCatalogAuthor = {
+  name: string;
+  avatarUrl: string;
+};
+
 export type UploadWorkerClient = {
   claimJobs(limit?: number): Promise<UploadWorkerJob[]>;
   requeueJobs(submissionIds: string[]): Promise<void>;
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
   getSubmissionContext(submissionId: string): Promise<UploadWorkerSubmissionContext>;
   recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void>;
-  putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void>;
-  approve(submissionId: string): Promise<UploadWorkerStatusBody>;
+  putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/jpeg" }): Promise<void>;
+  approve(submissionId: string, author?: UploadWorkerCatalogAuthor): Promise<UploadWorkerStatusBody>;
   reject(submissionId: string, reason: string): Promise<void>;
   requestChanges(submissionId: string, reason: string): Promise<void>;
   confirmAttribution(submissionId: string, discordUserId: string): Promise<void>;
@@ -122,14 +127,17 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     async recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/reviews/${submissionId}`, review);
     },
-    async putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/webp" }): Promise<void> {
+    async putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/jpeg" }): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/optimized-captures/${submissionId}/${objectId}`, {
         contentType: capture.contentType,
         bytesBase64: capture.bytes.toString("base64")
       });
     },
-    async approve(submissionId: string): Promise<UploadWorkerStatusBody> {
-      const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, {});
+    async approve(submissionId: string, author?: UploadWorkerCatalogAuthor): Promise<UploadWorkerStatusBody> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, author ? {
+        authorName: author.name,
+        authorAvatarUrl: author.avatarUrl
+      } : {});
       return await readJson(response) as UploadWorkerStatusBody;
     },
     async reject(submissionId: string, reason: string): Promise<void> {

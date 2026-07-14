@@ -170,9 +170,9 @@ describe("Cloudflare upload store consistency", () => {
     const item = submission("submission", "batch", "moderating");
     item.captures = [{
       objectId: "capture", roomName: "room",
-      optimized: { r2Key: "optimized/capture.webp", contentType: "image/webp", uploadedBytes: 3, extension: "webp" }
+      optimized: { r2Key: "optimized/capture.jpg", contentType: "image/jpeg", uploadedBytes: 3, extension: "jpg" }
     }];
-    quarantine.objects.set("optimized/capture.webp", Buffer.from("webp"));
+    quarantine.objects.set("optimized/capture.jpg", Buffer.from("jpeg"));
     publicBucket.failPutAt = 2;
 
     await expect(store.publishCatalogEntry({
@@ -186,6 +186,8 @@ describe("Cloudflare upload store consistency", () => {
         contentType: "image/webp", uploadedBytes: 4
       }],
       captureSourceUrls: [""],
+      authorName: "Anonymous",
+      authorAvatarUrl: "",
       now: new Date("2026-01-02T00:00:00.000Z")
     })).rejects.toThrow("R2 put failed");
     expect(publicBucket.objects.size).toBe(0);
@@ -196,9 +198,9 @@ describe("Cloudflare upload store consistency", () => {
     const item = submission("submission", "batch", "moderating");
     item.captures = [{
       objectId: "capture", roomName: "room",
-      optimized: { r2Key: "optimized/capture.webp", contentType: "image/webp", uploadedBytes: 4, extension: "webp" }
+      optimized: { r2Key: "optimized/capture.jpg", contentType: "image/jpeg", uploadedBytes: 4, extension: "jpg" }
     }];
-    quarantine.objects.set("optimized/capture.webp", Buffer.from("webp"));
+    quarantine.objects.set("optimized/capture.jpg", Buffer.from("jpeg"));
     const input = {
       submission: item,
       pack: {
@@ -210,6 +212,8 @@ describe("Cloudflare upload store consistency", () => {
         contentType: "image/webp", uploadedBytes: 4
       }],
       captureSourceUrls: [""],
+      authorName: "Anonymous",
+      authorAvatarUrl: "",
       now: new Date("2026-01-02T00:00:00.000Z")
     };
     const publication = await store.publishCatalogEntry(input);
@@ -291,8 +295,8 @@ describe("Cloudflare upload store consistency", () => {
     ].join(" "));
 
     await expect(store.putOptimizedCapture({
-      submissionId: "submission-a", objectId: "capture", bytes: Buffer.from("webp"),
-      contentType: "image/webp", now: new Date("2026-01-02T00:00:00.000Z")
+      submissionId: "submission-a", objectId: "capture", bytes: Buffer.from("jpeg"),
+      contentType: "image/jpeg", now: new Date("2026-01-02T00:00:00.000Z")
     })).rejects.toThrow("payload failed");
     expect([...quarantine.objects.keys()].filter(key => key.includes("optimized-captures"))).toEqual([]);
   });

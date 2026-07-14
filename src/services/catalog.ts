@@ -49,7 +49,7 @@ export type PublishCatalogInput = {
   image?: {
     bytes: Buffer;
     contentType: string;
-    extension: "webp";
+    extension: "jpg";
   };
 };
 
@@ -83,7 +83,7 @@ export async function publishCatalogEntry(
   // thread republishes an existing catalog entry with new bytes.
   const revision = sha256.slice(0, 16);
   const packKey = `packs/${mapSlug}/${packId}-${revision}.akr`;
-  const imageKey = input.image ? `captures/${mapSlug}/${packId}-${revision}.webp` : "";
+  const imageKey = input.image ? `captures/${mapSlug}/${packId}-${revision}/01-preview.jpg` : "";
   const updatedUtc = now.toISOString();
   const createdKeys: string[] = [];
   let downloadUrl = "";
@@ -232,6 +232,18 @@ function catalogObjectKeys(entry: typeof catalogEntries.$inferSelect): string[] 
   const imageUrl = entry.imageUrl;
   if (imageUrl) {
     const segments = safePathSegments(imageUrl);
+    const captureStart = segments.indexOf("captures");
+    const captureSegments = segments.length === 5 && segments[0] === "maps" && segments[3] === "captures"
+      ? ["captures", segments[1], segments[2], segments[4]]
+      : captureStart >= 0
+        ? segments.slice(captureStart)
+        : segments;
+    if (captureSegments.length === 4 && captureSegments[0] === "captures" &&
+        captureSegments[1] === mapSlug && captureSegments[2]?.startsWith(`${entry.id}-`) &&
+        captureSegments[3] === "01-preview.jpg") {
+      keys.push(captureSegments.join("/"));
+      return keys;
+    }
     const rawName = segments.at(-1);
     const brandedName = rawName === "capture.webp" ? segments.at(-2) + ".webp" : rawName;
     if (brandedName?.startsWith(`${entry.id}-`) && brandedName.endsWith(".webp")) {
