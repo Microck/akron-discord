@@ -872,7 +872,23 @@ describe("upload moderation messages", () => {
   it("posts approved uploads to the matching public forum and records the thread", async () => {
     const recordCalls: unknown[] = [];
     const createdThreads: unknown[] = [];
-    const starterMessage = { id: "starter-message" };
+    const starterEdits: unknown[] = [];
+    const archiveChanges: boolean[] = [];
+    let persistedPublication: { messageId: string; status: string } | undefined;
+    let pendingArchiveStatus: string | undefined;
+    let starterEditFailures = 1;
+    let unarchiveFailures = 1;
+    let archiveRestoreFailures = 0;
+    const starterMessage = {
+      id: "starter-message",
+      async edit(input: unknown): Promise<void> {
+        starterEdits.push(input);
+        if (starterEditFailures > 0) {
+          starterEditFailures -= 1;
+          throw new Error("Discord edit failed.");
+        }
+      }
+    };
     let createdThread: unknown;
     const forum = {
       id: "forum-startpos",
@@ -884,6 +900,19 @@ describe("upload moderation messages", () => {
           createdThreads.push(input);
           createdThread = {
             id: "thread-id",
+            archived: false,
+            async setArchived(value: boolean): Promise<void> {
+              archiveChanges.push(value);
+              if (!value && unarchiveFailures > 0) {
+                unarchiveFailures -= 1;
+                throw new Error("Discord unarchive failed.");
+              }
+              if (value && archiveRestoreFailures > 0) {
+                archiveRestoreFailures -= 1;
+                throw new Error("Discord archive restore failed.");
+              }
+              (createdThread as { archived: boolean }).archived = value;
+            },
             async fetchStarterMessage(): Promise<unknown> {
               return starterMessage;
             }
@@ -947,8 +976,12 @@ describe("upload moderation messages", () => {
           publication: {
             packId: "pack",
             packKey: "packs/map/pack.akr",
-            downloadUrl: "https://akron.micr.dev/maps/map/pack.akr",
-            images: [],
+            downloadUrl: "https://akron.micr.dev/maps/map/pack-old.akr",
+            images: [{
+              key: "captures/map/pack-old/01-room.webp",
+              url: "https://akron.micr.dev/maps/map/pack-old/captures/01-room.webp",
+              roomName: "Room"
+            }],
             publishedUtc: "2026-01-01T00:00:00.000Z",
             sha256: "a".repeat(64),
             sizeBytes: 512
@@ -958,7 +991,25 @@ describe("upload moderation messages", () => {
     };
     try {
       await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Worker record failed");
+      (createdThread as { archived: boolean }).archived = true;
+      const publication = publishInput.status.submissions[0]?.publication;
+      if (!publication) throw new Error("Test publication is missing.");
+      publication.downloadUrl = "https://akron.micr.dev/maps/map/pack-current.akr";
+      publication.images = [{
+        key: "captures/map/pack-current/01-room.jpg",
+        url: "https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg",
+        roomName: "Room"
+      }];
+      await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Discord unarchive failed.");
+      archiveRestoreFailures = 2;
+      await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Discord edit failed.");
+      await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Discord archive restore failed.");
+      pendingArchiveStatus = (await database.db.query.uploadDiscordPublications.findFirst())?.status;
       await publishApprovedUploadToDiscord(publishInput);
+      const saved = await database.db.query.uploadDiscordPublications.findFirst();
+      if (saved) {
+        persistedPublication = { messageId: saved.messageId, status: saved.status };
+      }
     } finally {
       database.sqlite.close();
       rmSync(directory, { recursive: true, force: true });
@@ -973,6 +1024,18 @@ describe("upload moderation messages", () => {
       .message?.embeds?.[0];
     const embed = postedEmbed?.toJSON?.();
     expect(embed?.fields?.find(field => field.name === "Author")?.value).toBe("<@123456789012345678>");
+    expect(starterEdits).toHaveLength(3);
+    const reconciled = starterEdits[2] as {
+      embeds?: Array<{ toJSON?: () => { image?: { url?: string } } }>;
+      components?: Array<{ toJSON?: () => { components?: Array<{ style?: number; url?: string }> } }>;
+    };
+    expect(reconciled.embeds?.[0]?.toJSON?.().image?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg");
+    expect(reconciled.components?.[0]?.toJSON?.().components?.find(component => component.style === 5)?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current.akr");
+    expect(archiveChanges).toEqual([false, true, false, true, true, true]);
+    expect(pendingArchiveStatus).toBe("restoring_archive");
+    expect(persistedPublication).toEqual({ messageId: "starter-message", status: "recorded" });
     expect(recordCalls).toEqual([{
       submissionId: "submission",
       kind: "publication",
