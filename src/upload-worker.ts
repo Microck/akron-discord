@@ -788,6 +788,18 @@ export class InMemoryUploadStore implements UploadWorkerStore {
         }
       };
     });
+    if (input.kind === "publication" && saved?.submission.publication) {
+      const discordUrl = discordPublicationUrl(saved.submission);
+      const entryIndex = this.catalogIndex.packs.findIndex(
+        entry => entry.id === saved.submission.publication?.packId
+      );
+      if (discordUrl && entryIndex >= 0) {
+        this.catalogIndex.packs[entryIndex] = {
+          ...this.catalogIndex.packs[entryIndex]!,
+          discordUrl
+        };
+      }
+    }
     return saved?.submission;
   }
 
@@ -1977,6 +1989,7 @@ export type CatalogPack = {
   section: AkronProfileSection;
   mapSid: string;
   mapUrl: string;
+  discordUrl: string;
   downloadUrl: string;
   authorName: string;
   authorAvatarUrl: string;
@@ -1990,8 +2003,8 @@ export type CatalogPack = {
 };
 
 export type CatalogIndex = {
-  format: "akron-community-pack-index-v2";
-  version: 2;
+  format: "akron-community-pack-index-v3";
+  version: 3;
   packs: CatalogPack[];
 };
 
@@ -2042,6 +2055,7 @@ export function buildCatalogPack(
     section: submission.section,
     mapSid: submission.mapSid,
     mapUrl: submission.mapUrl,
+    discordUrl: discordPublicationUrl(submission),
     downloadUrl: publication.downloadUrl,
     authorName,
     authorAvatarUrl,
@@ -2052,6 +2066,15 @@ export function buildCatalogPack(
     sha256: publication.sha256,
     sizeBytes: publication.sizeBytes
   };
+}
+
+function discordPublicationUrl(submission: UploadSubmissionRecord): string {
+  const message = submission.discord?.publication;
+  const threadId = message?.threadId ?? "";
+  if (!message || !/^[0-9]{1,20}$/.test(message.guildId) || !/^[0-9]{1,20}$/.test(threadId)) {
+    return "";
+  }
+  return `https://discord.com/channels/${message.guildId}/${threadId}`;
 }
 
 function imageNameForCapture(roomName: string, index: number): string {
@@ -2067,11 +2090,11 @@ export function mergeCatalogIndex(index: CatalogIndex, entry: CatalogPack): Cata
   const packs = index.packs.filter(pack => pack.id !== entry.id);
   packs.push(entry);
   packs.sort((left, right) => left.title.localeCompare(right.title));
-  return { format: "akron-community-pack-index-v2", version: 2, packs };
+  return { format: "akron-community-pack-index-v3", version: 3, packs };
 }
 
 export function emptyCatalogIndex(): CatalogIndex {
-  return { format: "akron-community-pack-index-v2", version: 2, packs: [] };
+  return { format: "akron-community-pack-index-v3", version: 3, packs: [] };
 }
 
 function buildPackId(submission: UploadSubmissionRecord): string {
@@ -2223,6 +2246,7 @@ function readCatalogPack(source: unknown): CatalogPack {
     section,
     mapSid: readBoundedString(entry, "mapSid", 256),
     mapUrl: readOptionalMapUrl(entry),
+    discordUrl: readOptionalDiscordUrl(entry),
     downloadUrl: readBoundedString(entry, "downloadUrl", 2048),
     authorName: readBoundedString(entry, "authorName", 256),
     authorAvatarUrl: readOptionalBoundedString(entry, "authorAvatarUrl", 2048),
@@ -2325,6 +2349,33 @@ function readOptionalMapUrl(source: Record<string, unknown>): string {
     throw new HttpError(400, "mapUrl_unsupported");
   }
   return normalized;
+}
+
+export function isCatalogDiscordUrl(value: unknown): boolean {
+  if (value === undefined || value === "") {
+    return true;
+  }
+  if (typeof value !== "string" || value.length > 2048) {
+    return false;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "discord.com" &&
+      !url.port && !url.username && !url.password && !url.search && !url.hash &&
+      /^\/channels\/[0-9]{1,20}\/[0-9]{1,20}\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function readOptionalDiscordUrl(source: Record<string, unknown>): string {
+  const value = readOptionalBoundedString(source, "discordUrl", 2048);
+  if (!isCatalogDiscordUrl(value)) {
+    throw new HttpError(400, "catalog_discord_url_invalid");
+  }
+  return value;
 }
 
 function readRequiredNumber(source: Record<string, unknown>, key: string): number {

@@ -1058,6 +1058,13 @@ describe("upload worker", () => {
     });
 
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
+    await signedBotJson(worker, `/bot/discord-messages/${submissionId}`, {
+      kind: "review",
+      guildId: "123456789012345678",
+      channelId: "345678901234567890",
+      threadId: "234567890123456789",
+      messageId: "456789012345678901"
+    }, "catalog-review-thread");
     const first = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "publish-once");
     const second = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "publish-twice");
     const published = await second.json() as UploadStatusBody;
@@ -1076,15 +1083,26 @@ describe("upload worker", () => {
     });
     expect(store.getPublicObjectForTesting(publication?.packKey ?? "")?.contentType).toBe("application/octet-stream");
     expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/png");
-    const catalog = store.getCatalogIndexForTesting();
-    expect(catalog.packs).toHaveLength(1);
-    expect(catalog.packs[0]).toMatchObject({
+    const unpublishedCatalog = store.getCatalogIndexForTesting();
+    expect(unpublishedCatalog.packs).toHaveLength(1);
+    expect(unpublishedCatalog.packs[0]).toMatchObject({
       title: "Beginner StartPos",
       section: "StartPos",
       mapSid,
       mapUrl: "https://gamebanana.com/mods/150453",
+      discordUrl: "",
       authorName: "Anonymous"
     });
+
+    await signedBotJson(worker, `/bot/discord-messages/${submissionId}`, {
+      kind: "publication",
+      guildId: "123456789012345678",
+      channelId: "345678901234567890",
+      threadId: "234567890123456789",
+      messageId: "456789012345678901"
+    }, "catalog-publication-thread");
+    expect(store.getCatalogIndexForTesting().packs[0]?.discordUrl)
+      .toBe("https://discord.com/channels/123456789012345678/234567890123456789");
   });
 
   it("records Discord publication metadata for bot cleanup", async () => {
@@ -1358,6 +1376,7 @@ describe("upload worker", () => {
     };
     const forumEntry: CatalogPack = {
       id: "forum-entry", title: "Forum Entry", description: "Forum path", section: "StartPos", mapSid, mapUrl: "",
+      discordUrl: "https://discord.com/channels/123456789012345678/234567890123456789",
       downloadUrl: "https://akron.example.test/maps/map/forum.akr", authorName: "Forum Author", authorAvatarUrl: "",
       imageUrl: "", images: [], downloadCount: 0, updatedUtc: "2026-01-01T00:00:00.000Z", tags: ["startpos"],
       sha256: "b".repeat(64), sizeBytes: 128
@@ -1378,6 +1397,16 @@ describe("upload worker", () => {
 
     expect(forumResponse.status).toBe(200);
     expect(store.getCatalogIndexForTesting().packs.map(pack => pack.id).sort()).toEqual(["forum-entry", "upload-entry-uploadentry"]);
+
+    const invalidDiscordResponse = await signedBotJson(worker, "/bot/catalog/entries", {
+      entry: {
+        ...forumEntry,
+        id: "invalid-discord-entry",
+        discordUrl: "https://example.com/channels/123456789012345678/234567890123456789"
+      }
+    }, "invalid-discord-catalog-entry");
+    expect(invalidDiscordResponse.status).toBe(400);
+    await expectJson(invalidDiscordResponse, { error: "catalog_discord_url_invalid" });
   });
 
   it("removes newly uploaded public objects when catalog commit fails", async () => {

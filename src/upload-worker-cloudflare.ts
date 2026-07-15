@@ -4,6 +4,7 @@ import {
   capUploadBodyStream,
   createUploadWorker,
   emptyCatalogIndex,
+  isCatalogDiscordUrl,
   mergeCatalogIndex,
   moderationClaimLeaseMs,
   shouldDeleteQuarantineBatch,
@@ -736,7 +737,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
   }
 
   async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
-    return (await this.mutateSubmission(input.submissionId, input.now, submission => {
+    const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
       submission.discord = {
         ...submission.discord,
         [input.kind]: {
@@ -744,7 +745,52 @@ export class CloudflareUploadStore implements UploadWorkerStore {
           postedUtc: input.now.toISOString()
         }
       };
-    }))?.submission;
+    });
+    if (input.kind === "publication" && saved?.submission.publication) {
+      const message = saved.submission.discord?.publication;
+      const threadId = message?.threadId ?? "";
+      if (message && /^[0-9]{1,20}$/.test(message.guildId) && /^[0-9]{1,20}$/.test(threadId)) {
+        await this.updateCatalogDiscordUrl(
+          saved.submission.publication.packId,
+          `https://discord.com/channels/${message.guildId}/${threadId}`
+        );
+      }
+    }
+    return saved?.submission;
+  }
+
+  private async updateCatalogDiscordUrl(packId: string, discordUrl: string): Promise<void> {
+    const catalogLock = await this.acquireCatalogLock();
+    try {
+      const previousRow = await this.db
+        .prepare("SELECT entry_json FROM upload_catalog_entries WHERE id = ?")
+        .bind(packId)
+        .first<CatalogEntryRow>();
+      if (!previousRow) {
+        return;
+      }
+
+      const previousEntry = JSON.parse(previousRow.entry_json) as CatalogPack;
+      if (previousEntry.discordUrl === discordUrl) {
+        return;
+      }
+      const nextIndex = await this.upsertCatalogEntry({ ...previousEntry, discordUrl });
+      try {
+        await catalogLock.assertOwned();
+        await this.publicBucket.put("catalog/index.json", JSON.stringify(nextIndex, null, 2) + "\n", {
+          httpMetadata: { contentType: "application/json" }
+        });
+      } catch (error) {
+        try {
+          await this.upsertCatalogEntry(previousEntry);
+        } catch (rollbackError) {
+          throw new AggregateError([error, rollbackError], "Catalog index write and metadata rollback both failed.");
+        }
+        throw error;
+      }
+    } finally {
+      await catalogLock.release();
+    }
   }
 
   async deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined> {
@@ -1167,8 +1213,9 @@ export class CloudflareUploadStore implements UploadWorkerStore {
 
     const text = Buffer.from(await existing.arrayBuffer()).toString("utf8");
     const parsed = JSON.parse(text) as CatalogIndex;
-    if (parsed.format !== "akron-community-pack-index-v2" || parsed.version !== 2 || !Array.isArray(parsed.packs) ||
-        parsed.packs.some(pack => !/^[a-f0-9]{64}$/.test(pack.sha256) || !Number.isSafeInteger(pack.sizeBytes) || pack.sizeBytes <= 0)) {
+    if (parsed.format !== "akron-community-pack-index-v3" || parsed.version !== 3 || !Array.isArray(parsed.packs) ||
+        parsed.packs.some(pack => !/^[a-f0-9]{64}$/.test(pack.sha256) || !isCatalogDiscordUrl(pack.discordUrl) ||
+          !Number.isSafeInteger(pack.sizeBytes) || pack.sizeBytes <= 0)) {
       throw new Error("Existing catalog/index.json has an unsupported format.");
     }
     return parsed;

@@ -18,6 +18,7 @@ export type CatalogPack = {
   section: AkronProfileSection;
   mapSid: string;
   mapUrl: string;
+  discordUrl: string;
   downloadUrl: string;
   authorName: string;
   authorAvatarUrl: string;
@@ -31,8 +32,8 @@ export type CatalogPack = {
 };
 
 export type CatalogIndex = {
-  format: "akron-community-pack-index-v2";
-  version: 2;
+  format: "akron-community-pack-index-v3";
+  version: 3;
   packs: CatalogPack[];
 };
 
@@ -43,6 +44,7 @@ export type PublishCatalogInput = {
   section: AkronProfileSection;
   mapSid: string;
   mapUrl: string;
+  discordUrl: string;
   authorName: string;
   authorAvatarUrl: string;
   akrBytes: Buffer;
@@ -117,6 +119,7 @@ export async function publishCatalogEntry(
     section: input.section,
     mapSid: input.mapSid,
     mapUrl: input.mapUrl,
+    discordUrl: input.discordUrl,
     downloadUrl,
     authorName: input.authorName,
     authorAvatarUrl: input.authorAvatarUrl,
@@ -194,23 +197,43 @@ export function mergeCatalogIndex(previousText: string | null, entry: CatalogPac
   const packs = previous.packs.filter(pack => pack.id !== entry.id);
   packs.push(entry);
   packs.sort((left, right) => left.title.localeCompare(right.title));
-  return { format: "akron-community-pack-index-v2", version: 2, packs };
+  return { format: "akron-community-pack-index-v3", version: 3, packs };
 }
 
 function parseCatalogIndex(text: string | null): CatalogIndex {
   if (!text) {
-    return { format: "akron-community-pack-index-v2", version: 2, packs: [] };
+    return { format: "akron-community-pack-index-v3", version: 3, packs: [] };
   }
 
   const parsed = JSON.parse(text) as Partial<CatalogIndex>;
-  if (parsed.format !== "akron-community-pack-index-v2" || parsed.version !== 2 || !Array.isArray(parsed.packs) ||
+  if (parsed.format !== "akron-community-pack-index-v3" || parsed.version !== 3 || !Array.isArray(parsed.packs) ||
       parsed.packs.some(pack => !pack || typeof pack !== "object" ||
         !/^[a-f0-9]{64}$/.test((pack as Partial<CatalogPack>).sha256 ?? "") ||
+        !isCatalogDiscordUrl((pack as Partial<CatalogPack>).discordUrl) ||
         !Number.isSafeInteger((pack as Partial<CatalogPack>).sizeBytes) || (pack as Partial<CatalogPack>).sizeBytes! <= 0)) {
     throw new Error("Existing catalog/index.json has an unsupported format.");
   }
 
   return parsed as CatalogIndex;
+}
+
+function isCatalogDiscordUrl(value: string | undefined): boolean {
+  if (!value) {
+    return true;
+  }
+  if (value.length > 2048) {
+    return false;
+  }
+
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" &&
+      url.hostname.toLowerCase() === "discord.com" &&
+      !url.port && !url.username && !url.password && !url.search && !url.hash &&
+      /^\/channels\/[0-9]{1,20}\/[0-9]{1,20}\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function buildPackId(input: PublishCatalogInput): string {
