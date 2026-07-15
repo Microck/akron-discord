@@ -434,23 +434,68 @@ export async function publishApprovedUploadToDiscord(input: {
     throw new Error(`Public upload forum was not found for ${submission.section}.`);
   }
 
-
   const existing = await input.db.query.uploadDiscordPublications.findFirst({
     where: eq(uploadDiscordPublications.submissionId, input.submissionId)
   });
   if (existing?.threadId) {
     const existingThread = await forum.threads.fetch(existing.threadId).catch(() => null);
     if (existingThread) {
+      const shouldRestoreArchive = existing.status === "restoring_archive" || existingThread.archived;
+      if (shouldRestoreArchive && existing.status !== "restoring_archive") {
+        // Persist the original archive intent before mutating Discord. If any
+        // later call fails, a retry can restore the state even when Discord now
+        // reports the thread as unarchived.
+        await input.db.update(uploadDiscordPublications)
+          .set({ status: "restoring_archive", updatedUtc: new Date().toISOString() })
+          .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+      }
+      let starterMessage: Message;
+      let refreshFailed = false;
+      let archiveRestoreFailed = false;
+      let archiveRestoreError: unknown;
+      try {
+        if (existingThread.archived) {
+          await existingThread.setArchived(false, "Refreshing current Akron publication assets");
+        }
+        const fetchedStarterMessage = await fetchStarterMessage(existingThread);
+        if (!fetchedStarterMessage) {
+          throw new Error("Existing Discord publication starter message was not found.");
+        }
+        starterMessage = fetchedStarterMessage;
+        // A recovered or republished submission can point at a new immutable
+        // asset revision. Reconcile the visible post before recording success so
+        // Discord never keeps links to objects that catalog cleanup removed.
+        await starterMessage.edit({
+          embeds: [buildPublishedUploadEmbed(submission, 0)],
+          components: [buildPublishedUploadComponents(submission, 0)]
+        });
+      } catch (error) {
+        refreshFailed = true;
+        throw error;
+      } finally {
+        if (shouldRestoreArchive) {
+          await existingThread.setArchived(true, "Restoring Akron publication archive state").catch(error => {
+            archiveRestoreFailed = true;
+            archiveRestoreError = error;
+            if (refreshFailed) {
+              // Keep the refresh failure as the actionable error while retaining
+              // evidence that restoring the thread state also failed.
+              console.error("Discord publication archive restoration also failed.", error);
+            }
+          });
+        }
+      }
+      if (archiveRestoreFailed) throw archiveRestoreError;
       await input.worker.recordDiscordMessage({
         submissionId: input.submissionId,
         kind: "publication",
         guildId: existing.guildId,
         channelId: existing.channelId,
         threadId: existing.threadId,
-        messageId: existing.messageId || existing.threadId
+        messageId: starterMessage.id
       });
       await input.db.update(uploadDiscordPublications)
-        .set({ status: "recorded", updatedUtc: new Date().toISOString() })
+        .set({ messageId: starterMessage.id, status: "recorded", updatedUtc: new Date().toISOString() })
         .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
       return;
     }
@@ -487,7 +532,10 @@ export async function publishApprovedUploadToDiscord(input: {
       }
     });
     const starterMessage = await fetchStarterMessage(thread);
-    const messageId = starterMessage?.id ?? thread.id;
+    if (!starterMessage) {
+      throw new Error("Created Discord publication starter message was not found.");
+    }
+    const messageId = starterMessage.id;
     await input.db.update(uploadDiscordPublications).set({
       threadId: thread.id,
       messageId,
