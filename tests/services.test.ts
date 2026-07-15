@@ -42,8 +42,8 @@ describe("map resolver helpers", () => {
 describe("catalog index merging", () => {
   it("replaces an existing pack entry and preserves index contract fields", () => {
     const previous = JSON.stringify({
-      format: "akron-community-pack-index-v2",
-      version: 2,
+      format: "akron-community-pack-index-v3",
+      version: 3,
       packs: [
         pack({ id: "same", title: "Old" }),
         pack({ id: "other", title: "Other" })
@@ -52,8 +52,8 @@ describe("catalog index merging", () => {
 
     const merged = mergeCatalogIndex(previous, pack({ id: "same", title: "New" }));
 
-    expect(merged.format).toBe("akron-community-pack-index-v2");
-    expect(merged.version).toBe(2);
+    expect(merged.format).toBe("akron-community-pack-index-v3");
+    expect(merged.version).toBe(3);
     expect(merged.packs.map(entry => entry.id).sort()).toEqual(["other", "same"]);
     expect(merged.packs.find(entry => entry.id === "same")?.title).toBe("New");
   });
@@ -63,6 +63,14 @@ describe("catalog index merging", () => {
       format: "akron-community-pack-index-v1",
       version: 1,
       packs: []
+    }), pack({ id: "new" }))).toThrow("unsupported format");
+  });
+
+  it("rejects an existing v3 catalog with an unsafe Discord URL", () => {
+    expect(() => mergeCatalogIndex(JSON.stringify({
+      format: "akron-community-pack-index-v3",
+      version: 3,
+      packs: [pack({ discordUrl: "https://example.com/channels/123/456" })]
     }), pack({ id: "new" }))).toThrow("unsupported format");
   });
 
@@ -98,6 +106,7 @@ describe("forum catalog publication reconciliation", () => {
       expect(workerCommitted).toBe(true);
       expect(cacheErrors).toHaveLength(1);
       expect(published.entry.downloadUrl).toContain("/maps/map-sid/");
+      expect(published.entry.discordUrl).toBe("https://discord.com/channels/123456789012345678/234567890123456789");
       expect(r2.objects.has(published.packKey)).toBe(true);
       expect(database.sqlite.prepare("SELECT COUNT(*) AS count FROM catalog_entries").get()).toEqual({ count: 0 });
     } finally {
@@ -1072,6 +1081,7 @@ function pack(overrides: Partial<CatalogPack>): CatalogPack {
     section: "StartPos",
     mapSid: "Map/Sid",
     mapUrl: "https://gamebanana.com/mods/150453",
+    discordUrl: "",
     downloadUrl: "https://r2.example/packs/pack.akr",
     authorName: "Author",
     authorAvatarUrl: "",
@@ -1163,6 +1173,7 @@ function catalogPublishInput(
 ): Parameters<typeof publishCatalogEntry>[3] {
   return {
     discordThreadId: "thread",
+    discordUrl: "https://discord.com/channels/123456789012345678/234567890123456789",
     title: "Pack",
     description: "Description",
     section: "StartPos",

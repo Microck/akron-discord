@@ -179,6 +179,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
           section: scope,
           mapSid: mapIdentity.mapSid,
           mapUrl: mapIdentity.mapUrl,
+          discordUrl: input.thread.url,
           authorName: starter.member?.displayName ?? starter.author.username,
           authorAvatarUrl: starter.author.displayAvatarURL({ extension: "jpg", size: 128 }),
           akrBytes,

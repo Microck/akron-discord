@@ -165,6 +165,40 @@ describe("Cloudflare upload store consistency", () => {
     expect(saved?.discord?.review?.messageId).toBe("message");
   });
 
+  it("adds the public Discord thread to an already published catalog entry", async () => {
+    const { store, publicBucket } = testStore();
+    const batch = uploadBatch("2026-01-01T00:00:00.000Z", "published");
+    batch.submissions[0]!.publication = {
+      packId: "pack",
+      packKey: "packs/map/pack.akr",
+      downloadUrl: "https://akron.example.test/maps/map/pack.akr",
+      publishedUtc: "2026-01-01T00:00:00.000Z",
+      sha256: "a".repeat(64),
+      sizeBytes: 64,
+      images: []
+    };
+    await store.putBatch(batch);
+    await store.publishCatalogMetadata(catalogPack("Published pack", "2026-01-01T00:00:00.000Z"));
+
+    await store.recordDiscordMessage({
+      submissionId: "submission-a",
+      kind: "publication",
+      message: {
+        guildId: "123456789012345678",
+        channelId: "345678901234567890",
+        threadId: "234567890123456789",
+        messageId: "456789012345678901"
+      },
+      now: new Date("2026-01-02T00:00:00.000Z")
+    });
+
+    const index = JSON.parse(publicBucket.objects.get("catalog/index.json")!.toString("utf8")) as {
+      packs: Array<{ discordUrl: string }>;
+    };
+    expect(index.packs[0]?.discordUrl)
+      .toBe("https://discord.com/channels/123456789012345678/234567890123456789");
+  });
+
   it("rolls back a partially written public publication", async () => {
     const { store, quarantine, publicBucket } = testStore();
     const item = submission("submission", "batch", "moderating");
@@ -241,6 +275,23 @@ describe("Cloudflare upload store consistency", () => {
     expect(JSON.parse(row.entry_json)).toEqual(oldEntry);
     const index = JSON.parse(publicBucket.objects.get("catalog/index.json")?.toString("utf8") ?? "{}") as { packs?: Array<{ title: string }> };
     expect(index.packs?.[0]?.title).toBe("Old title");
+  });
+
+  it("rejects an unsafe Discord URL already persisted in the public index", async () => {
+    const { store, publicBucket } = testStore();
+    const unsafePack = {
+      ...catalogPack("Unsafe pack", "2026-01-01T00:00:00.000Z"),
+      discordUrl: "https://example.com/channels/123/456"
+    };
+    publicBucket.objects.set("catalog/index.json", Buffer.from(JSON.stringify({
+      format: "akron-community-pack-index-v3",
+      version: 3,
+      packs: [unsafePack]
+    })));
+
+    await expect(store.publishCatalogMetadata(
+      catalogPack("Replacement", "2026-01-02T00:00:00.000Z")
+    )).rejects.toThrow("unsupported format");
   });
 
   it("restores a deleted catalog row when the index write fails", async () => {
@@ -331,6 +382,7 @@ function catalogPack(title: string, updatedUtc: string, id = "pack") {
     section: "StartPos" as const,
     mapSid: "Map/Sid",
     mapUrl: "https://gamebanana.com/mods/150453",
+    discordUrl: "",
     downloadUrl: "https://cdn.example/pack.akr",
     authorName: "Author",
     authorAvatarUrl: "",
