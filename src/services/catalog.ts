@@ -5,7 +5,7 @@ import type { AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
 import { catalogEntries } from "../db/schema.js";
 import { sectionTag } from "../submissions/sections.js";
-import type { AkronProfileSection } from "../submissions/types.js";
+import { allowedSections, type AkronProfileSection } from "../submissions/types.js";
 import { utcNow } from "../time.js";
 import { slugMapSid } from "./map-resolver.js";
 import { deleteR2Object, putR2Object, r2ObjectExists } from "./r2.js";
@@ -22,7 +22,7 @@ export type CatalogPack = {
   downloadUrl: string;
   authorName: string;
   authorAvatarUrl: string;
-  imageUrl: string;
+  imageUrl?: string;
   images: Array<{ url: string; roomName: string }>;
   downloadCount: number;
   updatedUtc: string;
@@ -200,21 +200,49 @@ export function mergeCatalogIndex(previousText: string | null, entry: CatalogPac
   return { format: "akron-community-pack-index-v3", version: 3, packs };
 }
 
-function parseCatalogIndex(text: string | null): CatalogIndex {
+export function parseCatalogIndex(text: string | null): CatalogIndex {
   if (!text) {
     return { format: "akron-community-pack-index-v3", version: 3, packs: [] };
   }
 
   const parsed = JSON.parse(text) as Partial<CatalogIndex>;
   if (parsed.format !== "akron-community-pack-index-v3" || parsed.version !== 3 || !Array.isArray(parsed.packs) ||
-      parsed.packs.some(pack => !pack || typeof pack !== "object" ||
-        !/^[a-f0-9]{64}$/.test((pack as Partial<CatalogPack>).sha256 ?? "") ||
-        !isCatalogDiscordUrl((pack as Partial<CatalogPack>).discordUrl) ||
-        !Number.isSafeInteger((pack as Partial<CatalogPack>).sizeBytes) || (pack as Partial<CatalogPack>).sizeBytes! <= 0)) {
+      parsed.packs.some(pack => !isCatalogPack(pack))) {
     throw new Error("Existing catalog/index.json has an unsupported format.");
   }
 
   return parsed as CatalogIndex;
+}
+
+function isCatalogPack(value: unknown): value is CatalogPack {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const pack = value as Partial<CatalogPack>;
+  return typeof pack.id === "string" && pack.id.length > 0 &&
+    typeof pack.title === "string" && pack.title.length > 0 &&
+    typeof pack.description === "string" &&
+    allowedSections.includes(pack.section as AkronProfileSection) &&
+    typeof pack.mapSid === "string" &&
+    typeof pack.mapUrl === "string" &&
+    typeof pack.downloadUrl === "string" && pack.downloadUrl.length > 0 &&
+    typeof pack.authorName === "string" &&
+    typeof pack.authorAvatarUrl === "string" &&
+    (pack.imageUrl === undefined || typeof pack.imageUrl === "string") &&
+    Number.isSafeInteger(pack.downloadCount) && pack.downloadCount! >= 0 &&
+    Array.isArray(pack.tags) && pack.tags.every(tag => typeof tag === "string") &&
+    typeof pack.discordUrl === "string" &&
+    typeof pack.updatedUtc === "string" && pack.updatedUtc.length > 0 &&
+    /^[a-f0-9]{64}$/.test(pack.sha256 ?? "") &&
+    isCatalogDiscordUrl(pack.discordUrl) &&
+    isCatalogImages(pack.images) &&
+    Number.isSafeInteger(pack.sizeBytes) && pack.sizeBytes! > 0;
+}
+
+function isCatalogImages(value: CatalogPack["images"] | undefined): boolean {
+  return Array.isArray(value) && value.every(image =>
+    image && typeof image === "object" && typeof image.url === "string" && typeof image.roomName === "string"
+  );
 }
 
 function isCatalogDiscordUrl(value: string | undefined): boolean {

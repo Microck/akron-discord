@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChannelType } from "discord.js";
+import { ChannelType, RESTJSONErrorCodes } from "discord.js";
 import { imageSize } from "image-size";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, publishCatalogEntry, type CatalogPack } from "../src/services/catalog.js";
@@ -18,6 +18,7 @@ import type { AppConfig } from "../src/config.js";
 import { formatCatalogBackupTimestamp } from "../src/time.js";
 import { playtestWindowIsActive, reconcileApplicationThread, reconcileFinalApplicationDecision } from "../src/services/playtesting.js";
 import { createDatabase } from "../src/db/database.js";
+import { uploadDiscordPublications } from "../src/db/schema.js";
 import { optimizeCatalogImage, runInImageOptimizationQueue } from "../src/services/image-optimizer.js";
 import { catalogImageMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
 import { createUploadWorkerClient, hasUploadWorkerConfig } from "../src/services/upload-worker-client.js";
@@ -26,8 +27,10 @@ import {
   buildPublishedUploadEmbed,
   buildUploadModerationComponents,
   buildUploadModerationEmbeds,
+  handleUploadModerationInteraction,
   pollUploadModerationQueue,
   publishApprovedUploadToDiscord,
+  reconcilePublishedUploadDiscordMessages,
   uploadGalleryButtonId,
   uploadModerationButtonId
 } from "../src/services/upload-moderation.js";
@@ -72,6 +75,56 @@ describe("catalog index merging", () => {
       version: 3,
       packs: [pack({ discordUrl: "https://example.com/channels/123/456" })]
     }), pack({ id: "new" }))).toThrow("unsupported format");
+  });
+
+  it("rejects catalog packs without a valid images array", () => {
+    const withoutImages = { ...pack({}), images: undefined };
+    const invalidImage = { ...pack({}), images: [{ url: 42, roomName: "Room" }] };
+
+    for (const catalogPack of [withoutImages, invalidImage]) {
+      expect(() => mergeCatalogIndex(JSON.stringify({
+        format: "akron-community-pack-index-v3",
+        version: 3,
+        packs: [catalogPack]
+      }), pack({ id: "new" }))).toThrow("unsupported format");
+    }
+  });
+
+  it("rejects catalog packs with malformed reconciliation fields", () => {
+    const invalidFields: Partial<Record<keyof CatalogPack, unknown>> = {
+      id: undefined,
+      title: 42,
+      description: null,
+      section: "Unknown",
+      mapSid: false,
+      mapUrl: null,
+      downloadUrl: undefined,
+      authorName: 42,
+      authorAvatarUrl: false,
+      imageUrl: null,
+      downloadCount: -1,
+      tags: ["valid", 42],
+      discordUrl: undefined,
+      updatedUtc: 123
+    };
+
+    for (const [field, value] of Object.entries(invalidFields)) {
+      expect(() => mergeCatalogIndex(JSON.stringify({
+        format: "akron-community-pack-index-v3",
+        version: 3,
+        packs: [{ ...pack({}), [field]: value }]
+      }), pack({ id: "new" }))).toThrow("unsupported format");
+    }
+  });
+
+  it("accepts direct-upload catalog packs without a legacy imageUrl", () => {
+    const { imageUrl: _legacyImageUrl, ...directUploadPack } = pack({});
+
+    expect(mergeCatalogIndex(JSON.stringify({
+      format: "akron-community-pack-index-v3",
+      version: 3,
+      packs: [directUploadPack]
+    }), pack({ id: "new" })).packs).toHaveLength(2);
   });
 
   it("formats catalog backup timestamps without colons", () => {
@@ -680,6 +733,153 @@ describe("upload moderation messages", () => {
     ]);
   });
 
+  it("loads gallery pages from the current public catalog instead of stale Worker assets", async () => {
+    const edits: unknown[] = [];
+    const interaction = {
+      customId: uploadGalleryButtonId("submission", 1),
+      guildId: "123",
+      channelId: "456",
+      async deferUpdate(): Promise<void> {},
+      async editReply(input: unknown): Promise<void> {
+        edits.push(input);
+      }
+    };
+    const staleSubmission = {
+      ...uploadModerationJob("submission", { status: "published" }),
+      publication: {
+        packId: "pack",
+        packKey: "packs/map/pack-stale.akr",
+        downloadUrl: "https://akron.micr.dev/maps/map/pack-stale.akr",
+        images: [{
+          key: "captures/map/pack-stale/01-room.webp",
+          url: "https://akron.micr.dev/maps/map/pack-stale/captures/01-room.webp",
+          roomName: "Room"
+        }],
+        publishedUtc: "2026-01-01T00:00:00.000Z",
+        sha256: "a".repeat(64),
+        sizeBytes: 512
+      }
+    };
+
+    const handled = await handleUploadModerationInteraction({
+      interaction: interaction as never,
+      config: config({
+        uploadWorkerUrl: "https://uploads.example.test",
+        uploadWorkerBotSecret: "secret",
+        akronPublicAssetBaseUrl: "https://akron.micr.dev"
+      }),
+      db: {} as never,
+      async fetchImpl(input): Promise<Response> {
+        const request = new Request(input);
+        if (request.url.endsWith("/bot/submissions/submission/context")) {
+          return Response.json(staleSubmission);
+        }
+        if (request.url === "https://akron.micr.dev/catalog/index.json") {
+          return Response.json({
+            format: "akron-community-pack-index-v3",
+            version: 3,
+            packs: [pack({
+              id: "pack",
+              discordUrl: "https://discord.com/channels/123/456",
+              downloadUrl: "https://akron.micr.dev/maps/map/pack-current.akr",
+              images: [{
+                url: "https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg",
+                roomName: "Room 1"
+              }, {
+                url: "https://akron.micr.dev/maps/map/pack-current/captures/02-room.jpg",
+                roomName: "Room 2"
+              }],
+              imageUrl: "https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg",
+              updatedUtc: "2026-01-02T00:00:00.000Z",
+              sha256: "b".repeat(64)
+            })]
+          });
+        }
+        return Response.json({ error: "unexpected_request" }, { status: 404 });
+      }
+    });
+
+    expect(handled).toBe(true);
+    expect(edits).toHaveLength(1);
+    const edit = edits[0] as {
+      embeds?: Array<{ toJSON?: () => { image?: { url?: string } } }>;
+      components?: Array<{ toJSON?: () => { components?: Array<{ style?: number; url?: string }> } }>;
+    };
+    expect(edit.embeds?.[0]?.toJSON?.().image?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current/captures/02-room.jpg");
+    expect(edit.components?.[0]?.toJSON?.().components?.find(component => component.style === 5)?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current.akr");
+
+    const failureEdits: unknown[] = [];
+    await expect(handleUploadModerationInteraction({
+      interaction: {
+        ...interaction,
+        async editReply(input: unknown): Promise<void> {
+          failureEdits.push(input);
+        }
+      } as never,
+      config: config({
+        uploadWorkerUrl: "https://uploads.example.test",
+        uploadWorkerBotSecret: "secret",
+        akronPublicAssetBaseUrl: "https://akron.micr.dev"
+      }),
+      db: {} as never,
+      async fetchImpl(input): Promise<Response> {
+        const request = new Request(input);
+        return request.url.endsWith("/bot/submissions/submission/context")
+          ? Response.json(staleSubmission)
+          : Response.json({ error: "catalog_unavailable" }, { status: 503 });
+      }
+    })).rejects.toThrow("Public Akron catalog request failed with HTTP 503.");
+    expect(failureEdits).toEqual([]);
+
+    const emptyCatalogEdits: unknown[] = [];
+    await expect(handleUploadModerationInteraction({
+      interaction: {
+        ...interaction,
+        async editReply(input: unknown): Promise<void> {
+          emptyCatalogEdits.push(input);
+        }
+      } as never,
+      config: config({
+        uploadWorkerUrl: "https://uploads.example.test",
+        uploadWorkerBotSecret: "secret",
+        akronPublicAssetBaseUrl: "https://akron.micr.dev"
+      }),
+      db: {} as never,
+      async fetchImpl(input): Promise<Response> {
+        const request = new Request(input);
+        return request.url.endsWith("/bot/submissions/submission/context")
+          ? Response.json(staleSubmission)
+          : new Response("   ");
+      }
+    })).rejects.toThrow("Public Akron catalog response was empty.");
+    expect(emptyCatalogEdits).toEqual([]);
+
+    const missingEdits: unknown[] = [];
+    await expect(handleUploadModerationInteraction({
+      interaction: {
+        ...interaction,
+        async editReply(input: unknown): Promise<void> {
+          missingEdits.push(input);
+        }
+      } as never,
+      config: config({
+        uploadWorkerUrl: "https://uploads.example.test",
+        uploadWorkerBotSecret: "secret",
+        akronPublicAssetBaseUrl: "https://akron.micr.dev"
+      }),
+      db: {} as never,
+      async fetchImpl(input): Promise<Response> {
+        const request = new Request(input);
+        return request.url.endsWith("/bot/submissions/submission/context")
+          ? Response.json(staleSubmission)
+          : Response.json({ format: "akron-community-pack-index-v3", version: 3, packs: [] });
+      }
+    })).rejects.toThrow("Published upload submission is missing from the public Akron catalog.");
+    expect(missingEdits).toEqual([]);
+  });
+
   it("bounds gallery footers to Discord's embed limit", () => {
     const submission = publishedUploadSubmission();
     submission.publication.images = [{
@@ -875,8 +1075,33 @@ describe("upload moderation messages", () => {
     const starterEdits: unknown[] = [];
     const archiveChanges: boolean[] = [];
     let persistedPublication: { messageId: string; status: string } | undefined;
+    let replacementFailurePublication: { threadId: string; status: string } | undefined;
     let pendingArchiveStatus: string | undefined;
+    let createdThreadCountAfterTransient = 0;
     let starterEditFailures = 1;
+    let threadCreateFailures = 0;
+    let threadFetchFailures = 1;
+    let threadIsMissing = false;
+    let waitForConcurrentMissingFetches = false;
+    let missingFetchCount = 0;
+    let releaseMissingFetches: (() => void) | undefined;
+    const missingFetchBarrier = new Promise<void>(resolve => {
+      releaseMissingFetches = resolve;
+    });
+    let concurrentReplacementResults: PromiseSettledResult<void>[] = [];
+    let concurrentCreatedThreadCount = 0;
+    let blockNextThreadCreate = false;
+    let releaseStaleThreadCreate: (() => void) | undefined;
+    let signalStaleThreadCreateStarted: (() => void) | undefined;
+    const staleThreadCreateBarrier = new Promise<void>(resolve => {
+      releaseStaleThreadCreate = resolve;
+    });
+    const staleThreadCreateStarted = new Promise<void>(resolve => {
+      signalStaleThreadCreateStarted = resolve;
+    });
+    const deletedThreadIds: string[] = [];
+    let staleCreatorResult: PromiseSettledResult<void> | undefined;
+    let staleTakeoverPublication: { threadId: string; status: string } | undefined;
     let unarchiveFailures = 1;
     let archiveRestoreFailures = 0;
     const starterMessage = {
@@ -897,10 +1122,23 @@ describe("upload moderation messages", () => {
       availableTags: [{ id: "published-tag", name: "Published" }],
       threads: {
         async create(input: unknown): Promise<unknown> {
+          if (threadCreateFailures > 0) {
+            threadCreateFailures -= 1;
+            throw new Error("Discord thread create failed.");
+          }
+          const threadId = blockNextThreadCreate ? "stale-thread-id" : "thread-id";
+          if (blockNextThreadCreate) {
+            blockNextThreadCreate = false;
+            signalStaleThreadCreateStarted?.();
+            await staleThreadCreateBarrier;
+          }
           createdThreads.push(input);
           createdThread = {
-            id: "thread-id",
+            id: threadId,
             archived: false,
+            async delete(): Promise<void> {
+              deletedThreadIds.push(threadId);
+            },
             async setArchived(value: boolean): Promise<void> {
               archiveChanges.push(value);
               if (!value && unarchiveFailures > 0) {
@@ -920,6 +1158,18 @@ describe("upload moderation messages", () => {
           return createdThread;
         },
         async fetch(id: string): Promise<unknown> {
+          if (threadFetchFailures > 0) {
+            threadFetchFailures -= 1;
+            throw new Error("Discord thread fetch failed.");
+          }
+          if (threadIsMissing) {
+            if (waitForConcurrentMissingFetches) {
+              missingFetchCount += 1;
+              if (missingFetchCount === 2) releaseMissingFetches?.();
+              await missingFetchBarrier;
+            }
+            throw Object.assign(new Error("Unknown Channel"), { code: RESTJSONErrorCodes.UnknownChannel });
+          }
           return id === "thread-id" ? createdThread : null;
         }
       }
@@ -991,6 +1241,8 @@ describe("upload moderation messages", () => {
     };
     try {
       await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Worker record failed");
+      await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Discord thread fetch failed.");
+      createdThreadCountAfterTransient = createdThreads.length;
       (createdThread as { archived: boolean }).archived = true;
       const publication = publishInput.status.submissions[0]?.publication;
       if (!publication) throw new Error("Test publication is missing.");
@@ -1006,16 +1258,65 @@ describe("upload moderation messages", () => {
       await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Discord archive restore failed.");
       pendingArchiveStatus = (await database.db.query.uploadDiscordPublications.findFirst())?.status;
       await publishApprovedUploadToDiscord(publishInput);
+      threadIsMissing = true;
+      threadCreateFailures = 1;
+      await expect(publishApprovedUploadToDiscord(publishInput)).rejects.toThrow("Discord thread create failed.");
+      const replacementFailure = await database.db.query.uploadDiscordPublications.findFirst();
+      if (replacementFailure) {
+        replacementFailurePublication = {
+          threadId: replacementFailure.threadId,
+          status: replacementFailure.status
+        };
+      }
+      await publishApprovedUploadToDiscord(publishInput);
       const saved = await database.db.query.uploadDiscordPublications.findFirst();
       if (saved) {
         persistedPublication = { messageId: saved.messageId, status: saved.status };
+      }
+      waitForConcurrentMissingFetches = true;
+      const createdThreadCountBeforeConcurrency = createdThreads.length;
+      concurrentReplacementResults = await Promise.allSettled([
+        publishApprovedUploadToDiscord(publishInput),
+        publishApprovedUploadToDiscord(publishInput)
+      ]);
+      concurrentCreatedThreadCount = createdThreads.length - createdThreadCountBeforeConcurrency;
+
+      blockNextThreadCreate = true;
+      const staleCreator = publishApprovedUploadToDiscord(publishInput);
+      await staleThreadCreateStarted;
+      database.sqlite.prepare([
+        "UPDATE upload_discord_publications SET updated_utc = ?",
+        "WHERE submission_id = ? AND status = 'creating'"
+      ].join(" ")).run("2020-01-01T00:00:00.000Z", "submission");
+      await publishApprovedUploadToDiscord(publishInput);
+      releaseStaleThreadCreate?.();
+      [staleCreatorResult] = await Promise.allSettled([staleCreator]);
+      const publicationAfterTakeover = await database.db.query.uploadDiscordPublications.findFirst();
+      if (publicationAfterTakeover) {
+        staleTakeoverPublication = {
+          threadId: publicationAfterTakeover.threadId,
+          status: publicationAfterTakeover.status
+        };
       }
     } finally {
       database.sqlite.close();
       rmSync(directory, { recursive: true, force: true });
     }
 
-    expect(createdThreads).toHaveLength(1);
+    expect(createdThreadCountAfterTransient).toBe(1);
+    expect(createdThreads).toHaveLength(5);
+    expect(concurrentCreatedThreadCount).toBe(1);
+    expect(concurrentReplacementResults.map(result => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+    expect(concurrentReplacementResults.find(result => result.status === "rejected")).toMatchObject({
+      reason: new Error("Discord publication is already being created for this submission.")
+    });
+    expect(staleCreatorResult).toMatchObject({
+      status: "rejected",
+      reason: new Error("Discord publication reservation was superseded before creation completed.")
+    });
+    expect(deletedThreadIds).toEqual(["stale-thread-id"]);
+    expect(staleTakeoverPublication).toEqual({ threadId: "thread-id", status: "recorded" });
+    expect(deletedThreadIds).not.toContain(staleTakeoverPublication?.threadId);
     expect(createdThreads[0]).toMatchObject({
       name: "Beginner StartPos",
       appliedTags: ["published-tag"]
@@ -1035,6 +1336,7 @@ describe("upload moderation messages", () => {
       .toBe("https://akron.micr.dev/maps/map/pack-current.akr");
     expect(archiveChanges).toEqual([false, true, false, true, true, true]);
     expect(pendingArchiveStatus).toBe("restoring_archive");
+    expect(replacementFailurePublication).toEqual({ threadId: "thread-id", status: "recorded" });
     expect(persistedPublication).toEqual({ messageId: "starter-message", status: "recorded" });
     expect(recordCalls).toEqual([{
       submissionId: "submission",
@@ -1050,6 +1352,326 @@ describe("upload moderation messages", () => {
       channelId: "forum-startpos",
       threadId: "thread-id",
       messageId: "starter-message"
+    }, {
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum-startpos",
+      threadId: "thread-id",
+      messageId: "starter-message"
+    }, {
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum-startpos",
+      threadId: "thread-id",
+      messageId: "starter-message"
+    }, {
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "guild",
+      channelId: "forum-startpos",
+      threadId: "thread-id",
+      messageId: "starter-message"
+    }]);
+  });
+
+  it("retries catalog loading and refreshes recorded publication threads from the configured catalog", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-discord-reconcile-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const edits: unknown[] = [];
+    const recordedMessages: unknown[] = [];
+    const errors: unknown[] = [];
+    const catalogRequests: string[] = [];
+    let recreatedPublicationCount = 0;
+    let remainingPublicationIds: string[] = [];
+    const starterMessage = {
+      id: "456",
+      async edit(input: unknown): Promise<void> {
+        edits.push(input);
+      }
+    };
+    const thread = {
+      id: "456",
+      archived: false,
+      async fetchStarterMessage(): Promise<unknown> {
+        return starterMessage;
+      }
+    };
+    const forum = {
+      id: "forum-startpos",
+      name: "startpos-packs",
+      type: ChannelType.GuildForum,
+      availableTags: [{ id: "published-tag", name: "Published" }],
+      threads: {
+        async create(): Promise<unknown> {
+          recreatedPublicationCount += 1;
+          return thread;
+        },
+        async fetch(id: string): Promise<unknown> {
+          return id === thread.id ? thread : null;
+        }
+      }
+    };
+    const client = {
+      guilds: {
+        async fetch(): Promise<unknown> {
+          return {
+            channels: {
+              async fetch(): Promise<unknown> {
+                return {
+                  find(predicate: (candidate: typeof forum) => boolean): typeof forum | null {
+                    return predicate(forum) ? forum : null;
+                  }
+                };
+              }
+            }
+          };
+        }
+      }
+    };
+    const worker = {
+      async getSubmissionContext(submissionId: string): Promise<unknown> {
+        if (submissionId === "deleted-submission") {
+          return uploadModerationJob(submissionId, { status: "deleted" });
+        }
+        return {
+          ...uploadModerationJob(submissionId, { status: "published" }),
+          publication: {
+            packId: submissionId === "unlinked-submission"
+              ? "unlinked-pack"
+              : submissionId === "missing-submission" ? "missing-pack" : "pack",
+            packKey: "packs/map/pack-stale.akr",
+            downloadUrl: "https://akron.micr.dev/maps/map/pack-stale.akr",
+            images: [{
+              key: "captures/map/pack-stale/01-room.webp",
+              url: "https://akron.micr.dev/maps/map/pack-stale/captures/01-room.webp",
+              roomName: "Room"
+            }],
+            publishedUtc: "2026-01-01T00:00:00.000Z",
+            sha256: "a".repeat(64),
+            sizeBytes: 512
+          }
+        };
+      },
+      async recordDiscordMessage(input: unknown): Promise<void> {
+        recordedMessages.push(input);
+      }
+    };
+
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "missing-submission",
+      "123",
+      forum.id,
+      "missing-thread",
+      "missing-thread",
+      "recorded",
+      "2026-01-01T00:00:00.000Z"
+    );
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "abandoned-submission",
+      "123",
+      forum.id,
+      "",
+      "",
+      "creating",
+      "2026-01-01T00:00:00.000Z"
+    );
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "delayed-submission",
+      "123",
+      forum.id,
+      "",
+      "",
+      "creating",
+      new Date(Date.now() - (5 * 60 * 1000 - 100)).toISOString()
+    );
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "unlinked-submission",
+      "123",
+      forum.id,
+      thread.id,
+      thread.id,
+      "created",
+      "2026-01-01T00:00:00.000Z"
+    );
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "submission",
+      "123",
+      forum.id,
+      thread.id,
+      thread.id,
+      "recorded",
+      "2026-01-01T00:00:00.000Z"
+    );
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "submission-two",
+      "123",
+      forum.id,
+      thread.id,
+      thread.id,
+      "recorded",
+      "2026-01-01T00:00:00.000Z"
+    );
+    database.sqlite.prepare([
+      "INSERT INTO upload_discord_publications",
+      "(submission_id, guild_id, channel_id, thread_id, message_id, status, updated_utc)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ].join(" ")).run(
+      "deleted-submission",
+      "123",
+      forum.id,
+      "deleted-thread",
+      "deleted-thread",
+      "recorded",
+      "2026-01-01T00:00:00.000Z"
+    );
+
+    try {
+      await reconcilePublishedUploadDiscordMessages({
+        client: client as never,
+        config: config({ discordGuildId: "123", uploadWorkerUrl: "https://uploads.example.test", uploadWorkerBotSecret: "secret" }),
+        db: database.db,
+        worker: worker as never,
+        retryDelayMs: 0,
+        async fetchImpl(input): Promise<Response> {
+          catalogRequests.push(String(input));
+          if (catalogRequests.length === 1) {
+            throw new Error("Transient catalog request failed.");
+          }
+          return Response.json({
+            format: "akron-community-pack-index-v3",
+            version: 3,
+            packs: [{
+              ...pack({
+                id: "other-unlinked-pack",
+                discordUrl: "",
+                downloadUrl: "https://akron.micr.dev/maps/map/wrong-pack.akr"
+              })
+            }, {
+              ...pack({
+                id: "unlinked-pack",
+                discordUrl: "https://discord.com/channels/123/999",
+                downloadUrl: "https://akron.micr.dev/maps/map/unlinked-current.akr"
+              })
+            }, {
+              ...pack({
+                id: "pack",
+                discordUrl: "https://discord.com/channels/123/456",
+                downloadUrl: "https://akron.micr.dev/maps/map/pack-current.akr",
+                images: [{
+                  url: "https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg",
+                  roomName: "Room"
+                }],
+                imageUrl: "https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg",
+                updatedUtc: "2026-01-02T00:00:00.000Z",
+                sha256: "b".repeat(64)
+              })
+            }]
+          });
+        },
+        async onError(error: unknown): Promise<void> {
+          errors.push(error);
+          throw new Error("Discord runtime error reporting failed.");
+        }
+      });
+      remainingPublicationIds = (await database.db.select().from(uploadDiscordPublications))
+        .map(row => row.submissionId);
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+
+    expect(errors).toHaveLength(1);
+    expect(remainingPublicationIds).toEqual([
+      "missing-submission",
+      "abandoned-submission",
+      "delayed-submission",
+      "unlinked-submission",
+      "submission",
+      "submission-two"
+    ]);
+    expect(catalogRequests).toEqual([
+      "https://pub.example.r2.dev/catalog/index.json",
+      "https://pub.example.r2.dev/catalog/index.json",
+      "https://pub.example.r2.dev/catalog/index.json",
+      "https://pub.example.r2.dev/catalog/index.json",
+      "https://pub.example.r2.dev/catalog/index.json"
+    ]);
+    expect(edits).toHaveLength(3);
+    expect(recreatedPublicationCount).toBe(2);
+    const reconciledByDiscordUrl = edits[0] as {
+      components?: Array<{ toJSON?: () => { components?: Array<{ style?: number; url?: string }> } }>;
+    };
+    expect(reconciledByDiscordUrl.components?.[0]?.toJSON?.().components?.find(component => component.style === 5)?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current.akr");
+    const reconciled = edits[1] as {
+      embeds?: Array<{ toJSON?: () => { image?: { url?: string } } }>;
+      components?: Array<{ toJSON?: () => { components?: Array<{ style?: number; url?: string }> } }>;
+    };
+    expect(reconciled.embeds?.[0]?.toJSON?.().image?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current/captures/01-room.jpg");
+    expect(reconciled.components?.[0]?.toJSON?.().components?.find(component => component.style === 5)?.url)
+      .toBe("https://akron.micr.dev/maps/map/pack-current.akr");
+    expect(recordedMessages).toEqual([{
+      submissionId: "abandoned-submission",
+      kind: "publication",
+      guildId: "123",
+      channelId: forum.id,
+      threadId: thread.id,
+      messageId: thread.id
+    }, {
+      submissionId: "unlinked-submission",
+      kind: "publication",
+      guildId: "123",
+      channelId: forum.id,
+      threadId: thread.id,
+      messageId: thread.id
+    }, {
+      submissionId: "submission",
+      kind: "publication",
+      guildId: "123",
+      channelId: forum.id,
+      threadId: thread.id,
+      messageId: thread.id
+    }, {
+      submissionId: "submission-two",
+      kind: "publication",
+      guildId: "123",
+      channelId: forum.id,
+      threadId: thread.id,
+      messageId: thread.id
+    }, {
+      submissionId: "delayed-submission",
+      kind: "publication",
+      guildId: "123",
+      channelId: forum.id,
+      threadId: thread.id,
+      messageId: thread.id
     }]);
   });
 });

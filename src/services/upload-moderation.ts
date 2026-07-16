@@ -3,21 +3,25 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+  RESTJSONErrorCodes,
   EmbedBuilder,
   type ButtonInteraction,
   type Client,
   type ForumChannel,
+  type ForumThreadChannel,
   type Message,
   type TextChannel
 } from "discord.js";
 import type { AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
 import { uploadDiscordPublications } from "../db/schema.js";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { requireModerator } from "../permissions.js";
 import { logAudit } from "./audit.js";
+import { parseCatalogIndex, type CatalogIndex } from "./catalog.js";
 import { optimizeCatalogImage } from "./image-optimizer.js";
 import { reviewWithNim } from "./nim-review.js";
+import { publicR2Url } from "./r2.js";
 import {
   createUploadWorkerClient,
   hasUploadWorkerConfig,
@@ -30,6 +34,9 @@ import type { UploadAiReview } from "../upload-worker.js";
 import { imageSourceMaxBytes } from "../submissions/types.js";
 
 const customIdPrefix = "upload-review";
+const publicationReservationLeaseMs = 5 * 60 * 1000;
+
+class PublicCatalogPublicationNotFoundError extends Error {}
 
 type UploadModerationAction = "approve" | "reject" | "changes" | "confirm";
 let moderationPollInFlight: Promise<void> | undefined;
@@ -205,6 +212,7 @@ export async function handleUploadModerationInteraction(input: {
   interaction: ButtonInteraction;
   config: AppConfig;
   db: AkronDatabase;
+  fetchImpl?: typeof fetch;
 }): Promise<boolean> {
   const gallery = parseUploadGalleryButtonId(input.interaction.customId);
   if (gallery) {
@@ -213,15 +221,25 @@ export async function handleUploadModerationInteraction(input: {
       return true;
     }
     await input.interaction.deferUpdate();
-    const submission = await createUploadWorkerClient(input.config).getSubmissionContext(gallery.submissionId);
+    const submission = await createUploadWorkerClient(input.config, input.fetchImpl ?? fetch)
+      .getSubmissionContext(gallery.submissionId);
     if (!submission.publication) {
-      await input.interaction.editReply({ content: "This upload gallery is no longer available.", components: [] });
+      await input.interaction.editReply({ content: "This upload gallery is no longer available.", embeds: [], components: [] });
       return true;
     }
-    const imageIndex = clampGalleryIndex(gallery.imageIndex, submission.publication.images.length);
+    if (!input.interaction.guildId) {
+      throw new Error("Upload gallery interaction did not include a Discord guild ID.");
+    }
+    const catalog = await fetchPublicCatalog(input.config, input.fetchImpl);
+    const currentSubmission = reconcileSubmissionWithPublicCatalog(
+      submission,
+      catalog,
+      `https://discord.com/channels/${input.interaction.guildId}/${input.interaction.channelId}`
+    );
+    const imageIndex = clampGalleryIndex(gallery.imageIndex, currentSubmission.publication?.images.length ?? 0);
     await input.interaction.editReply({
-      embeds: [buildPublishedUploadEmbed(submission, imageIndex)],
-      components: [buildPublishedUploadComponents(submission, imageIndex)]
+      embeds: [buildPublishedUploadEmbed(currentSubmission, imageIndex)],
+      components: [buildPublishedUploadComponents(currentSubmission, imageIndex)]
     });
     return true;
   }
@@ -374,6 +392,174 @@ async function resolveUploadCatalogAuthor(client: Client<true>, job: UploadWorke
   };
 }
 
+export async function reconcilePublishedUploadDiscordMessages(input: {
+  client: Client<true>;
+  config: AppConfig;
+  db: AkronDatabase;
+  onError: (error: unknown) => Promise<void>;
+  fetchImpl?: typeof fetch;
+  worker?: UploadWorkerClient;
+  retryDelayMs?: number;
+}): Promise<void> {
+  if (!hasUploadWorkerConfig(input.config)) {
+    return;
+  }
+
+  const worker = input.worker ?? createUploadWorkerClient(input.config, input.fetchImpl ?? fetch);
+  let includeExistingThreads = true;
+  while (true) {
+    const publications = await input.db.select().from(uploadDiscordPublications);
+    const reconcilablePublications = publications.filter(publication =>
+      (includeExistingThreads && Boolean(publication.threadId)) ||
+      (publication.status === "creating" && publicationReservationExpired(publication.updatedUtc))
+    );
+    const pendingReservationDelays = publications
+      .filter(publication => !publication.threadId && publication.status === "creating")
+      .map(publication => publicationReservationRemainingMs(publication.updatedUtc))
+      .filter((delay): delay is number => delay !== undefined);
+
+    if (reconcilablePublications.length > 0) {
+      let catalog: CatalogIndex;
+      try {
+        catalog = await fetchPublicCatalogWithRetry(input.config, input.fetchImpl, input.retryDelayMs);
+      } catch (error) {
+        await reportPublishedReconciliationError(input.onError, error);
+        return;
+      }
+
+      while (true) {
+        for (const publication of reconcilablePublications) {
+          try {
+            const submission = await worker.getSubmissionContext(publication.submissionId);
+            if (submission.status !== "published" || !submission.publication) {
+              await input.db.delete(uploadDiscordPublications)
+                .where(eq(uploadDiscordPublications.submissionId, publication.submissionId));
+              continue;
+            }
+            const discordUrl = publication.threadId
+              ? `https://discord.com/channels/${publication.guildId}/${publication.threadId}`
+              : "";
+            const reconciledSubmission = reconcileSubmissionWithPublicCatalog(submission, catalog, discordUrl);
+            await publishApprovedUploadToDiscord({
+              client: input.client,
+              config: input.config,
+              db: input.db,
+              worker,
+              status: {
+                batchId: submission.batchId,
+                status: submission.status,
+                expiresUtc: "",
+                submissions: [reconciledSubmission]
+              },
+              submissionId: publication.submissionId
+            });
+          } catch (error) {
+            await reportPublishedReconciliationError(input.onError, error);
+          }
+        }
+
+        let latestCatalog: CatalogIndex;
+        try {
+          latestCatalog = await fetchPublicCatalogWithRetry(input.config, input.fetchImpl, input.retryDelayMs);
+        } catch (error) {
+          await reportPublishedReconciliationError(input.onError, error);
+          return;
+        }
+        if (JSON.stringify(latestCatalog) === JSON.stringify(catalog)) {
+          break;
+        }
+        catalog = latestCatalog;
+      }
+    }
+
+    if (pendingReservationDelays.length === 0) {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.min(...pendingReservationDelays)));
+    includeExistingThreads = false;
+  }
+}
+
+async function reportPublishedReconciliationError(
+  onError: (error: unknown) => Promise<void>,
+  error: unknown
+): Promise<void> {
+  try {
+    await onError(error);
+  } catch (reportingError) {
+    console.error("Published upload reconciliation error reporting failed.", reportingError);
+  }
+}
+
+async function fetchPublicCatalog(config: AppConfig, fetchImpl: typeof fetch = fetch): Promise<CatalogIndex> {
+  const response = await fetchImpl(
+    publicR2Url(config, "catalog/index.json"),
+    { signal: AbortSignal.timeout(15_000) }
+  );
+  if (!response.ok) {
+    throw new Error(`Public Akron catalog request failed with HTTP ${response.status}.`);
+  }
+  const body = await response.text();
+  if (!body.trim()) {
+    throw new Error("Public Akron catalog response was empty.");
+  }
+  return parseCatalogIndex(body);
+}
+
+async function fetchPublicCatalogWithRetry(
+  config: AppConfig,
+  fetchImpl: typeof fetch = fetch,
+  retryDelayMs = 5_000
+): Promise<CatalogIndex> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await fetchPublicCatalog(config, fetchImpl);
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2 && retryDelayMs > 0) {
+        await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+      }
+    }
+  }
+  throw lastError;
+}
+
+function reconcileSubmissionWithPublicCatalog(
+  submission: UploadWorkerStatusSubmission,
+  catalog: CatalogIndex,
+  discordUrl: string
+): UploadWorkerStatusSubmission {
+  if (submission.status !== "published" || !submission.publication) {
+    throw new Error(`Recorded Discord publication ${submission.submissionId} is not published in the Upload Worker.`);
+  }
+  const catalogEntry = (discordUrl
+    ? catalog.packs.find(entry => entry.discordUrl?.replace(/\/$/, "") === discordUrl)
+    : undefined
+  ) ?? catalog.packs.find(entry => entry.id === submission.publication?.packId);
+  if (!catalogEntry) {
+    throw new PublicCatalogPublicationNotFoundError(
+      `Published upload ${submission.submissionId} is missing from the public Akron catalog.`
+    );
+  }
+  return {
+    ...submission,
+    title: catalogEntry.title,
+    description: catalogEntry.description,
+    section: catalogEntry.section,
+    mapSid: catalogEntry.mapSid,
+    publication: {
+      ...submission.publication,
+      packId: catalogEntry.id,
+      downloadUrl: catalogEntry.downloadUrl,
+      images: catalogEntry.images.map(image => ({ ...image, key: "" })),
+      publishedUtc: catalogEntry.updatedUtc,
+      sha256: catalogEntry.sha256,
+      sizeBytes: catalogEntry.sizeBytes
+    }
+  };
+}
+
 async function fetchCaptureForOptimization(url: string): Promise<{ bytes: Buffer; contentType: string }> {
   const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!response.ok) {
@@ -437,8 +623,17 @@ export async function publishApprovedUploadToDiscord(input: {
   const existing = await input.db.query.uploadDiscordPublications.findFirst({
     where: eq(uploadDiscordPublications.submissionId, input.submissionId)
   });
+  let replacedPublication: typeof existing;
   if (existing?.threadId) {
-    const existingThread = await forum.threads.fetch(existing.threadId).catch(() => null);
+    let existingThread: ForumThreadChannel | null;
+    try {
+      existingThread = await forum.threads.fetch(existing.threadId);
+    } catch (error) {
+      if (!isMissingDiscordThreadError(error)) {
+        throw error;
+      }
+      existingThread = null;
+    }
     if (existingThread) {
       const shouldRestoreArchive = existing.status === "restoring_archive" || existingThread.archived;
       if (shouldRestoreArchive && existing.status !== "restoring_archive") {
@@ -499,24 +694,35 @@ export async function publishApprovedUploadToDiscord(input: {
         .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
       return;
     }
-    await input.db.delete(uploadDiscordPublications)
-      .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+    replacedPublication = existing;
   } else if (existing) {
-    const reservationAge = Date.now() - Date.parse(existing.updatedUtc);
-    if (!Number.isFinite(reservationAge) || reservationAge < 5 * 60 * 1000) {
+    if (!publicationReservationExpired(existing.updatedUtc)) {
       throw new Error("Discord publication is already being created for this submission.");
     }
-    await input.db.delete(uploadDiscordPublications)
-      .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
   }
 
-  const reserved = await input.db.insert(uploadDiscordPublications).values({
+  const reservationUpdatedUtc = new Date().toISOString();
+  const reservation = {
     submissionId: input.submissionId,
     guildId: input.config.discordGuildId,
     channelId: forum.id,
+    threadId: "",
+    messageId: "",
     status: "creating",
-    updatedUtc: new Date().toISOString()
-  }).onConflictDoNothing().returning({ submissionId: uploadDiscordPublications.submissionId });
+    updatedUtc: reservationUpdatedUtc
+  };
+  const reserved = existing
+    ? await input.db.update(uploadDiscordPublications)
+      .set(reservation)
+      .where(and(
+        eq(uploadDiscordPublications.submissionId, existing.submissionId),
+        eq(uploadDiscordPublications.threadId, existing.threadId),
+        eq(uploadDiscordPublications.status, existing.status),
+        eq(uploadDiscordPublications.updatedUtc, existing.updatedUtc)
+      ))
+      .returning({ submissionId: uploadDiscordPublications.submissionId })
+    : await input.db.insert(uploadDiscordPublications).values(reservation)
+      .onConflictDoNothing().returning({ submissionId: uploadDiscordPublications.submissionId });
   if (reserved.length !== 1) {
     throw new Error("Discord publication is already being created for this submission.");
   }
@@ -536,12 +742,23 @@ export async function publishApprovedUploadToDiscord(input: {
       throw new Error("Created Discord publication starter message was not found.");
     }
     const messageId = starterMessage.id;
-    await input.db.update(uploadDiscordPublications).set({
+    const createdUpdatedUtc = new Date().toISOString();
+    const savedCreation = await input.db.update(uploadDiscordPublications).set({
       threadId: thread.id,
       messageId,
       status: "created",
-      updatedUtc: new Date().toISOString()
-    }).where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+      updatedUtc: createdUpdatedUtc
+    }).where(and(
+      eq(uploadDiscordPublications.submissionId, input.submissionId),
+      eq(uploadDiscordPublications.threadId, ""),
+      eq(uploadDiscordPublications.status, "creating"),
+      eq(uploadDiscordPublications.updatedUtc, reservationUpdatedUtc)
+    )).returning({ submissionId: uploadDiscordPublications.submissionId });
+    if (savedCreation.length !== 1) {
+      await thread.delete("Akron publication reservation was superseded").catch(() => undefined);
+      thread = undefined;
+      throw new Error("Discord publication reservation was superseded before creation completed.");
+    }
     await input.worker.recordDiscordMessage({
       submissionId: input.submissionId,
       kind: "publication",
@@ -550,21 +767,59 @@ export async function publishApprovedUploadToDiscord(input: {
       threadId: thread.id,
       messageId
     });
-    await input.db.update(uploadDiscordPublications)
+    const recorded = await input.db.update(uploadDiscordPublications)
       .set({ status: "recorded", updatedUtc: new Date().toISOString() })
-      .where(eq(uploadDiscordPublications.submissionId, input.submissionId));
+      .where(and(
+        eq(uploadDiscordPublications.submissionId, input.submissionId),
+        eq(uploadDiscordPublications.threadId, thread.id),
+        eq(uploadDiscordPublications.messageId, messageId),
+        eq(uploadDiscordPublications.status, "created"),
+        eq(uploadDiscordPublications.updatedUtc, createdUpdatedUtc)
+      ))
+      .returning({ submissionId: uploadDiscordPublications.submissionId });
+    if (recorded.length !== 1) {
+      throw new Error("Discord publication reservation changed before recording completed.");
+    }
   } catch (error) {
-    const saved = await input.db.query.uploadDiscordPublications.findFirst({
-      where: eq(uploadDiscordPublications.submissionId, input.submissionId)
-    }).catch(() => undefined);
-    if (!saved?.threadId) {
+    const released = await input.db.delete(uploadDiscordPublications)
+      .where(and(
+        eq(uploadDiscordPublications.submissionId, input.submissionId),
+        eq(uploadDiscordPublications.threadId, ""),
+        eq(uploadDiscordPublications.status, "creating"),
+        eq(uploadDiscordPublications.updatedUtc, reservationUpdatedUtc)
+      ))
+      .returning({ submissionId: uploadDiscordPublications.submissionId })
+      .catch(() => []);
+    if (released.length === 1) {
       if (thread) await thread.delete("Akron publication persistence rollback").catch(() => undefined);
-      await input.db.delete(uploadDiscordPublications)
-        .where(eq(uploadDiscordPublications.submissionId, input.submissionId))
-        .catch(() => undefined);
+      if (replacedPublication) {
+        await input.db.insert(uploadDiscordPublications).values(replacedPublication)
+          .onConflictDoNothing()
+          .catch(() => undefined);
+      }
     }
     throw error;
   }
+}
+
+function publicationReservationExpired(updatedUtc: string, now = Date.now()): boolean {
+  const age = now - Date.parse(updatedUtc);
+  return Number.isFinite(age) && age >= publicationReservationLeaseMs;
+}
+
+function publicationReservationRemainingMs(updatedUtc: string, now = Date.now()): number | undefined {
+  const age = now - Date.parse(updatedUtc);
+  return Number.isFinite(age) && age >= 0 && age < publicationReservationLeaseMs
+    ? publicationReservationLeaseMs - age
+    : undefined;
+}
+
+function isMissingDiscordThreadError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const discordError = error as { code?: unknown; status?: unknown };
+  return discordError.code === RESTJSONErrorCodes.UnknownChannel || discordError.status === 404;
 }
 
 async function recordReviewMessage(input: {
