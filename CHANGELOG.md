@@ -9,4 +9,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- keep published Discord pack threads synced with current capture and download links
+- reconcile published Discord pack threads on startup so replaced capture and download links do not remain broken

@@ -20,7 +20,11 @@ import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
 import { startGithubWebhookServer } from "./github-webhook.js";
 import { handlePlaytestingInteraction, handlePlaytestingMessage } from "./services/playtesting.js";
-import { handleUploadModerationInteraction, pollUploadModerationQueue } from "./services/upload-moderation.js";
+import {
+  handleUploadModerationInteraction,
+  pollUploadModerationQueue,
+  reconcilePublishedUploadDiscordMessages
+} from "./services/upload-moderation.js";
 import { handleScanButtonInteraction, scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
 
@@ -47,6 +51,12 @@ client.once(Events.ClientReady, readyClient => {
     void pollUploadModerationQueue({ client: readyClient, config, onError: reportRuntimeError });
   }, 30_000);
   void pollUploadModerationQueue({ client: readyClient, config, onError: reportRuntimeError });
+  void reconcilePublishedUploadDiscordMessages({
+    client: readyClient,
+    config,
+    db: database.db,
+    onError: reportRuntimeError
+  }).catch(reportRuntimeError);
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -193,7 +203,11 @@ async function reportRuntimeError(error: unknown): Promise<void> {
   const guild = client.guilds.cache.get(config.discordGuildId);
   const channel = guild?.channels.cache.find(candidate => candidate.name === "bot-alerts" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
   if (channel) {
-    await channel.send({ content: message.slice(0, 1900) });
+    try {
+      await channel.send({ content: message.slice(0, 1900) });
+    } catch (reportingError) {
+      console.error("Failed to send the runtime error to bot-alerts.", reportingError);
+    }
   }
 }
 
