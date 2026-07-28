@@ -5,7 +5,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChannelType, RESTJSONErrorCodes } from "discord.js";
-import { imageSize } from "image-size";
 import { formatGithubIssueBody } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, publishCatalogEntry, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
@@ -19,8 +18,6 @@ import { formatCatalogBackupTimestamp } from "../src/time.js";
 import { playtestWindowIsActive, reconcileApplicationThread, reconcileFinalApplicationDecision } from "../src/services/playtesting.js";
 import { createDatabase } from "../src/db/database.js";
 import { uploadDiscordPublications } from "../src/db/schema.js";
-import { optimizeCatalogImage, runInImageOptimizationQueue } from "../src/services/image-optimizer.js";
-import { catalogImageMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
 import { createUploadWorkerClient, hasUploadWorkerConfig } from "../src/services/upload-worker-client.js";
 import {
   buildPublishedUploadComponents,
@@ -451,38 +448,6 @@ describe("FAQ embed", () => {
 });
 
 describe("catalog image optimization", () => {
-  it("serializes forum and upload image work through one bounded process queue", async () => {
-    let releaseFirst: () => void = () => {};
-    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
-    let active = 0;
-    let maximumActive = 0;
-    const work = (gate?: Promise<void>) => runInImageOptimizationQueue(async () => {
-      active += 1;
-      maximumActive = Math.max(maximumActive, active);
-      await gate;
-      active -= 1;
-    });
-
-    const first = work(firstGate);
-    const second = work(Promise.resolve());
-    expect(active).toBe(1);
-    releaseFirst();
-    await Promise.all([first, second]);
-
-    expect(maximumActive).toBe(1);
-  });
-
-  it("rejects image work when the shared pending queue is full", async () => {
-    let releaseActive: () => void = () => {};
-    const activeGate = new Promise<void>(resolve => { releaseActive = resolve; });
-    const active = runInImageOptimizationQueue(() => activeGate);
-    const pending = Array.from({ length: 8 }, () => runInImageOptimizationQueue(async () => undefined));
-
-    await expect(runInImageOptimizationQueue(async () => undefined)).rejects.toThrow("queue is full");
-    releaseActive();
-    await Promise.all([active, ...pending]);
-  });
-
   it("audits catalog approval before Discord publication as separate outcomes", async () => {
     const source = await readFile("src/services/upload-moderation.ts", "utf8");
     const catalogAudit = source.indexOf('action: "upload_catalog_approve"');
@@ -494,32 +459,6 @@ describe("catalog image optimization", () => {
     expect(discordAudit).toBeGreaterThan(discordPublish);
     expect(source).toContain('uploadWasApproved ? "upload_discord_publish" : "upload_catalog_approve"');
   });
-
-  it("rejects capture sources above the upload budget before decoding", async () => {
-    await expect(optimizeCatalogImage({
-      bytes: Buffer.allocUnsafe(imageSourceMaxBytes + 1),
-      contentType: "image/png",
-      fileName: "capture.png"
-    })).rejects.toThrow(`Map capture exceeds ${imageSourceMaxBytes / 1024 / 1024} MiB.`);
-  });
-
-  it("optimizes capture images with the catalog size resize target", async () => {
-    const source = await readFile(new URL("../assets/akronleaf.png", import.meta.url));
-    const optimized = await optimizeCatalogImage({
-      bytes: source,
-      contentType: "image/png",
-      fileName: "capture.png"
-    });
-
-    expect(optimized.contentType).toBe("image/jpeg");
-    expect(optimized.extension).toBe("jpg");
-    expect(optimized.bytes.length).toBeGreaterThan(0);
-    expect(optimized.bytes.length).toBeLessThanOrEqual(catalogImageMaxBytes);
-    const dimensions = imageSize(optimized.bytes);
-    expect(dimensions.width).toBeLessThanOrEqual(2048);
-    expect(dimensions.height).toBeLessThanOrEqual(2048);
-    expect(optimized.bytes.subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
-  }, 15_000);
 });
 
 describe("upload worker client", () => {
@@ -564,6 +503,55 @@ describe("upload worker client", () => {
     expect(request?.headers.get("x-akron-nonce")).toBeTruthy();
     expect(request?.headers.get("x-akron-signature")).toMatch(/^[a-f0-9]{64}$/);
     expect(await request?.text()).toBe("{\"limit\":3}");
+  });
+
+  it("transforms forum captures through the signed upload worker endpoint", async () => {
+    const requests: Request[] = [];
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    const client = createUploadWorkerClient(
+      config({
+        uploadWorkerUrl: "https://uploads.example.test",
+        uploadWorkerBotSecret: "secret"
+      }),
+      async (request, init) => {
+        requests.push(request instanceof Request ? new Request(request, init) : new Request(request, init));
+        return Response.json({
+          contentType: "image/jpeg",
+          bytesBase64: jpeg.toString("base64")
+        });
+      }
+    );
+
+    const transformed = await client.transformCatalogCapture(
+      "https://cdn.discordapp.com/attachments/channel/capture.png"
+    );
+
+    expect(transformed).toEqual({
+      bytes: jpeg,
+      contentType: "image/jpeg",
+      extension: "jpg"
+    });
+    expect(requests[0]?.url).toBe("https://uploads.example.test/bot/catalog/captures/transform");
+    expect(await requests[0]?.text()).toBe(
+      "{\"sourceUrl\":\"https://cdn.discordapp.com/attachments/channel/capture.png\"}"
+    );
+  });
+
+  it("rejects malformed catalog capture bytes from the upload worker", async () => {
+    const client = createUploadWorkerClient(
+      config({
+        uploadWorkerUrl: "https://uploads.example.test",
+        uploadWorkerBotSecret: "secret"
+      }),
+      async () => Response.json({
+        contentType: "image/jpeg",
+        bytesBase64: "not-base64"
+      })
+    );
+
+    await expect(client.transformCatalogCapture(
+      "https://cdn.discordapp.com/attachments/channel/capture.png"
+    )).rejects.toThrow("Upload Worker returned an invalid catalog capture.");
   });
 
   it("parses approval responses and signs Discord message records", async () => {
@@ -668,8 +656,8 @@ describe("upload moderation messages", () => {
   it("builds staff review embeds and stable button IDs", () => {
     const job = uploadModerationJob("submission", {
       captures: [
-        { objectId: "capture-1", roomName: "Slot 1 StartPos", sourceUrl: "https://uploads.example.test/source/1", optimized: false },
-        { objectId: "capture-2", roomName: "Slot 2 StartPos", sourceUrl: "https://uploads.example.test/source/2", optimized: false }
+        { objectId: "capture-1", roomName: "Slot 1 StartPos", sourceUrl: "https://uploads.example.test/source/1" },
+        { objectId: "capture-2", roomName: "Slot 2 StartPos", sourceUrl: "https://uploads.example.test/source/2" }
       ]
     });
 
@@ -1796,7 +1784,6 @@ type TestUploadModerationJob = {
     objectId: string;
     roomName: string;
     sourceUrl: string;
-    optimized: boolean;
   }>;
 };
 

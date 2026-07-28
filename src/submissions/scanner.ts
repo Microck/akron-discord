@@ -25,14 +25,14 @@ import { logAudit, sendAuditLog } from "../services/audit.js";
 import { isModerator } from "../permissions.js";
 import { createR2Client, publicR2Url, putR2Object } from "../services/r2.js";
 import { publishCatalogEntry } from "../services/catalog.js";
-import { optimizeCatalogImage } from "../services/image-optimizer.js";
 import { resolveMapSid } from "../services/map-resolver.js";
 import { reviewWithNim } from "../services/nim-review.js";
+import { createUploadWorkerClient } from "../services/upload-worker-client.js";
 import { utcNow } from "../time.js";
 import { validateAkrArchive } from "./archive.js";
 import { formatSection } from "./sections.js";
 import { isSupportedMapUrl, parseSubmissionPost } from "./post-parser.js";
-import { akrMaxBytes, imageSourceMaxBytes, type AkronProfileSection, type ScanStatus } from "./types.js";
+import { akrMaxBytes, type AkronProfileSection, type ScanStatus } from "./types.js";
 
 type ScanThreadInput = {
   config: AppConfig;
@@ -166,11 +166,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
     } else if (akrBytes && status === "Published") {
       try {
         const optimizedImage = attachmentPlan.image
-          ? await optimizeCatalogImage({
-              bytes: await downloadAttachment(attachmentPlan.image, imageSourceMaxBytes),
-              contentType: attachmentPlan.image.contentType ?? "",
-              fileName: attachmentPlan.image.name
-            })
+          ? await createUploadWorkerClient(input.config).transformCatalogCapture(attachmentPlan.image.url)
           : undefined;
         const result = await publishCatalogEntry(input.config, input.db, input.r2Client ?? createR2Client(input.config), {
           discordThreadId: input.thread.id,
