@@ -5,6 +5,7 @@ import {
   type CatalogPack,
   type CatalogPublication,
   type DeletedUploadSubmission,
+  type OptimizedCatalogCapture,
   type UploadAiReview,
   type UploadDiscordMessages
 } from "../upload-worker.js";
@@ -33,7 +34,6 @@ export type UploadWorkerCapture = {
   objectId: string;
   roomName: string;
   sourceUrl: string;
-  optimized: boolean;
 };
 
 export type UploadWorkerStatusSubmission = {
@@ -86,7 +86,7 @@ export type UploadWorkerClient = {
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
   getSubmissionContext(submissionId: string): Promise<UploadWorkerSubmissionContext>;
   recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void>;
-  putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/jpeg" }): Promise<void>;
+  transformCatalogCapture(sourceUrl: string): Promise<OptimizedCatalogCapture>;
   approve(submissionId: string, author?: UploadWorkerCatalogAuthor): Promise<UploadWorkerStatusBody>;
   reject(submissionId: string, reason: string): Promise<void>;
   requestChanges(submissionId: string, reason: string): Promise<void>;
@@ -127,11 +127,26 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     async recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/reviews/${submissionId}`, review);
     },
-    async putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/jpeg" }): Promise<void> {
-      await signedJson(fetchImpl, baseUrl, secret, `/bot/optimized-captures/${submissionId}/${objectId}`, {
-        contentType: capture.contentType,
-        bytesBase64: capture.bytes.toString("base64")
-      });
+    async transformCatalogCapture(sourceUrl: string): Promise<OptimizedCatalogCapture> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, "/bot/catalog/captures/transform", { sourceUrl });
+      const body = await readJson(response) as { contentType?: unknown; bytesBase64?: unknown };
+      if (body.contentType !== "image/jpeg" || typeof body.bytesBase64 !== "string") {
+        throw new Error("Upload Worker returned an invalid catalog capture.");
+      }
+      const bytes = Buffer.from(body.bytesBase64, "base64");
+      const isCanonicalBase64 = bytes.toString("base64") === body.bytesBase64;
+      const isJpeg = bytes.length >= 4 &&
+        bytes[0] === 0xff &&
+        bytes[1] === 0xd8 &&
+        bytes[2] === 0xff;
+      if (!isCanonicalBase64 || !isJpeg) {
+        throw new Error("Upload Worker returned an invalid catalog capture.");
+      }
+      return {
+        bytes,
+        contentType: body.contentType,
+        extension: "jpg"
+      };
     },
     async approve(submissionId: string, author?: UploadWorkerCatalogAuthor): Promise<UploadWorkerStatusBody> {
       const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, author ? {
