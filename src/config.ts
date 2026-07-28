@@ -1,5 +1,16 @@
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
 import { z } from "zod";
+
+const nodeEnv = process.env.NODE_ENV;
+const envFile =
+  nodeEnv === "staging" ? ".env.staging" : nodeEnv === "production" ? ".env.prod" : undefined;
+if (envFile) {
+  // Deployed environments may inject variables without mounting a dotenv file.
+  // Never fall back to development .env values when an environment is explicit.
+  dotenvConfig({ path: envFile });
+} else {
+  dotenvConfig();
+}
 
 const optionalId = z.string().trim().optional().default("");
 

@@ -55,6 +55,30 @@ class TestR2 {
 }
 
 describe("Cloudflare upload store consistency", () => {
+  it("rejects streamed uploads whose body length differs from the declaration", async () => {
+    const { store, quarantine } = testStore();
+    const batch = uploadBatch("2026-01-01T00:00:00.000Z", "prepared", "declared-length");
+    const object = uploadObject(batch.id);
+    delete object.uploadedBytes;
+    await store.putBatch(batch);
+    await store.putObject(object);
+
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Uint8Array.from([1, 2, 3]));
+        controller.close();
+      }
+    });
+
+    await expect(store.putUploadedObject(object.id, {
+      body,
+      contentType: "application/octet-stream",
+      declaredBytes: 4
+    })).rejects.toThrow("Upload body length 3 does not match declared length 4.");
+    expect((await store.getObject(object.id, { includeBytes: false }))?.uploadedBytes).toBeUndefined();
+    expect(quarantine.objects.size).toBe(0);
+  });
+
   it("keeps concurrent sibling reservations consistent in normalized rows and payload JSON", async () => {
     const { store, d1 } = testStore();
     const batch = uploadBatch("2026-01-01T00:00:00.000Z", "queued");
@@ -200,13 +224,9 @@ describe("Cloudflare upload store consistency", () => {
   });
 
   it("rolls back a partially written public publication", async () => {
-    const { store, quarantine, publicBucket } = testStore();
+    const { store, publicBucket } = testStore();
     const item = submission("submission", "batch", "moderating");
-    item.captures = [{
-      objectId: "capture", roomName: "room",
-      optimized: { r2Key: "optimized/capture.jpg", contentType: "image/jpeg", uploadedBytes: 3, extension: "jpg" }
-    }];
-    quarantine.objects.set("optimized/capture.jpg", Buffer.from("jpeg"));
+    item.captures = [{ objectId: "capture", roomName: "room" }];
     publicBucket.failPutAt = 2;
 
     await expect(store.publishCatalogEntry({
@@ -219,7 +239,8 @@ describe("Cloudflare upload store consistency", () => {
         id: "capture", tokenHash: "token", kind: "capture", batchId: "batch", maxBytes: 4,
         contentType: "image/webp", uploadedBytes: 4
       }],
-      captureSourceUrls: [""],
+      captureSourceUrls: ["https://uploads.example.test/uploads/source/capture"],
+      optimizeCatalogCapture: async () => catalogJpeg(),
       authorName: "Anonymous",
       authorAvatarUrl: "",
       now: new Date("2026-01-02T00:00:00.000Z")
@@ -228,13 +249,9 @@ describe("Cloudflare upload store consistency", () => {
   });
 
   it("preserves pre-existing content-addressed assets when retry metadata fails", async () => {
-    const { store, quarantine, publicBucket } = testStore();
+    const { store, publicBucket } = testStore();
     const item = submission("submission", "batch", "moderating");
-    item.captures = [{
-      objectId: "capture", roomName: "room",
-      optimized: { r2Key: "optimized/capture.jpg", contentType: "image/jpeg", uploadedBytes: 4, extension: "jpg" }
-    }];
-    quarantine.objects.set("optimized/capture.jpg", Buffer.from("jpeg"));
+    item.captures = [{ objectId: "capture", roomName: "room" }];
     const input = {
       submission: item,
       pack: {
@@ -245,7 +262,8 @@ describe("Cloudflare upload store consistency", () => {
         id: "capture", tokenHash: "token", kind: "capture" as const, batchId: "batch", maxBytes: 4,
         contentType: "image/webp", uploadedBytes: 4
       }],
-      captureSourceUrls: [""],
+      captureSourceUrls: ["https://uploads.example.test/uploads/source/capture"],
+      optimizeCatalogCapture: async () => catalogJpeg(),
       authorName: "Anonymous",
       authorAvatarUrl: "",
       now: new Date("2026-01-02T00:00:00.000Z")
@@ -335,22 +353,6 @@ describe("Cloudflare upload store consistency", () => {
     expect(publicBucket.objects.has("catalog/index.json")).toBe(false);
   });
 
-  it("deletes a newly optimized object when the payload transaction fails", async () => {
-    const { store, d1, quarantine } = testStore();
-    const batch = uploadBatch("2026-01-01T00:00:00.000Z", "reviewing");
-    batch.submissions[0]!.captures = [{ objectId: "capture", roomName: "room" }];
-    await store.putBatch(batch);
-    d1.sqlite.exec([
-      "CREATE TRIGGER fail_payload BEFORE UPDATE ON upload_batches",
-      "BEGIN SELECT RAISE(ABORT, 'payload failed'); END;"
-    ].join(" "));
-
-    await expect(store.putOptimizedCapture({
-      submissionId: "submission-a", objectId: "capture", bytes: Buffer.from("jpeg"),
-      contentType: "image/jpeg", now: new Date("2026-01-02T00:00:00.000Z")
-    })).rejects.toThrow("payload failed");
-    expect([...quarantine.objects.keys()].filter(key => key.includes("optimized-captures"))).toEqual([]);
-  });
 });
 
 function testStore(): { store: CloudflareUploadStore; d1: TestD1; quarantine: TestR2; publicBucket: TestR2 } {
@@ -407,5 +409,13 @@ function uploadObject(batchId: string): UploadObjectRecord {
   return {
     id: `object-${batchId}`, tokenHash: "token", kind: "pack", batchId, submissionId: `submission-a-${batchId}`,
     maxBytes: 100, contentType: "application/octet-stream", uploadedBytes: 10
+  };
+}
+
+function catalogJpeg(): { bytes: Buffer; contentType: "image/jpeg"; extension: "jpg" } {
+  return {
+    bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    contentType: "image/jpeg",
+    extension: "jpg"
   };
 }

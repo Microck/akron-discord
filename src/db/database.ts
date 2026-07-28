@@ -119,6 +119,8 @@ function runMigrations(sqlite: Database.Database): void {
       event_name TEXT NOT NULL,
       received_utc TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS github_webhook_deliveries_received_utc_idx
+      ON github_webhook_deliveries(received_utc);
 
     CREATE TABLE IF NOT EXISTS playtester_applications (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

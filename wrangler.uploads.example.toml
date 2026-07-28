@@ -1,7 +1,15 @@
+# Required environment:
+#   CLOUDFLARE_ACCOUNT_ID - Cloudflare account used by Wrangler
+#
+# Secrets (set via wrangler):
+#   BOT_HMAC_SECRET
+
 name = "akron-upload-worker"
 main = "src/upload-worker-cloudflare.ts"
 compatibility_date = "2026-07-06"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+preview_urls = false
 
 [triggers]
 crons = ["17 4 * * *"]
@@ -58,4 +66,4 @@ namespace_id = "4107004"
   period = 60
 
 # Secrets:
-# wrangler secret put BOT_HMAC_SECRET
+# wrangler secret put BOT_HMAC_SECRET --config wrangler.uploads.toml

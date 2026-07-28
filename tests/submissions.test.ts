@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { buildPortableSetupStateExample, validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasMalwareArchiveReason, resolveCatalogMapIdentity } from "../src/submissions/scanner.js";
+import {
+  buildScanComponents,
+  buildScanEmbed,
+  buildScannedArchiveKey,
+  hasBlockingAttachmentProblems,
+  hasMalwareArchiveReason,
+  resolveCatalogMapIdentity
+} from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 import { archiveValidationFixtures, canonicalStateForSection, zipJson, zipText } from "./archive-fixtures.js";
 
@@ -368,6 +375,11 @@ describe("map URL normalization", () => {
 });
 
 describe("submission scan classification", () => {
+  it("blocks publication when attachment policy validation reports a problem", () => {
+    expect(hasBlockingAttachmentProblems({ problems: ["Attach only one `.akr` file."] })).toBe(true);
+    expect(hasBlockingAttachmentProblems({ problems: [] })).toBe(false);
+  });
+
   it("only treats malware-like archive findings as flagged reasons", () => {
     expect(hasMalwareArchiveReason([
       "Archive contains too many files.",

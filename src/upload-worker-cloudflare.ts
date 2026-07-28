@@ -12,9 +12,9 @@ import {
   type CatalogPack,
   type DeletedUploadSubmission,
   type DeleteSubmissionInput,
+  type OptimizedCatalogCapture,
   type PendingUploadedObjectBody,
   type PublishCatalogEntryInput,
-  type PutOptimizedCaptureInput,
   type RecordAiReviewInput,
   type RecordDiscordMessageInput,
   type UploadBatchRecord,
@@ -28,23 +28,20 @@ import {
 } from "./upload-worker.js";
 import { createHash, randomUUID } from "node:crypto";
 import { catalogImageMaxBytes } from "./submissions/types.js";
+import type { D1Database, D1PreparedStatement, D1Result, RateLimit } from "@cloudflare/workers-types";
 
 export type CloudflareUploadEnv = {
   UPLOAD_DB: D1Database;
   UPLOAD_QUARANTINE_BUCKET: R2Bucket;
   UPLOAD_PUBLIC_BUCKET: R2Bucket;
-  UPLOAD_PREPARE_RATE_LIMITER: RateLimitBinding;
-  UPLOAD_OBJECT_RATE_LIMITER: RateLimitBinding;
-  UPLOAD_COMPLETE_RATE_LIMITER: RateLimitBinding;
-  UPLOAD_ATTRIBUTION_RATE_LIMITER: RateLimitBinding;
+  UPLOAD_PREPARE_RATE_LIMITER: RateLimit;
+  UPLOAD_OBJECT_RATE_LIMITER: RateLimit;
+  UPLOAD_COMPLETE_RATE_LIMITER: RateLimit;
+  UPLOAD_ATTRIBUTION_RATE_LIMITER: RateLimit;
   BOT_HMAC_SECRET: string;
   UPLOAD_TERMS_VERSION?: string;
   UPLOAD_PUBLIC_BASE_URL?: string;
   UPLOAD_PUBLIC_UPLOAD_BASE_URL?: string;
-};
-
-type RateLimitBinding = {
-  limit(input: { key: string }): Promise<{ success: boolean }>;
 };
 
 type EdgeRateLimitEnv = Pick<CloudflareUploadEnv,
@@ -54,40 +51,27 @@ type EdgeRateLimitEnv = Pick<CloudflareUploadEnv,
   | "UPLOAD_ATTRIBUTION_RATE_LIMITER"
 >;
 
-type D1Database = {
-  prepare(query: string): D1PreparedStatement;
-  batch(statements: D1PreparedStatement[]): Promise<D1RunResult[]>;
-};
-
-type D1PreparedStatement = {
-  bind(...values: unknown[]): D1PreparedStatement;
-  first<T = Record<string, unknown>>(): Promise<T | null>;
-  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
-  run(): Promise<D1RunResult>;
-};
-
-type D1RunResult = {
-  meta?: {
-    changes?: number;
-  };
-};
-
 type DurableLock = {
   assertOwned(): Promise<void>;
   release(): Promise<void>;
 };
 
+// Node and Workers ship structurally different ReadableStream declarations.
+// Keep the R2 boundary narrow so the shared upload core can use Node streams
+// in tests while the production binding still follows the Workers API.
 type R2Bucket = {
-  put(key: string, value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
+  put(
+    key: string,
+    value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string,
+    options?: { httpMetadata?: { contentType?: string } }
+  ): Promise<unknown>;
   get(key: string): Promise<R2ObjectBody | null>;
   delete(key: string): Promise<void>;
 };
 
 type R2ObjectBody = {
   body: ReadableStream<Uint8Array>;
-  httpMetadata?: {
-    contentType?: string;
-  };
+  httpMetadata?: { contentType?: string };
   arrayBuffer(): Promise<ArrayBuffer>;
 };
 
@@ -116,6 +100,40 @@ export const catalogCaptureTransformAttempts = [
   { width: 1024, quality: 66 }
 ] as const;
 
+export async function optimizeCatalogCapture(
+  sourceUrl: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<OptimizedCatalogCapture> {
+  if (!sourceUrl) {
+    throw new Error("Catalog capture source URL is required.");
+  }
+
+  for (const attempt of catalogCaptureTransformAttempts) {
+    const response = await fetchImpl(sourceUrl, {
+      signal: AbortSignal.timeout(15_000),
+      cf: {
+        image: {
+          fit: "scale-down",
+          width: attempt.width,
+          format: "jpeg",
+          quality: attempt.quality,
+          metadata: "none"
+        }
+      }
+    } as ImageTransformInit);
+    if (!response.ok) {
+      throw new Error("Cloudflare image transform failed with HTTP " + response.status + ".");
+    }
+
+    const bytes = await readResponseWithinLimit(response, catalogImageMaxBytes);
+    if (bytes) {
+      return { bytes, contentType: "image/jpeg", extension: "jpg" };
+    }
+  }
+
+  throw new Error("Optimized map capture exceeds 4 MiB.");
+}
+
 type BatchRow = {
   payload_json: string;
 };
@@ -137,8 +155,6 @@ type CatalogEntryRow = {
 };
 
 const uploadObjectPrefix = "quarantine/uploads";
-const optimizedCapturePrefix = "quarantine/optimized-captures";
-
 export default {
   async fetch(request: Request, env: CloudflareUploadEnv): Promise<Response> {
     if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
@@ -155,6 +171,7 @@ export default {
       store: new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL),
       botSecret: env.BOT_HMAC_SECRET,
       publicUploadBaseUrl: env.UPLOAD_PUBLIC_UPLOAD_BASE_URL,
+      optimizeCatalogCapture,
       termsVersion: readTermsVersion(env.UPLOAD_TERMS_VERSION)
     });
     return worker.fetch(request);
@@ -200,7 +217,7 @@ export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitE
   }
 }
 
-function edgeLimiterForRequest(method: string, pathname: string, env: EdgeRateLimitEnv): RateLimitBinding | null | undefined {
+function edgeLimiterForRequest(method: string, pathname: string, env: EdgeRateLimitEnv): RateLimit | null | undefined {
   if (method === "POST" && pathname === "/uploads/prepare") return env.UPLOAD_PREPARE_RATE_LIMITER ?? null;
   if (method === "PUT" && /^\/uploads\/objects\/[^/]+$/.test(pathname)) return env.UPLOAD_OBJECT_RATE_LIMITER ?? null;
   if (method === "POST" && pathname === "/uploads/complete") return env.UPLOAD_COMPLETE_RATE_LIMITER ?? null;
@@ -574,7 +591,7 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     }
 
     const release = await this.acquireBatchLock(row.batch_id);
-    let reserved: D1RunResult;
+    let reserved: D1Result;
     try {
       reserved = await this.db
         .prepare([
@@ -694,46 +711,6 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return (await this.mutateSubmission(input.submissionId, input.now, submission => {
       submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
     }))?.submission;
-  }
-
-  async putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined> {
-    const found = await this.findSubmission(input.submissionId);
-    if (!found) {
-      return undefined;
-    }
-
-    const capture = found.submission.captures.find(candidate => candidate.objectId === input.objectId);
-    if (!capture) {
-      return undefined;
-    }
-    const revision = createHash("sha256").update(input.bytes).digest("hex").slice(0, 16);
-    const r2Key = `${optimizedCapturePrefix}/${found.batch.id}/${found.submission.id}/${capture.objectId}-${revision}.jpg`;
-    await this.quarantineBucket.put(r2Key, input.bytes, {
-      httpMetadata: { contentType: input.contentType }
-    });
-    let previousKey: string | undefined;
-    try {
-      const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
-        const currentCapture = submission.captures.find(candidate => candidate.objectId === input.objectId);
-        if (!currentCapture) throw new Error("Capture no longer exists.");
-        previousKey = currentCapture.optimized?.r2Key;
-        currentCapture.optimized = {
-          r2Key,
-          contentType: input.contentType,
-          uploadedBytes: input.bytes.length,
-          extension: "jpg"
-        };
-      });
-      if (!saved) {
-        await this.quarantineBucket.delete(r2Key);
-        return undefined;
-      }
-      if (previousKey && previousKey !== r2Key) await this.quarantineBucket.delete(previousKey);
-      return saved.submission;
-    } catch (error) {
-      await this.quarantineBucket.delete(r2Key);
-      throw error;
-    }
   }
 
   async recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined> {
@@ -933,11 +910,6 @@ export class CloudflareUploadStore implements UploadWorkerStore {
         for (const object of objects.results) {
           await this.quarantineBucket.delete(object.r2_key);
         }
-        for (const submission of batch.submissions) {
-          for (const capture of submission.captures) {
-            if (capture.optimized?.r2Key) await this.quarantineBucket.delete(capture.optimized.r2Key);
-          }
-        }
         if (batch.submissions.some(submission => submission.status === "published")) {
           const staleCutoff = now.getTime() - 7 * 24 * 60 * 60 * 1000;
           const withdrawnIds: string[] = [];
@@ -1067,9 +1039,6 @@ export class CloudflareUploadStore implements UploadWorkerStore {
   private async deleteQuarantineObjectsForSubmission(batch: UploadBatchRecord, submission: UploadSubmissionRecord): Promise<void> {
     await this.deleteQuarantineObject(submission.packObjectId);
     for (const capture of submission.captures) {
-      if (capture.optimized?.r2Key) {
-        await this.quarantineBucket.delete(capture.optimized.r2Key);
-      }
       const captureStillUsed = batch.submissions.some(candidate =>
         candidate.id !== submission.id &&
         candidate.status !== "deleted" &&
@@ -1221,74 +1190,18 @@ export class CloudflareUploadStore implements UploadWorkerStore {
     return parsed;
   }
 
-  private async optimizePublicCapture(capture: UploadObjectRecord, sourceUrl: string): Promise<UploadObjectRecord | undefined> {
-    if (!sourceUrl) {
-      return capture;
-    }
-
-    let smallestBytes = Number.POSITIVE_INFINITY;
-    for (const attempt of catalogCaptureTransformAttempts) {
-      const response = await fetch(sourceUrl, {
-        signal: AbortSignal.timeout(15_000),
-        cf: {
-          image: {
-            fit: "scale-down",
-            width: attempt.width,
-            format: "jpeg",
-            quality: attempt.quality,
-            metadata: "none"
-          }
-        }
-      } as ImageTransformInit);
-      if (!response.ok) {
-        throw new Error("Cloudflare image transform failed with HTTP " + response.status + ".");
-      }
-
-      const bytes = await readResponseWithinLimit(response, catalogImageMaxBytes);
-      if (!bytes) {
-        continue;
-      }
-      smallestBytes = Math.min(smallestBytes, bytes.length);
-
-      return {
-        ...capture,
-        bytes,
-        uploadedBytes: bytes.length,
-        contentType: "image/jpeg"
-      };
-    }
-
-    console.warn("Skipping public capture because optimized map capture exceeds 4 MiB after downscaling; smallest result was " + smallestBytes + " bytes.");
-    return undefined;
-  }
-
   private async publicCapturesForPublication(input: PublishCatalogEntryInput): Promise<UploadObjectRecord[]> {
     const captures: UploadObjectRecord[] = [];
     for (const [index, capture] of input.captures.entries()) {
-      const optimized = input.submission.captures[index]?.optimized;
-      const optimizedBytes = optimized ? await this.readOptimizedCaptureBytes(optimized.r2Key) : undefined;
-      const publicCapture = optimizedBytes
-        ? {
-            ...capture,
-            bytes: optimizedBytes,
-            uploadedBytes: optimizedBytes.length,
-            contentType: optimized?.contentType ?? "image/jpeg"
-          }
-        : await this.optimizePublicCapture(capture, input.captureSourceUrls[index] ?? "");
-      if (!publicCapture) {
-        throw new Error("Optimized capture exceeds the public image budget.");
-      }
-      captures.push(publicCapture);
+      const optimized = await input.optimizeCatalogCapture(input.captureSourceUrls[index] ?? "");
+      captures.push({
+        ...capture,
+        bytes: optimized.bytes,
+        uploadedBytes: optimized.bytes.length,
+        contentType: optimized.contentType
+      });
     }
     return captures;
-  }
-
-  private async readOptimizedCaptureBytes(r2Key: string | undefined): Promise<Buffer | undefined> {
-    if (!r2Key) {
-      return undefined;
-    }
-    const stored = await this.quarantineBucket.get(r2Key);
-    return stored ? Buffer.from(await stored.arrayBuffer()) : undefined;
   }
 
 }
@@ -1306,18 +1219,24 @@ async function bodyWithKnownLength(
   declaredBytes: number
 ): Promise<{ body: Buffer | ReadableStream<Uint8Array>; completed: Promise<void> }> {
   if (Buffer.isBuffer(body)) {
+    if (body.length !== declaredBytes) {
+      throw new Error(`Upload body length ${body.length} does not match declared length ${declaredBytes}.`);
+    }
     return { body, completed: Promise.resolve() };
   }
 
-  const fixedLengthStream = (globalThis as typeof globalThis & {
+  const FixedLengthStreamCtor = (globalThis as typeof globalThis & {
     FixedLengthStream?: FixedLengthStreamConstructor;
   }).FixedLengthStream;
-  if (!fixedLengthStream) {
+  if (!FixedLengthStreamCtor) {
     const bytes = Buffer.from(await new Response(body).arrayBuffer());
+    if (bytes.length !== declaredBytes) {
+      throw new Error(`Upload body length ${bytes.length} does not match declared length ${declaredBytes}.`);
+    }
     return { body: bytes, completed: Promise.resolve() };
   }
 
-  const fixed = new fixedLengthStream(declaredBytes);
+  const fixed = new FixedLengthStreamCtor(declaredBytes);
   return {
     body: fixed.readable,
     completed: body.pipeTo(fixed.writable)

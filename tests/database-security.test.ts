@@ -3,10 +3,45 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createDatabase } from "../src/db/database.js";
+import { claimGithubDelivery } from "../src/github-webhook.js";
 import { logAudit } from "../src/services/audit.js";
 import { createPlaytesterApplicationReview, recoverPlaytesterApplicationReview } from "../src/services/playtesting.js";
 
 describe("database filesystem security", () => {
+  it("retains recent webhook replay records and removes expired records", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-webhook-retention-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    try {
+      const insert = database.sqlite.prepare(
+        "INSERT INTO github_webhook_deliveries (delivery_id, event_name, received_utc) VALUES (?, 'issues', ?)"
+      );
+      insert.run("expired", "2025-12-01T00:00:00.000Z");
+      insert.run("recent", "2026-01-15T00:00:00.000Z");
+
+      expect(await claimGithubDelivery(
+        database.db,
+        "current",
+        "issues",
+        new Date("2026-02-01T00:00:00.000Z")
+      )).toBe(true);
+      expect(await claimGithubDelivery(
+        database.db,
+        "recent",
+        "issues",
+        new Date("2026-02-01T00:00:00.000Z")
+      )).toBe(false);
+      expect(database.sqlite.prepare(
+        "SELECT delivery_id FROM github_webhook_deliveries ORDER BY delivery_id"
+      ).all()).toEqual([
+        { delivery_id: "current" },
+        { delivery_id: "recent" }
+      ]);
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("restricts the data directory and SQLite files to the bot account", () => {
     const directory = mkdtempSync(join(tmpdir(), "akron-database-"));
     const databasePath = join(directory, "private", "akron.sqlite");

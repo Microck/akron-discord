@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import { validateAkrArchive } from "./submissions/archive.js";
 import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js";
 import { sectionTag } from "./submissions/sections.js";
-import { akrMaxBytes, catalogImageMaxBytes, imageSourceMaxBytes, type AkronProfileSection } from "./submissions/types.js";
+import { akrMaxBytes, imageSourceMaxBytes, type AkronProfileSection } from "./submissions/types.js";
 
 export type UploadSection = Extract<AkronProfileSection, "StartPos" | "AutoKill" | "AutoDeafen">;
 export type UploadStatus =
@@ -68,18 +68,15 @@ export type UploadAiReview = {
   reviewedUtc: string;
 };
 
-export type UploadOptimizedCapture = {
+export type OptimizedCatalogCapture = {
+  bytes: Buffer;
   contentType: "image/jpeg";
-  uploadedBytes: number;
   extension: "jpg";
-  r2Key?: string;
-  bytes?: Buffer;
 };
 
 export type UploadCaptureRecord = {
   objectId: string;
   roomName: string;
-  optimized?: UploadOptimizedCapture;
 };
 
 export type UploadObjectRecord = {
@@ -164,7 +161,6 @@ export type UploadWorkerStore = {
   publishCatalogEntry(input: PublishCatalogEntryInput): Promise<CatalogPublication>;
   publishCatalogMetadata(entry: CatalogPack): Promise<void>;
   recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined>;
-  putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined>;
   recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined>;
   deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined>;
   reserveUploadQuota(input: UploadQuotaReservationInput): Promise<boolean>;
@@ -193,6 +189,7 @@ export type PublishCatalogEntryInput = {
   captures: UploadObjectRecord[];
   now: Date;
   captureSourceUrls: string[];
+  optimizeCatalogCapture(sourceUrl: string): Promise<OptimizedCatalogCapture>;
   authorName: string;
   authorAvatarUrl: string;
 };
@@ -200,14 +197,6 @@ export type PublishCatalogEntryInput = {
 export type RecordAiReviewInput = {
   submissionId: string;
   review: Omit<UploadAiReview, "reviewedUtc">;
-  now: Date;
-};
-
-export type PutOptimizedCaptureInput = {
-  submissionId: string;
-  objectId: string;
-  bytes: Buffer;
-  contentType: "image/jpeg";
   now: Date;
 };
 
@@ -229,6 +218,8 @@ export type UploadWorkerOptions = {
   botSecret: string;
   publicUploadBaseUrl?: string;
   termsVersion?: number;
+  optimizeCatalogCapture?: (sourceUrl: string) => Promise<OptimizedCatalogCapture>;
+  fetchCatalogCaptureSource?: (sourceUrl: string, signal?: AbortSignal) => Promise<Response>;
   now?: () => Date;
   id?: () => string;
 };
@@ -270,6 +261,7 @@ const maxModerationAttempts = 5;
 const botSignatureWindowMs = 5 * 60 * 1000;
 const jsonContentType = { "content-type": "application/json; charset=utf-8" };
 const allowedCaptureContentTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+const trustedDiscordCaptureHosts = new Set(["cdn.discordapp.com", "media.discordapp.net"]);
 
 export function createUploadWorker(options: UploadWorkerOptions): { fetch(request: Request): Promise<Response> } {
   const now = options.now ?? (() => new Date());
@@ -333,6 +325,18 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             store: options.store,
             botSecret: options.botSecret,
             now
+          });
+        }
+
+        if (request.method === "GET" && url.pathname === "/bot/catalog/captures/source") {
+          return await getSignedCatalogCaptureSource({
+            sourceUrl: url.searchParams.get("sourceUrl") ?? "",
+            expires: url.searchParams.get("expires") ?? "",
+            signature: url.searchParams.get("signature") ?? "",
+            botSecret: options.botSecret,
+            now,
+            fetchSource: options.fetchCatalogCaptureSource ??
+              ((sourceUrl, signal) => fetch(sourceUrl, { signal }))
           });
         }
 
@@ -433,17 +437,16 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
           });
         }
 
-        const optimizedCaptureMatch = url.pathname.match(/^\/bot\/optimized-captures\/([^/]+)\/([^/]+)$/);
-        if (request.method === "POST" && optimizedCaptureMatch) {
+        if (request.method === "POST" && url.pathname === "/bot/catalog/captures/transform") {
           const body = await readSignedJson(request, options.botSecret, now, options.store);
           if (body instanceof Response) {
             return body;
           }
-          return await putOptimizedCapture({
-            submissionId: optimizedCaptureMatch[1] ?? "",
-            objectId: optimizedCaptureMatch[2] ?? "",
+          return await transformCatalogCapture({
             body,
-            store: options.store,
+            optimize: options.optimizeCatalogCapture,
+            origin: uploadOrigin,
+            botSecret: options.botSecret,
             now
           });
         }
@@ -503,7 +506,8 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             store: options.store,
             now,
             origin: uploadOrigin,
-            botSecret: options.botSecret
+            botSecret: options.botSecret,
+            optimizeCatalogCapture: options.optimizeCatalogCapture
           });
         }
 
@@ -702,18 +706,12 @@ export class InMemoryUploadStore implements UploadWorkerStore {
 
     const publicCaptures: UploadObjectRecord[] = [];
     for (const [index, capture] of input.captures.entries()) {
-      const captureState = input.submission.captures[index];
-      const optimized = captureState?.optimized?.bytes ? captureState.optimized : undefined;
-      const uploaded = optimized ? undefined : await this.getUploadedObjectBody(capture.id);
-      const bytes = optimized?.bytes ?? (uploaded ? Buffer.from(await bufferFromBody(uploaded.body)) : undefined);
-      if (!bytes) {
-        throw new Error("Cannot publish missing upload objects.");
-      }
+      const optimized = await input.optimizeCatalogCapture(input.captureSourceUrls[index] ?? "");
       publicCaptures.push({
         ...capture,
-        bytes,
-        uploadedBytes: bytes.length,
-        contentType: optimized?.contentType ?? capture.contentType
+        bytes: optimized.bytes,
+        uploadedBytes: optimized.bytes.length,
+        contentType: optimized.contentType
       });
     }
     const publication = buildPublication(input.submission, publicCaptures, input.now, "https://akron.example.test", packBytes);
@@ -758,22 +756,6 @@ export class InMemoryUploadStore implements UploadWorkerStore {
   async recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined> {
     const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
       submission.aiReview = { ...input.review, reviewedUtc: input.now.toISOString() };
-    });
-    return saved?.submission;
-  }
-
-  async putOptimizedCapture(input: PutOptimizedCaptureInput): Promise<UploadSubmissionRecord | undefined> {
-    const saved = await this.mutateSubmission(input.submissionId, input.now, submission => {
-      const capture = submission.captures.find(candidate => candidate.objectId === input.objectId);
-      if (!capture) {
-        throw new HttpError(404, "capture_not_found");
-      }
-      capture.optimized = {
-        bytes: Buffer.from(input.bytes),
-        contentType: input.contentType,
-        uploadedBytes: input.bytes.length,
-        extension: "jpg"
-      };
     });
     return saved?.submission;
   }
@@ -1241,6 +1223,40 @@ async function getSignedSourceObject(input: {
   });
 }
 
+async function getSignedCatalogCaptureSource(input: {
+  sourceUrl: string;
+  expires: string;
+  signature: string;
+  botSecret: string;
+  now: () => Date;
+  fetchSource: (sourceUrl: string, signal?: AbortSignal) => Promise<Response>;
+}): Promise<Response> {
+  const expiresMs = Number.parseInt(input.expires, 10);
+  if (!Number.isFinite(expiresMs) || expiresMs <= input.now().getTime()) {
+    return json({ error: "source_url_expired" }, 403);
+  }
+  if (!isTrustedDiscordCaptureUrl(input.sourceUrl)) {
+    return json({ error: "catalog_capture_source_invalid" }, 400);
+  }
+
+  const expected = signCatalogCaptureSource(input.botSecret, input.sourceUrl, input.expires);
+  if (!safeEqualHex(input.signature, expected)) {
+    return json({ error: "source_url_invalid" }, 403);
+  }
+
+  const source = await input.fetchSource(input.sourceUrl, AbortSignal.timeout(15_000));
+  const headers = new Headers({ "cache-control": "no-store" });
+  const contentType = source.headers.get("content-type");
+  if (contentType) {
+    headers.set("content-type", contentType);
+  }
+  return new Response(source.body, {
+    status: source.status,
+    statusText: source.statusText,
+    headers
+  });
+}
+
 async function completeUpload(input: {
   request: Request;
   store: UploadWorkerStore;
@@ -1458,6 +1474,7 @@ async function applyModerationAction(input: {
   now: () => Date;
   origin: string;
   botSecret: string;
+  optimizeCatalogCapture?: (sourceUrl: string) => Promise<OptimizedCatalogCapture>;
 }): Promise<Response> {
   let found = await findSubmission(input.store, input.submissionId);
   if (!found) {
@@ -1502,7 +1519,8 @@ async function applyModerationAction(input: {
         authorAvatarUrl: author.avatarUrl,
         captureSourceUrls: found.submission.captures.map(capture =>
           signedSourceObjectUrl(input.origin, capture.objectId, input.botSecret, input.now())
-        )
+        ),
+        optimizeCatalogCapture: input.optimizeCatalogCapture ?? unavailableCatalogCaptureOptimizer
       });
       found.submission.status = "published";
     } catch (error) {
@@ -1637,43 +1655,47 @@ async function recordAiReview(input: {
   return json({ ok: true, submissionId: saved.id, aiReview: saved.aiReview });
 }
 
-async function putOptimizedCapture(input: {
-  submissionId: string;
-  objectId: string;
+async function transformCatalogCapture(input: {
   body: Record<string, unknown>;
-  store: UploadWorkerStore;
+  optimize?: (sourceUrl: string) => Promise<OptimizedCatalogCapture>;
+  origin: string;
+  botSecret: string;
   now: () => Date;
 }): Promise<Response> {
-  const contentType = normalizeContentType(readRequiredString(input.body, "contentType"));
-  if (contentType !== "image/jpeg") {
-    return json({ error: "optimized_capture_type_unsupported" }, 415);
+  if (!input.optimize) {
+    return json({ error: "catalog_capture_transform_unavailable" }, 503);
+  }
+  const sourceUrl = readRequiredString(input.body, "sourceUrl");
+  if (!isTrustedDiscordCaptureUrl(sourceUrl)) {
+    return json({ error: "catalog_capture_source_invalid" }, 400);
   }
 
-  let bytes: Buffer;
-  try {
-    bytes = Buffer.from(readRequiredString(input.body, "bytesBase64"), "base64");
-  } catch {
-    return json({ error: "optimized_capture_invalid" }, 400);
-  }
-  if (bytes.length <= 0 || bytes.length > catalogImageMaxBytes) {
-    return json({ error: "optimized_capture_too_large", maxBytes: catalogImageMaxBytes }, 413);
-  }
-
-  const saved = await input.store.putOptimizedCapture({
-    submissionId: input.submissionId,
-    objectId: input.objectId,
-    bytes,
-    contentType,
-    now: input.now()
-  });
-  if (!saved) {
-    return json({ error: "submission_not_found" }, 404);
-  }
+  // Cloudflare accepts same-zone image sources by default. Proxy the allowlisted
+  // Discord URL through this signed route so deployments do not depend on a
+  // separate Images dashboard origin configuration.
+  const signedSourceUrl = signedCatalogCaptureSourceUrl(
+    input.origin,
+    sourceUrl,
+    input.botSecret,
+    input.now()
+  );
+  const transformed = await input.optimize(signedSourceUrl);
   return json({
-    ok: true,
-    submissionId: saved.id,
-    objectId: input.objectId
+    contentType: transformed.contentType,
+    bytesBase64: transformed.bytes.toString("base64")
   });
+}
+
+function isTrustedDiscordCaptureUrl(sourceUrl: string): boolean {
+  try {
+    const parsed = new URL(sourceUrl);
+    return parsed.protocol === "https:" &&
+      !parsed.username &&
+      !parsed.password &&
+      trustedDiscordCaptureHosts.has(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 async function requeueModerationJobs(input: {
@@ -1928,13 +1950,16 @@ function botCaptureSources(
   origin: string,
   botSecret: string,
   now: Date
-): Array<{ objectId: string; roomName: string; sourceUrl: string; optimized: boolean }> {
+): Array<{ objectId: string; roomName: string; sourceUrl: string }> {
   return submission.captures.map(capture => ({
     objectId: capture.objectId,
     roomName: capture.roomName,
-    sourceUrl: signedSourceObjectUrl(origin, capture.objectId, botSecret, now),
-    optimized: Boolean(capture.optimized)
+    sourceUrl: signedSourceObjectUrl(origin, capture.objectId, botSecret, now)
   }));
+}
+
+async function unavailableCatalogCaptureOptimizer(): Promise<OptimizedCatalogCapture> {
+  throw new Error("Catalog capture transformation is unavailable.");
 }
 
 function isClaimableModerationStatus(submission: UploadSubmissionRecord, now: Date): boolean {
@@ -2456,6 +2481,19 @@ function signedSourceObjectUrl(origin: string, objectId: string, secret: string,
 function signSourceObject(secret: string, objectId: string, expires: string): string {
   return createHmac("sha256", secret)
     .update(["source-object", objectId, expires].join("\n"))
+    .digest("hex");
+}
+
+function signedCatalogCaptureSourceUrl(origin: string, sourceUrl: string, secret: string, now: Date): string {
+  const expires = String(now.getTime() + sourceObjectSignatureTtlMs);
+  const signature = signCatalogCaptureSource(secret, sourceUrl, expires);
+  const query = new URLSearchParams({ sourceUrl, expires, signature });
+  return `${origin.replace(/\/+$/, "")}/bot/catalog/captures/source?${query.toString()}`;
+}
+
+function signCatalogCaptureSource(secret: string, sourceUrl: string, expires: string): string {
+  return createHmac("sha256", secret)
+    .update(["catalog-capture-source", sourceUrl, expires].join("\n"))
     .digest("hex");
 }
 
