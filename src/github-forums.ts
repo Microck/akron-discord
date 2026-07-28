@@ -145,6 +145,7 @@ async function collectGithubThreadContext(
 
 function githubAttachmentsFromMessage(message: Message): GithubAttachment[] {
   return Array.from(message.attachments.values()).map(attachment => ({
+    id: attachment.id,
     name: attachment.name ?? "attachment",
     url: attachment.url,
     contentType: attachment.contentType ?? "",

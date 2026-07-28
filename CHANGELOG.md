@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Accept an optional player-written diagnostic description and queue the full private report for Discord delivery with leased retries and recovery after uncertain sends.
+
 ### Fixed
 
 - reconcile published Discord pack threads on startup so replaced capture and download links do not remain broken

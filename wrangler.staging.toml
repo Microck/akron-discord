@@ -1,4 +1,4 @@
-name = "akron-upload-worker"
+name = "akron-upload-worker-staging"
 main = "src/upload-worker-cloudflare.ts"
 compatibility_date = "2026-07-06"
 compatibility_flags = ["nodejs_compat"]
@@ -10,26 +10,27 @@ crons = ["17 4 * * *"]
 
 [vars]
 UPLOAD_TERMS_VERSION = "1"
-UPLOAD_PUBLIC_BASE_URL = "https://akron.micr.dev"
-UPLOAD_PUBLIC_UPLOAD_BASE_URL = "https://akron.micr.dev"
+UPLOAD_PUBLIC_BASE_URL = "https://akron-staging.micr.dev"
+UPLOAD_PUBLIC_UPLOAD_BASE_URL = "https://akron-staging.micr.dev"
 
 [[d1_databases]]
 binding = "UPLOAD_DB"
-database_name = "akron-uploads"
-database_id = "2bd889d9-f2bc-4879-9302-aa361abde32e"
+database_name = "akron-uploads-staging"
+# Wrangler provisions the staging database on the first deploy and writes its
+# generated ID back to this file for later deploys.
 migrations_dir = "migrations"
 
 [[r2_buckets]]
 binding = "UPLOAD_QUARANTINE_BUCKET"
-bucket_name = "akron-upload-quarantine"
+bucket_name = "akron-upload-quarantine-staging"
 
 [[r2_buckets]]
 binding = "UPLOAD_PUBLIC_BUCKET"
-bucket_name = "akron-community-packs"
+bucket_name = "akron-community-packs-staging"
 
 [[ratelimits]]
 name = "UPLOAD_PREPARE_RATE_LIMITER"
-namespace_id = "4107001"
+namespace_id = "4107101"
 
   [ratelimits.simple]
   limit = 12
@@ -37,7 +38,7 @@ namespace_id = "4107001"
 
 [[ratelimits]]
 name = "UPLOAD_OBJECT_RATE_LIMITER"
-namespace_id = "4107002"
+namespace_id = "4107102"
 
   [ratelimits.simple]
   limit = 120
@@ -45,7 +46,7 @@ namespace_id = "4107002"
 
 [[ratelimits]]
 name = "UPLOAD_COMPLETE_RATE_LIMITER"
-namespace_id = "4107003"
+namespace_id = "4107103"
 
   [ratelimits.simple]
   limit = 30
@@ -53,11 +54,11 @@ namespace_id = "4107003"
 
 [[ratelimits]]
 name = "UPLOAD_ATTRIBUTION_RATE_LIMITER"
-namespace_id = "4107004"
+namespace_id = "4107104"
 
   [ratelimits.simple]
   limit = 300
   period = 60
 
 # Secrets:
-# wrangler secret put BOT_HMAC_SECRET --config wrangler.uploads.toml
+# wrangler secret put BOT_HMAC_SECRET --config wrangler.staging.toml

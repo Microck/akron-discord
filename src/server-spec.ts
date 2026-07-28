@@ -1,4 +1,5 @@
 import { ChannelType, PermissionFlagsBits } from "discord.js";
+import type { AkronProfileSection } from "./submissions/types.js";
 
 export const roleSpecs = [
   { key: "admin", name: "Admin", color: 0xed4245 },
@@ -16,6 +17,7 @@ export type ChannelSpec = {
   type: ChannelType.GuildText | ChannelType.GuildForum;
   category?: "info" | "feedback" | "map-catalog" | "general-packs" | "playtesters" | "staff";
   visibility: "public" | "member" | "tester" | "staff" | "admin";
+  memberPosting?: "post" | "reply";
   topic?: string;
   forumTags?: string[];
 };
@@ -122,6 +124,7 @@ export const channelSpecs: ChannelSpec[] = [
     type: ChannelType.GuildForum,
     category: "map-catalog",
     visibility: "member",
+    memberPosting: "reply",
     topic: "StartPos .akr packs tied to a map.",
     forumTags: [...statusForumTags, "StartPos"]
   },
@@ -130,6 +133,7 @@ export const channelSpecs: ChannelSpec[] = [
     type: ChannelType.GuildForum,
     category: "map-catalog",
     visibility: "member",
+    memberPosting: "reply",
     topic: "Auto Kill .akr packs tied to a map.",
     forumTags: [...statusForumTags, "Auto Kill"]
   },
@@ -138,6 +142,7 @@ export const channelSpecs: ChannelSpec[] = [
     type: ChannelType.GuildForum,
     category: "map-catalog",
     visibility: "member",
+    memberPosting: "reply",
     topic: "Auto Deafen .akr packs tied to a map.",
     forumTags: [...statusForumTags, "Auto Deafen"]
   },
@@ -262,7 +267,7 @@ export const channelSpecs: ChannelSpec[] = [
   }
 ];
 
-export const submissionChannelScopes = new Map<string, string>([
+export const packChannelScopes = new Map<string, Exclude<AkronProfileSection, "Whole">>([
   ["startpos-packs", "StartPos"],
   ["auto-kill-areas", "AutoKill"],
   ["auto-deafen-areas", "AutoDeafen"],
@@ -272,7 +277,11 @@ export const submissionChannelScopes = new Map<string, string>([
   ["recorder-packs", "Recorder"]
 ]);
 
-export const mapCatalogScopes = new Set(["StartPos", "AutoKill", "AutoDeafen"]);
+export const mapCatalogScopes = new Set<AkronProfileSection>(["StartPos", "AutoKill", "AutoDeafen"]);
+
+export const directSubmissionChannelScopes = new Map(
+  [...packChannelScopes].filter(([, scope]) => !mapCatalogScopes.has(scope))
+);
 
 export const githubLabelSpecs = [
   { name: "discord", color: "5865F2", description: "Created from an Akron Discord forum post." },

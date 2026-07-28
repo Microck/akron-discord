@@ -8,9 +8,10 @@ https://akron.micr.dev/maps/<map-id>/<pack-id>.akr
 https://akron.micr.dev/maps/<map-id>/<pack-id>/captures/<capture-file>.jpg
 https://akron.micr.dev/maps/<map-id>/<pack-id>/captures/<capture-file>
 https://akron.micr.dev/submissions/<forum>/<thread-id>/<sha>.akr
+https://akron.micr.dev/r2-assets/github-attachments/<thread-id>/<digest>.jpg
 ```
 
-These routes are public-read only. Discord users never receive R2 write credentials, and the bot only writes approved public downloads after a submission passes scanning.
+These routes are public-read only. Discord users never receive R2 write credentials, and the bot only writes approved public downloads after a submission passes scanning. GitHub issue images are optimized as JPEGs and copied into the `github-attachments/` prefix before the issue is created so their links do not depend on expiring Discord CDN signatures.
 
 The Vercel website owns `akron.micr.dev`. Keep normal website routes in the website app. Route `/docs` to Mintlify from Vercel, route only the reserved public asset prefixes to R2, and route upload worker requests to the Cloudflare Upload Worker:
 

@@ -1,6 +1,9 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from "discord.js";
 import type { AppConfig } from "./config.js";
 import { embedAssets, embedAssetUrl } from "./embed-assets.js";
+import { mapCatalogScopes } from "./server-spec.js";
+import { formatSection } from "./submissions/sections.js";
+import type { AkronProfileSection } from "./submissions/types.js";
 
 export const verifyButtonCustomId = "akron:verify";
 export const playtesterApplyButtonCustomId = "akron:playtester:apply";
@@ -73,31 +76,27 @@ export function buildSubmissionGuideEmbed(config?: AppConfig): EmbedBuilder {
     .setTitle("How to Submit Akron Packs")
     .setColor(akronYellow)
     .setThumbnail(embedAssetUrl(embedAssets.akronDash))
-    .setDescription("Follow these steps before posting. The bot archives the exact scanned `.akr`, checks it, and sends map packs to moderator review before catalog publication.")
+    .setDescription("Map catalog packs use Akron's moderated in-game upload. General setup packs can be posted in their matching Discord forum.")
     .addFields(
       {
-        name: "1. Pick the forum",
-        value: "`startpos-packs`, `auto-kill-areas`, and `auto-deafen-areas` are map catalog packs. `keybind-packs`, `hud-layouts`, `audio-packs`, and `recorder-packs` stay Discord-only."
+        name: "Map catalog packs",
+        value: "Submit StartPos, Auto Kill, and Auto Deafen packs from **Interface > Upload Pack** while inside the target map. Do not create a post in the showcase forums."
       },
       {
-        name: "2. Export one scoped pack",
-        value: "In Akron, export only the matching section. Do not post whole setup packs yet."
+        name: "Map pack review",
+        value: "Akron creates the scoped `.akr`, captures marked rooms, and sends the upload to staff. Approved packs appear in the matching showcase forum and Community Packs browser."
       },
       {
-        name: "3. Add the map link",
-        value: "For map-specific forums, include `Map: https://gamebanana.com/mods/...` in the post body."
+        name: "General packs",
+        value: "Post Keybinds, HUD, Audio, or Recorder packs in `keybind-packs`, `hud-layouts`, `audio-packs`, or `recorder-packs`. These packs stay Discord-only."
       },
       {
-        name: "4. Add a short description",
-        value: "Explain what the pack contains, for example the rooms covered, marker purpose, or layout goal."
+        name: "General pack requirements",
+        value: "Export one matching scoped `.akr`, add a short description, and attach at most one helpful PNG, JPEG, or WebP capture. Whole setup packs are not accepted."
       },
       {
-        name: "5. Add a capture",
-        value: "Optional, but heavily recommended. Use Akron's room or map capture so markers, StartPos points, Auto Kill areas, or Auto Deafen areas are visible. Keep room context in frame and avoid private desktop content."
-      },
-      {
-        name: "6. Post and wait",
-        value: "Attach exactly one `.akr`. The bot will reply with the scanned file link, SHA-256, status, and any fixes needed."
+        name: "General pack scan",
+        value: "The bot checks the starter post and replies with the exact scanned file link, SHA-256, status, and any fixes needed."
       },
       {
         name: "Issues and suggestions",
@@ -112,7 +111,7 @@ export function buildWelcomeEmbed(): EmbedBuilder {
     .setColor(akronYellow)
     .setDescription("This is the official Discord for Akron support, community packs, issues, and suggestions.")
     .addFields(
-      { name: "Start Here", value: "Read #submission-guide before posting `.akr` packs." },
+      { name: "Start Here", value: "Read #submission-guide before submitting or posting `.akr` packs." },
       { name: "Need Help?", value: "Use `questions` for focused support threads." },
       { name: "Website", value: "akron.micr.dev" }
     );
@@ -127,7 +126,7 @@ export function buildFaqEmbed(config?: AppConfig): EmbedBuilder {
       { name: "How do I get access?", value: "Click the button in #verify." },
       { name: "Where do I report bugs?", value: `Prefer ${githubIssues}. Discord \`issues\` posts are synced with GitHub when needed.` },
       { name: "Can I post whole setup packs?", value: "Akron can export and import whole `.akr` setup packs for backup or direct sharing, but the public Discord catalog only accepts scoped packs such as StartPos, Auto Kill, Auto Deafen, Keybinds, HUD, Audio, and Recorder." },
-      { name: "Where do community packs show up?", value: "Map-specific catalog packs appear in Akron's Community Packs browser for the current map. Discord-only pack forums stay in Discord unless staff publish them." },
+      { name: "Where do community packs show up?", value: "Approved map packs appear in Akron's Community Packs browser and the matching showcase forum. Keybinds, HUD, Audio, and Recorder packs stay in Discord." },
       { name: "How do I open Akron?", value: "The default overlay bind is `Tab`. If it does not open, check Everest controls for Akron actions and look for bind conflicts with Celeste or other mods." },
       { name: "Why are Community Packs empty?", value: "Open the target map first, refresh the catalog, then check category filters, search text, catalog URL, and whether the pack's map SID matches the current map." },
       { name: "Why did my post get flagged?", value: "Staff can review locked flagged posts. The bot preserves the scanned file for evidence." }
@@ -171,23 +170,31 @@ export function buildForumExampleSpecs(): ForumExampleSpec[] {
   ];
 }
 
-export function forumGuidelines(scope: string): string {
-  const needsMap = ["StartPos", "AutoKill", "AutoDeafen"].includes(scope);
+export function forumGuidelines(scope: Exclude<AkronProfileSection, "Whole"> | "Akron"): string {
+  const needsMap = scope !== "Akron" && mapCatalogScopes.has(scope);
+
+  if (needsMap) {
+    return [
+      `Approved ${formatSection(scope)} packs are showcased here.`,
+      "Submit from Interface > Upload Pack in Akron while inside the target map.",
+      "Staff review each upload before the bot creates a post.",
+      "Members can reply to showcase threads but cannot create posts."
+    ].join("\n");
+  }
+
   return [
     `Post one ${scope} pack per forum post. Read #submission-guide before posting.`,
     "",
     "Template",
     "Title: <short pack name>",
     "Level: <level or map name>",
-    needsMap
-      ? "Map: <supported GameBanana map link or vanilla Celeste chapter name>"
-      : "Map: <optional map link when the pack is map-specific>",
+    "Map: <optional map link when the pack is map-specific>",
     "Description: <what the pack contains and when someone should use it>",
     "Attachments: <one scoped .akr file>, <optional but recommended capture image>",
     "",
     "Requirements",
     "- Attach exactly one scoped .akr file.",
-    needsMap ? "- Include a supported map link or vanilla chapter name." : "- Do not attach whole setup exports yet.",
+    "- Do not attach whole setup exports yet.",
     "- Add a short description.",
     "- Add a room or map capture when it helps show the contents."
   ].join("\n");
@@ -247,6 +254,8 @@ export function githubIssuesMarkdownLink(config?: Pick<AppConfig, "githubOwner" 
 }
 
 function submissionExample(channelName: string, label: string, packType: string, includeCapture: boolean): ForumExampleSpec {
+  const akrSection = sectionForPackType(packType) as AkronProfileSection;
+  const mapCatalogPack = mapCatalogScopes.has(akrSection);
   const fileSlug = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const akrFileName = `glyph-${fileSlug}.akr`;
   return {
@@ -261,10 +270,12 @@ function submissionExample(channelName: string, label: string, packType: string,
       `\`Description:\` ${packType} setup for practicing Glyph rooms. Replace this with the rooms, markers, or settings your pack actually covers.`,
       `\`Attachments:\` ${akrFileName}` + (includeCapture ? ", akron-map-capture-placeholder.jpg" : ""),
       "",
-      "_Use your own export when making a real submission._"
+      mapCatalogPack
+        ? "_Submit this pack type from Interface > Upload Pack in Akron. Approved packs appear here automatically._"
+        : "_Use your own export when making a real submission._"
     ].join("\n"),
     akrFileName,
-    akrSection: sectionForPackType(packType),
+    akrSection,
     includeCapture
   };
 }

@@ -19,7 +19,6 @@ import { and, eq } from "drizzle-orm";
 import { requireModerator } from "../permissions.js";
 import { logAudit } from "./audit.js";
 import { parseCatalogIndex, type CatalogIndex } from "./catalog.js";
-import { optimizeCatalogImage } from "./image-optimizer.js";
 import { reviewWithNim } from "./nim-review.js";
 import { publicR2Url } from "./r2.js";
 import {
@@ -31,7 +30,6 @@ import {
   type UploadWorkerStatusSubmission
 } from "./upload-worker-client.js";
 import type { UploadAiReview } from "../upload-worker.js";
-import { imageSourceMaxBytes } from "../submissions/types.js";
 
 const customIdPrefix = "upload-review";
 const publicationReservationLeaseMs = 5 * 60 * 1000;
@@ -353,26 +351,7 @@ async function prepareUploadReviewJob(input: {
     job = { ...job, aiReview: { ...aiReview, reviewedUtc: new Date().toISOString() } };
   }
 
-  for (const captureSource of job.captures.filter(capture => !capture.optimized)) {
-    const capture = await fetchCaptureForOptimization(captureSource.sourceUrl);
-    const optimized = await optimizeCatalogImage({
-      bytes: capture.bytes,
-      contentType: capture.contentType,
-      fileName: captureSource.roomName || "akron-map-capture"
-    });
-    await input.worker.putOptimizedCapture(job.submissionId, captureSource.objectId, {
-      bytes: optimized.bytes,
-      contentType: "image/jpeg"
-    });
-    job = {
-      ...job,
-      captures: job.captures.map(candidate =>
-        candidate.objectId === captureSource.objectId ? { ...candidate, optimized: true } : candidate
-      )
-    };
-  }
-
-  // Refresh signed source URLs after potentially expensive image processing so
+  // Refresh signed source URLs after the AI review so
   // Discord receives the full validity window when it resolves the embeds.
   return job.captures.length > 0
     ? await input.worker.getSubmissionContext(job.submissionId)
@@ -557,41 +536,6 @@ function reconcileSubmissionWithPublicCatalog(
       sha256: catalogEntry.sha256,
       sizeBytes: catalogEntry.sizeBytes
     }
-  };
-}
-
-async function fetchCaptureForOptimization(url: string): Promise<{ bytes: Buffer; contentType: string }> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) {
-    throw new Error("Capture download failed with HTTP " + response.status + ".");
-  }
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > imageSourceMaxBytes) {
-    throw new Error("Capture download exceeds the source image budget.");
-  }
-  if (!response.body) {
-    throw new Error("Capture download returned an empty body.");
-  }
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      totalBytes += next.value.byteLength;
-      if (totalBytes > imageSourceMaxBytes) {
-        await reader.cancel();
-        throw new Error("Capture download exceeds the source image budget.");
-      }
-      chunks.push(Buffer.from(next.value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return {
-    bytes: Buffer.concat(chunks),
-    contentType: response.headers.get("content-type") ?? ""
   };
 }
 

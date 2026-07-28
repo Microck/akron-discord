@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { akrMaxBytes, imageSourceMaxBytes } from "../src/submissions/types.js";
 import { catalogCaptureTransformAttempts, enforceEdgeRateLimit } from "../src/upload-worker-cloudflare.js";
 import {
-  createUploadWorker,
+  createUploadWorker as createUploadWorkerCore,
   buildPublication,
   InMemoryUploadStore,
   maxBatchDeclaredBytes,
@@ -13,7 +13,8 @@ import {
   type CatalogPublication,
   type PublishCatalogEntryInput,
   type UploadBatchRecord,
-  type UploadObjectRecord
+  type UploadObjectRecord,
+  type UploadWorkerOptions
 } from "../src/upload-worker.js";
 import { canonicalStateForSection, zipJson } from "./archive-fixtures.js";
 
@@ -400,13 +401,6 @@ describe("upload worker", () => {
     expect(job?.captures.every(capture => capture.sourceUrl.includes("/uploads/source/"))).toBe(true);
 
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
-    for (const capture of job?.captures ?? []) {
-      const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/${capture.objectId}`, {
-        contentType: "image/jpeg",
-        bytesBase64: Buffer.from(`optimized-${capture.roomName}`).toString("base64")
-      }, `ordered-captures-${capture.objectId}`);
-      expect(optimized.status).toBe(200);
-    }
     const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "ordered-captures-approve");
     const publication = (await approved.json() as UploadStatusBody).submissions[0]?.publication;
 
@@ -720,7 +714,7 @@ describe("upload worker", () => {
         status: string;
         attribution: { label: string };
         archiveFacts: Record<string, unknown>;
-        captures: Array<{ objectId: string; roomName: string; sourceUrl: string; optimized: boolean }>;
+        captures: Array<{ objectId: string; roomName: string; sourceUrl: string }>;
       }>;
     };
 
@@ -736,8 +730,7 @@ describe("upload worker", () => {
       captures: [{
         objectId: expect.any(String),
         roomName: "",
-        sourceUrl: expect.stringContaining("/uploads/source/"),
-        optimized: false
+        sourceUrl: expect.stringContaining("/uploads/source/")
       }]
     });
 
@@ -1076,13 +1069,13 @@ describe("upload worker", () => {
       packKey: expect.stringMatching(/^packs\/springcollab2020-1-beginner\//),
       downloadUrl: expect.stringMatching(/^https:\/\/akron\.example\.test\/maps\/springcollab2020-1-beginner\/.+\.akr$/),
       images: [{
-        key: expect.stringMatching(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.png$/),
-        url: expect.stringMatching(/^https:\/\/akron\.example\.test\/maps\/springcollab2020-1-beginner\/.+\/captures\/01-image\.png$/),
+        key: expect.stringMatching(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.jpg$/),
+        url: expect.stringMatching(/^https:\/\/akron\.example\.test\/maps\/springcollab2020-1-beginner\/.+\/captures\/01-image\.jpg$/),
         roomName: ""
       }]
     });
     expect(store.getPublicObjectForTesting(publication?.packKey ?? "")?.contentType).toBe("application/octet-stream");
-    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/png");
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/jpeg");
     const unpublishedCatalog = store.getCatalogIndexForTesting();
     expect(unpublishedCatalog.packs).toHaveLength(1);
     expect(unpublishedCatalog.packs[0]).toMatchObject({
@@ -1162,11 +1155,16 @@ describe("upload worker", () => {
     });
   });
 
-  it("publishes approved uploads with a bot-optimized capture image", async () => {
+  it("transforms captures in the Worker before publication", async () => {
     const store = new InMemoryUploadStore();
+    const transformedSourceUrls: string[] = [];
     const worker = createUploadWorker({
       store,
       botSecret,
+      optimizeCatalogCapture: async sourceUrl => {
+        transformedSourceUrls.push(sourceUrl);
+        return catalogJpeg();
+      },
       now: () => new Date("2026-01-01T00:00:00.000Z")
     });
     const prepared = await prepareAndUpload(worker, {
@@ -1179,19 +1177,16 @@ describe("upload worker", () => {
     });
     const submissionId = prepared.submissions[0]?.submissionId ?? "";
 
-    const captureObjectId = prepared.captures[0]?.objectId ?? "";
-    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/${captureObjectId}`, {
-      contentType: "image/jpeg",
-      bytesBase64: Buffer.from("optimized-jpeg").toString("base64")
-    }, "nonce-optimized-capture");
     const approved = await signedBotJson(worker, `/bot/moderation/${submissionId}/approve`, {}, "nonce-optimized-approve");
     const approvedBody = await approved.json() as UploadStatusBody;
     const publication = approvedBody.submissions[0]?.publication;
 
-    expect(optimized.status).toBe(200);
+    expect(transformedSourceUrls).toHaveLength(1);
+    expect(new URL(transformedSourceUrls[0] ?? "").pathname).toMatch(/^\/uploads\/source\//);
     expect(publication?.images[0]?.key).toMatch(/^captures\/springcollab2020-1-beginner\/.+\/01-image\.jpg$/);
     expect(publication?.images[0]?.url).toMatch(/\/captures\/01-image\.jpg$/);
     expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.contentType).toBe("image/jpeg");
+    expect(store.getPublicObjectForTesting(publication?.images[0]?.key ?? "")?.bytes).toEqual(catalogJpeg().bytes);
     expect(store.getCatalogIndexForTesting().packs[0]?.images[0]?.url).toBe(publication?.images[0]?.url);
   });
 
@@ -1390,6 +1385,7 @@ describe("upload worker", () => {
           maxBytes: 128, contentType: "application/octet-stream", uploadedBytes: 128, bytes: Buffer.alloc(128)
         },
         captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: [],
+        optimizeCatalogCapture: async () => catalogJpeg(),
         authorName: "Anonymous", authorAvatarUrl: ""
       }),
       signedBotJson(worker, "/bot/catalog/entries", { entry: forumEntry }, "forum-catalog-entry")
@@ -1426,42 +1422,82 @@ describe("upload worker", () => {
         maxBytes: 64, contentType: "application/octet-stream", uploadedBytes: 64, bytes: packBytes
       },
       captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: [],
+      optimizeCatalogCapture: async () => catalogJpeg(),
       authorName: "Anonymous", authorAvatarUrl: ""
     })).rejects.toThrow("Catalog commit failed");
     expect(store.getPublicObjectForTesting(publication.packKey)).toBeUndefined();
   });
 
-  it("rejects optimized captures that do not belong to the submission", async () => {
-    const store = new InMemoryUploadStore();
+  it("transforms trusted Discord catalog captures through the signed bot endpoint", async () => {
+    const sourceUrl = "https://cdn.discordapp.com/attachments/channel/capture.png";
+    let signedSourceUrl = "";
     const worker = createUploadWorker({
-      store,
+      store: new InMemoryUploadStore(),
       botSecret,
+      optimizeCatalogCapture: async receivedSourceUrl => {
+        signedSourceUrl = receivedSourceUrl;
+        return catalogJpeg();
+      },
+      fetchCatalogCaptureSource: async (receivedSourceUrl, signal) => {
+        expect(receivedSourceUrl).toBe(sourceUrl);
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal?.aborted).toBe(false);
+        return new Response("source-image", {
+          headers: {
+            "content-type": "image/png",
+            "content-length": "999"
+          }
+        });
+      },
       now: () => new Date("2026-01-01T00:00:00.000Z")
     });
-    const pack = validArchive("StartPos");
-    const preparedResponse = await prepare(worker, {
-      captures: [],
-      submissions: [submissionInput({ packSizeBytes: pack.length })]
-    });
-    expect(preparedResponse.status).toBe(201);
-    const prepared = await preparedResponse.json() as {
-      batchId: string;
-      submissions: Array<{ submissionId: string; pack: { uploadUrl: string } }>;
-    };
+    const transformed = await signedBotJson(worker, "/bot/catalog/captures/transform", {
+      sourceUrl
+    }, "transform-forum-capture");
 
-    await worker.fetch(uploadRequest(prepared.submissions[0]?.pack.uploadUrl ?? "", pack, "application/octet-stream"));
-    await postJson(worker, "/uploads/complete", {
-      installId,
-      batchId: prepared.batchId
-    });
-    const submissionId = prepared.submissions[0]?.submissionId ?? "";
-    const optimized = await signedBotJson(worker, `/bot/optimized-captures/${submissionId}/unknown-capture`, {
+    expect(transformed.status).toBe(200);
+    await expectJson(transformed, {
       contentType: "image/jpeg",
-      bytesBase64: Buffer.from("late-jpeg").toString("base64")
-    }, "repair-optimized");
+      bytesBase64: catalogJpeg().bytes.toString("base64")
+    });
 
-    expect(optimized.status).toBe(404);
-    await expectJson(optimized, { error: "capture_not_found" });
+    const parsedSignedSourceUrl = new URL(signedSourceUrl);
+    expect(parsedSignedSourceUrl.origin).toBe(baseUrl);
+    expect(parsedSignedSourceUrl.pathname).toBe("/bot/catalog/captures/source");
+    expect(parsedSignedSourceUrl.searchParams.get("sourceUrl")).toBe(sourceUrl);
+
+    const proxiedSource = await worker.fetch(new Request(signedSourceUrl));
+    expect(proxiedSource.status).toBe(200);
+    expect(proxiedSource.headers.get("content-type")).toBe("image/png");
+    expect(proxiedSource.headers.get("content-length")).toBeNull();
+    await expect(proxiedSource.text()).resolves.toBe("source-image");
+
+    const tamperedSourceUrl = new URL(signedSourceUrl);
+    tamperedSourceUrl.searchParams.set("signature", "0".repeat(64));
+    const tamperedSource = await worker.fetch(new Request(tamperedSourceUrl));
+    expect(tamperedSource.status).toBe(403);
+    await expectJson(tamperedSource, { error: "source_url_invalid" });
+
+    const expiredSourceUrl = new URL(signedSourceUrl);
+    expiredSourceUrl.searchParams.set("expires", "1");
+    const expiredSource = await worker.fetch(new Request(expiredSourceUrl));
+    expect(expiredSource.status).toBe(403);
+    await expectJson(expiredSource, { error: "source_url_expired" });
+  });
+
+  it("rejects untrusted catalog capture source URLs", async () => {
+    const worker = createUploadWorker({
+      store: new InMemoryUploadStore(),
+      botSecret,
+      optimizeCatalogCapture: async () => catalogJpeg(),
+      now: () => new Date("2026-01-01T00:00:00.000Z")
+    });
+    const transformed = await signedBotJson(worker, "/bot/catalog/captures/transform", {
+      sourceUrl: "https://internal.example.test/capture.png"
+    }, "reject-untrusted-capture");
+
+    expect(transformed.status).toBe(400);
+    await expectJson(transformed, { error: "catalog_capture_source_invalid" });
   });
 
   it("preserves sibling moderation updates while saving an approved submission", async () => {
@@ -1676,6 +1712,13 @@ describe("upload worker", () => {
 
 type TestWorker = ReturnType<typeof createUploadWorker>;
 
+function createUploadWorker(options: UploadWorkerOptions): ReturnType<typeof createUploadWorkerCore> {
+  return createUploadWorkerCore({
+    optimizeCatalogCapture: async () => catalogJpeg(),
+    ...options
+  });
+}
+
 type UploadStatusBody = {
   batchId: string;
   status: string;
@@ -1704,8 +1747,17 @@ function testWorker(): TestWorker {
   return createUploadWorker({
     store: new InMemoryUploadStore(),
     botSecret,
+    optimizeCatalogCapture: async () => catalogJpeg(),
     now: () => new Date("2026-01-01T00:00:00.000Z")
   });
+}
+
+function catalogJpeg(): { bytes: Buffer; contentType: "image/jpeg"; extension: "jpg" } {
+  return {
+    bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    contentType: "image/jpeg",
+    extension: "jpg"
+  };
 }
 
 class SiblingMutationDuringPublicationStore extends InMemoryUploadStore {

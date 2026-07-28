@@ -17,4 +17,9 @@ services:
       - ./data:/app/data
     ports:
       - "${GITHUB_WEBHOOK_PORT:-3005}:${GITHUB_WEBHOOK_PORT:-3005}"
+    # Discord gateway uptime depends on reliable DNS. Bypass Docker's flaky
+    # internal resolver so transient EAI_AGAIN errors do not drop the bot.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     restart: unless-stopped

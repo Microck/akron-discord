@@ -1,13 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
+import { diagnosticDeliveryJobSchema, diagnosticReportSchema, type DiagnosticDeliveryJob, type DiagnosticReport } from "../upload-diagnostics.js";
+import { z } from "zod";
 import {
   signBotRequest,
   type CatalogPack,
   type CatalogPublication,
   type DeletedUploadSubmission,
+  type OptimizedCatalogCapture,
   type UploadAiReview,
   type UploadDiscordMessages
 } from "../upload-worker.js";
+
+const diagnosticClaimResponseSchema = z.strictObject({ job: diagnosticDeliveryJobSchema.nullable() });
 
 export type UploadWorkerJob = {
   batchId: string;
@@ -33,7 +38,6 @@ export type UploadWorkerCapture = {
   objectId: string;
   roomName: string;
   sourceUrl: string;
-  optimized: boolean;
 };
 
 export type UploadWorkerStatusSubmission = {
@@ -81,12 +85,17 @@ export type UploadWorkerCatalogAuthor = {
 };
 
 export type UploadWorkerClient = {
+  claimDiagnostic(): Promise<DiagnosticDeliveryJob | null>;
+  getDiagnosticReport(reportId: string): Promise<{ report: DiagnosticReport; bytes: Buffer }>;
+  renewDiagnostic(job: DiagnosticDeliveryJob): Promise<void>;
+  retryDiagnostic(job: DiagnosticDeliveryJob): Promise<void>;
+  acknowledgeDiagnostic(job: DiagnosticDeliveryJob, messageId: string): Promise<void>;
   claimJobs(limit?: number): Promise<UploadWorkerJob[]>;
   requeueJobs(submissionIds: string[]): Promise<void>;
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
   getSubmissionContext(submissionId: string): Promise<UploadWorkerSubmissionContext>;
   recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void>;
-  putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/jpeg" }): Promise<void>;
+  transformCatalogCapture(sourceUrl: string): Promise<OptimizedCatalogCapture>;
   approve(submissionId: string, author?: UploadWorkerCatalogAuthor): Promise<UploadWorkerStatusBody>;
   reject(submissionId: string, reason: string): Promise<void>;
   requestChanges(submissionId: string, reason: string): Promise<void>;
@@ -107,8 +116,29 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
   if (!baseUrl || !secret) {
     throw new Error("Upload Worker URL and bot secret are required.");
   }
+  const diagnosticRequest = (path: string, body: unknown) =>
+    signedJson(fetchImpl, baseUrl, secret, path, body, AbortSignal.timeout(30_000));
 
   return {
+    async claimDiagnostic(): Promise<DiagnosticDeliveryJob | null> {
+      const response = await diagnosticRequest("/bot/diagnostics/claim", {});
+      const body = diagnosticClaimResponseSchema.parse(await response.json());
+      return body.job;
+    },
+    async getDiagnosticReport(reportId: string): Promise<{ report: DiagnosticReport; bytes: Buffer }> {
+      const response = await diagnosticRequest(`/bot/diagnostics/${reportId}`, {});
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return { report: diagnosticReportSchema.parse(JSON.parse(bytes.toString("utf8"))), bytes };
+    },
+    async renewDiagnostic(job: DiagnosticDeliveryJob): Promise<void> {
+      await diagnosticRequest(`/bot/diagnostics/${job.reportId}/renew`, { claimToken: job.claimToken });
+    },
+    async retryDiagnostic(job: DiagnosticDeliveryJob): Promise<void> {
+      await diagnosticRequest(`/bot/diagnostics/${job.reportId}/retry`, { claimToken: job.claimToken });
+    },
+    async acknowledgeDiagnostic(job: DiagnosticDeliveryJob, messageId: string): Promise<void> {
+      await diagnosticRequest(`/bot/diagnostics/${job.reportId}/delivered`, { claimToken: job.claimToken, messageId });
+    },
     async claimJobs(limit = 10): Promise<UploadWorkerJob[]> {
       const response = await signedJson(fetchImpl, baseUrl, secret, "/bot/jobs/claim", { limit });
       const body = await readJson(response) as { jobs?: UploadWorkerJob[] };
@@ -127,11 +157,26 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
     async recordAiReview(submissionId: string, review: Omit<UploadAiReview, "reviewedUtc">): Promise<void> {
       await signedJson(fetchImpl, baseUrl, secret, `/bot/reviews/${submissionId}`, review);
     },
-    async putOptimizedCapture(submissionId: string, objectId: string, capture: { bytes: Buffer; contentType: "image/jpeg" }): Promise<void> {
-      await signedJson(fetchImpl, baseUrl, secret, `/bot/optimized-captures/${submissionId}/${objectId}`, {
-        contentType: capture.contentType,
-        bytesBase64: capture.bytes.toString("base64")
-      });
+    async transformCatalogCapture(sourceUrl: string): Promise<OptimizedCatalogCapture> {
+      const response = await signedJson(fetchImpl, baseUrl, secret, "/bot/catalog/captures/transform", { sourceUrl });
+      const body = await readJson(response) as { contentType?: unknown; bytesBase64?: unknown };
+      if (body.contentType !== "image/jpeg" || typeof body.bytesBase64 !== "string") {
+        throw new Error("Upload Worker returned an invalid catalog capture.");
+      }
+      const bytes = Buffer.from(body.bytesBase64, "base64");
+      const isCanonicalBase64 = bytes.toString("base64") === body.bytesBase64;
+      const isJpeg = bytes.length >= 4 &&
+        bytes[0] === 0xff &&
+        bytes[1] === 0xd8 &&
+        bytes[2] === 0xff;
+      if (!isCanonicalBase64 || !isJpeg) {
+        throw new Error("Upload Worker returned an invalid catalog capture.");
+      }
+      return {
+        bytes,
+        contentType: body.contentType,
+        extension: "jpg"
+      };
     },
     async approve(submissionId: string, author?: UploadWorkerCatalogAuthor): Promise<UploadWorkerStatusBody> {
       const response = await signedJson(fetchImpl, baseUrl, secret, `/bot/moderation/${submissionId}/approve`, author ? {
@@ -185,7 +230,8 @@ async function signedJson(
   baseUrl: string,
   secret: string,
   path: string,
-  body: unknown
+  body: unknown,
+  signal?: AbortSignal
 ): Promise<Response> {
   const bodyText = JSON.stringify(body);
   const timestamp = new Date().toISOString();
@@ -206,7 +252,8 @@ async function signedJson(
       "x-akron-nonce": nonce,
       "x-akron-signature": signature
     },
-    body: bodyText
+    body: bodyText,
+    signal
   });
 
   if (!response.ok) {

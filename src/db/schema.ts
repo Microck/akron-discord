@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const botSettings = sqliteTable("bot_settings", {
   key: text("key").primaryKey(),
@@ -95,11 +95,17 @@ export const githubLinks = sqliteTable(
   })
 );
 
-export const githubWebhookDeliveries = sqliteTable("github_webhook_deliveries", {
-  deliveryId: text("delivery_id").primaryKey(),
-  eventName: text("event_name").notNull(),
-  receivedUtc: text("received_utc").notNull()
-});
+export const githubWebhookDeliveries = sqliteTable(
+  "github_webhook_deliveries",
+  {
+    deliveryId: text("delivery_id").primaryKey(),
+    eventName: text("event_name").notNull(),
+    receivedUtc: text("received_utc").notNull()
+  },
+  table => ({
+    receivedUtcIdx: index("github_webhook_deliveries_received_utc_idx").on(table.receivedUtc)
+  })
+);
 
 export const playtesterApplications = sqliteTable("playtester_applications", {
   id: integer("id").primaryKey({ autoIncrement: true }),

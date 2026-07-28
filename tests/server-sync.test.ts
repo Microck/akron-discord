@@ -1,7 +1,8 @@
 import { ChannelType, PermissionsBitField } from "discord.js";
 import { describe, expect, it } from "vitest";
+import { buildForumExampleSpecs, buildSubmissionGuideEmbed, forumGuidelines } from "../src/content.js";
 import { buildPermissionOverwrites } from "../src/server-sync.js";
-import type { ChannelSpec } from "../src/server-spec.js";
+import { channelSpecs, type ChannelSpec } from "../src/server-spec.js";
 
 describe("server sync permission policy", () => {
   const roles = new Map([
@@ -36,13 +37,22 @@ describe("server sync permission policy", () => {
     expect(hasFlag(guide.deny, PermissionsBitField.Flags.SendMessages)).toBe(true);
   });
 
-  it("allows members to create forum posts in submission channels", () => {
-    const forum = overwriteFor("member-role", buildPermissionOverwrites("guild", roles, channelSpec({
-      name: "startpos-packs",
-      category: "map-catalog",
-      visibility: "member",
-      type: ChannelType.GuildForum
-    })));
+  it("limits map catalog members to replies", () => {
+    const forum = overwriteFor(
+      "member-role",
+      buildPermissionOverwrites("guild", roles, requiredChannelSpec("startpos-packs"))
+    );
+
+    expect(hasFlag(forum.allow, PermissionsBitField.Flags.SendMessagesInThreads)).toBe(true);
+    expect(hasFlag(forum.deny, PermissionsBitField.Flags.SendMessages)).toBe(true);
+    expect(hasFlag(forum.deny, PermissionsBitField.Flags.CreatePublicThreads)).toBe(true);
+  });
+
+  it("lets members create posts in general pack forums", () => {
+    const forum = overwriteFor(
+      "member-role",
+      buildPermissionOverwrites("guild", roles, requiredChannelSpec("keybind-packs"))
+    );
 
     expect(hasFlag(forum.allow, PermissionsBitField.Flags.SendMessages)).toBe(true);
     expect(hasFlag(forum.allow, PermissionsBitField.Flags.CreatePublicThreads)).toBe(true);
@@ -71,10 +81,26 @@ describe("server sync permission policy", () => {
       type: ChannelType.GuildText
     })));
 
-  expect(hasFlag(tester.allow, PermissionsBitField.Flags.ViewChannel)).toBe(true);
-  expect(hasFlag(tester.deny, PermissionsBitField.Flags.SendMessages)).toBe(true);
-  expect(hasFlag(tester.deny, PermissionsBitField.Flags.AttachFiles)).toBe(true);
+    expect(hasFlag(tester.allow, PermissionsBitField.Flags.ViewChannel)).toBe(true);
+    expect(hasFlag(tester.deny, PermissionsBitField.Flags.SendMessages)).toBe(true);
+    expect(hasFlag(tester.deny, PermissionsBitField.Flags.AttachFiles)).toBe(true);
+  });
 });
+
+describe("pack submission copy", () => {
+  it("directs map packs to the moderated in-game upload flow", () => {
+    expect(forumGuidelines("StartPos")).toContain("Interface > Upload Pack");
+    expect(forumGuidelines("StartPos")).toContain("cannot create posts");
+    expect(JSON.stringify(buildSubmissionGuideEmbed().toJSON())).toContain("Interface > Upload Pack");
+
+    const mapExample = buildForumExampleSpecs().find(spec => spec.channelName === "startpos-packs");
+    expect(mapExample?.content).toContain("Approved packs appear here automatically");
+  });
+
+  it("keeps direct Discord posts for general packs", () => {
+    expect(forumGuidelines("Keybinds")).toContain("Post one Keybinds pack per forum post");
+    expect(JSON.stringify(buildSubmissionGuideEmbed().toJSON())).toContain("Keybinds, HUD, Audio, or Recorder");
+  });
 });
 
 function channelSpec(overrides: Partial<ChannelSpec>): ChannelSpec {
@@ -85,6 +111,14 @@ function channelSpec(overrides: Partial<ChannelSpec>): ChannelSpec {
     visibility: "member",
     ...overrides
   };
+}
+
+function requiredChannelSpec(name: string): ChannelSpec {
+  const spec = channelSpecs.find(channel => channel.name === name);
+  if (!spec) {
+    throw new Error("Missing channel spec for " + name);
+  }
+  return spec;
 }
 
 function overwriteFor(id: string, overwrites: unknown[]): { allow?: bigint[]; deny?: bigint[] } {

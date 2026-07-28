@@ -140,7 +140,7 @@ export async function handleCommand(input: {
     }
 
     await interaction.deferReply({ ephemeral: true });
-    const thread = await resolveThread(interaction, client);
+    const thread = await resolveThread(interaction, client, config.discordGuildId);
     if (!thread) {
       await interaction.editReply("Run this inside a forum thread or pass `thread-id`.");
       return;
@@ -157,7 +157,7 @@ export async function handleCommand(input: {
     }
 
     await interaction.deferReply({ ephemeral: true });
-    const thread = await resolveThread(interaction, client);
+    const thread = await resolveThread(interaction, client, config.discordGuildId);
     if (!thread) {
       await interaction.editReply("Run this inside a forum thread or pass `thread-id`.");
       return;
@@ -177,7 +177,7 @@ export async function handleCommand(input: {
 
   if (interaction.commandName === "solved") {
     await interaction.deferReply({ ephemeral: true });
-    const thread = await resolveThread(interaction, client);
+    const thread = await resolveThread(interaction, client, config.discordGuildId);
     const parent = thread?.parent;
     if (!thread || !parent || parent.type !== ChannelType.GuildForum) {
       await interaction.editReply("Run this inside a forum thread or pass `thread-id`.");
@@ -215,7 +215,7 @@ export async function handleCommand(input: {
     }
 
     await interaction.deferReply({ ephemeral: true });
-    const thread = await resolveThread(interaction, client);
+    const thread = await resolveThread(interaction, client, config.discordGuildId);
     if (!thread) {
       await interaction.editReply("Run this inside a linked forum thread or pass `thread-id`.");
       return;
@@ -242,7 +242,7 @@ export async function handleCommand(input: {
     }
 
     await interaction.deferReply({ ephemeral: true });
-    const thread = await resolveThread(interaction, client);
+    const thread = await resolveThread(interaction, client, config.discordGuildId);
     const parent = thread?.parent;
     if (!thread || !parent || parent.type !== ChannelType.GuildForum) {
       await interaction.editReply("Run this inside an issues/suggestions forum thread or pass `thread-id`.");
@@ -280,7 +280,7 @@ export async function handleCommand(input: {
     }
 
     await interaction.deferReply({ ephemeral: true });
-    const thread = await resolveThread(interaction, client);
+    const thread = await resolveThread(interaction, client, config.discordGuildId);
     if (!thread) {
       await interaction.editReply("Run this inside a linked forum thread or pass `thread-id`.");
       return;
@@ -407,14 +407,27 @@ export async function handleCommand(input: {
   }
 }
 
-async function resolveThread(interaction: ChatInputCommandInteraction, client: Client<true>): Promise<AnyThreadChannel | null> {
+async function resolveThread(
+  interaction: ChatInputCommandInteraction,
+  client: Client<true>,
+  configuredGuildId: string
+): Promise<AnyThreadChannel | null> {
   const requestedId = interaction.options.getString("thread-id");
   if (requestedId) {
     const channel = await client.channels.fetch(requestedId);
-    return channel?.isThread() ? channel : null;
+    return channel?.isThread() && isConfiguredGuildThread(channel, configuredGuildId) ? channel : null;
   }
 
-  return interaction.channel?.isThread() ? interaction.channel : null;
+  return interaction.channel?.isThread() && isConfiguredGuildThread(interaction.channel, configuredGuildId)
+    ? interaction.channel
+    : null;
+}
+
+export function isConfiguredGuildThread(
+  thread: Pick<AnyThreadChannel, "guildId">,
+  configuredGuildId: string
+): boolean {
+  return thread.guildId === configuredGuildId;
 }
 
 const solvedTagNames = [

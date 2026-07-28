@@ -20,6 +20,7 @@ import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
 import { startGithubWebhookServer } from "./github-webhook.js";
 import { handlePlaytestingInteraction, handlePlaytestingMessage } from "./services/playtesting.js";
+import { pollDiagnosticQueue } from "./services/diagnostic-delivery.js";
 import {
   handleUploadModerationInteraction,
   pollUploadModerationQueue,
@@ -49,8 +50,10 @@ client.once(Events.ClientReady, readyClient => {
   console.log(`Akron Discord bot ready as ${readyClient.user.tag}`);
   uploadModerationTimer = setInterval(() => {
     void pollUploadModerationQueue({ client: readyClient, config, onError: reportRuntimeError });
+    void pollDiagnosticQueue({ client: readyClient, config, onError: reportRuntimeError });
   }, 30_000);
   void pollUploadModerationQueue({ client: readyClient, config, onError: reportRuntimeError });
+  void pollDiagnosticQueue({ client: readyClient, config, onError: reportRuntimeError });
   void reconcilePublishedUploadDiscordMessages({
     client: readyClient,
     config,

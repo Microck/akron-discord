@@ -1,12 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { eq } from "drizzle-orm";
+import { eq, lt } from "drizzle-orm";
 import { ChannelType, type AnyThreadChannel, type Client } from "discord.js";
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
 import { githubLinks, githubWebhookDeliveries } from "./db/schema.js";
 import { applyGithubClosedTag, applyGithubOpenTag } from "./github-forums.js";
-import { utcNow } from "./time.js";
+
+const githubWebhookDeliveryRetentionMs = 30 * 24 * 60 * 60 * 1000;
 
 type GithubIssuePayload = {
   action: string;
@@ -241,10 +242,19 @@ function matchesConfiguredRepository(config: AppConfig, payload: unknown): boole
   return typeof fullName === "string" && fullName.toLowerCase() === expected;
 }
 
-async function claimGithubDelivery(db: AkronDatabase, deliveryId: string, eventName: string): Promise<boolean> {
+export async function claimGithubDelivery(
+  db: AkronDatabase,
+  deliveryId: string,
+  eventName: string,
+  now = new Date()
+): Promise<boolean> {
+  // Keep a conservative replay window without allowing one row per delivery to accumulate forever.
+  const cutoffUtc = new Date(now.getTime() - githubWebhookDeliveryRetentionMs).toISOString();
+  await db.delete(githubWebhookDeliveries).where(lt(githubWebhookDeliveries.receivedUtc, cutoffUtc));
+
   const rows = await db
     .insert(githubWebhookDeliveries)
-    .values({ deliveryId, eventName, receivedUtc: utcNow() })
+    .values({ deliveryId, eventName, receivedUtc: now.toISOString() })
     .onConflictDoNothing()
     .returning({ deliveryId: githubWebhookDeliveries.deliveryId });
   return rows.length > 0;
