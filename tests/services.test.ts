@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChannelType, RESTJSONErrorCodes } from "discord.js";
-import { formatGithubIssueBody } from "../src/services/github-sync.js";
+import { formatGithubIssueBody, materializeGithubAttachments, syncForumPostToGithub } from "../src/services/github-sync.js";
 import { mergeCatalogIndex, publishCatalogEntry, type CatalogPack } from "../src/services/catalog.js";
 import { slugMapSid } from "../src/services/map-resolver.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
@@ -361,6 +361,136 @@ describe("GitHub issue body", () => {
     expect(body).toContain("### Moderator - 2026-05-24T18:00:00.000Z");
     expect(body).toContain("Can reproduce with the attached file.");
     expect(body).toContain("- [repro.akr](https://cdn.discordapp.com/attachments/1/repro.akr)");
+  });
+
+  it("stores optimized Discord images in R2 before creating the GitHub issue", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-github-images-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    const r2 = new TestS3();
+    const issueBodies: string[] = [];
+    const optimizedUrls: string[] = [];
+
+    try {
+      await syncForumPostToGithub(
+        config({
+          githubOwner: "Microck",
+          githubRepo: "akron",
+          githubToken: "token",
+          akronPublicAssetBaseUrl: "https://akron.micr.dev"
+        }),
+        database.db,
+        {
+          discordThreadId: "118",
+          discordUrl: "https://discord.com/channels/1/118",
+          kind: "issue",
+          title: "Image expires",
+          body: "The image should stay available.",
+          attachments: [{
+            id: "attachment-118",
+            name: "image.png",
+            url: "https://cdn.discordapp.com/attachments/1/attachment-118/image.png?ex=old&is=old&hm=old",
+            contentType: "image/png",
+            sizeBytes: 85_000
+          }]
+        },
+        {
+          r2Client: r2 as never,
+          async optimizeImage(sourceUrl: string) {
+            optimizedUrls.push(sourceUrl);
+            return {
+              bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+              contentType: "image/jpeg" as const,
+              extension: "jpg" as const
+            };
+          },
+          githubClient: {
+            issues: {
+              async create(input: { body?: string | null }): Promise<unknown> {
+                issueBodies.push(input.body ?? "");
+                return {
+                  data: {
+                    number: 118,
+                    html_url: "https://github.com/Microck/akron/issues/118"
+                  }
+                };
+              }
+            }
+          } as never
+        }
+      );
+
+      expect(issueBodies[0]).toContain("![image.png](https://akron.micr.dev/r2-assets/github-attachments/118/");
+      expect(issueBodies[0]).toContain(".jpg)");
+      expect(issueBodies[0]).not.toContain("cdn.discordapp.com");
+      expect(optimizedUrls).toEqual([
+        "https://cdn.discordapp.com/attachments/1/attachment-118/image.png?ex=old&is=old&hm=old"
+      ]);
+      expect(r2.objects.size).toBe(1);
+      expect([...r2.objects.values()][0]).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to store Discord images without the optimizer", async () => {
+    await expect(materializeGithubAttachments(
+      config({ akronPublicAssetBaseUrl: "https://akron.micr.dev" }),
+      {
+        discordThreadId: "118",
+        discordUrl: "https://discord.com/channels/1/118",
+        kind: "issue",
+        title: "Image expires",
+        body: "The image should stay available.",
+        attachments: [{
+          name: "image.png",
+          url: "https://cdn.discordapp.com/attachments/1/attachment-118/image.png",
+          contentType: "image/png"
+        }]
+      }
+    )).rejects.toThrow("Upload Worker is required to optimize Discord images before GitHub sync.");
+  });
+
+  it("does not materialize attachments from omitted conversation messages", async () => {
+    const optimizedUrls: string[] = [];
+    const r2 = new TestS3();
+    const input = {
+      discordThreadId: "118",
+      discordUrl: "https://discord.com/channels/1/118",
+      kind: "issue" as const,
+      title: "Image expires",
+      body: "The image should stay available.",
+      conversation: Array.from({ length: 51 }, (_, index) => ({
+        author: "User",
+        createdUtc: "2026-05-24T18:00:00.000Z",
+        body: `Reply ${index + 1}`,
+        attachments: index === 50 ? [{
+          name: "omitted.png",
+          url: "https://cdn.discordapp.com/attachments/1/omitted.png",
+          contentType: "image/png"
+        }] : []
+      }))
+    };
+
+    const materialized = await materializeGithubAttachments(
+      config({ akronPublicAssetBaseUrl: "https://akron.micr.dev" }),
+      input,
+      {
+        r2Client: r2 as never,
+        async optimizeImage(sourceUrl: string) {
+          optimizedUrls.push(sourceUrl);
+          return {
+            bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+            contentType: "image/jpeg" as const,
+            extension: "jpg" as const
+          };
+        }
+      }
+    );
+
+    expect(materialized).toBe(input);
+    expect(optimizedUrls).toEqual([]);
+    expect(r2.objects.size).toBe(0);
   });
 
   it("labels videos and states when a large attachment set is truncated", () => {

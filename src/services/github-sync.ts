@@ -1,15 +1,21 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
+import type { S3Client } from "@aws-sdk/client-s3";
+import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { hasGithubConfig, type AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
 import { githubLinks } from "../db/schema.js";
 import { githubLabelSpecs } from "../server-spec.js";
 import { utcNow } from "../time.js";
+import type { OptimizedCatalogCapture } from "../upload-worker.js";
+import { createR2Client, putR2Object } from "./r2.js";
+import { createUploadWorkerClient, hasUploadWorkerConfig } from "./upload-worker-client.js";
 
 export type GithubIssueKind = "issue" | "suggestion";
 
 export type GithubAttachment = {
+  id?: string;
   name: string;
   url: string;
   contentType: string;
@@ -34,6 +40,12 @@ export type GithubSyncInput = {
   updateExisting?: boolean;
 };
 
+export type GithubSyncDependencies = {
+  githubClient?: Octokit;
+  optimizeImage?: (sourceUrl: string) => Promise<OptimizedCatalogCapture>;
+  r2Client?: S3Client;
+};
+
 export function createGithubClient(config: AppConfig): Octokit | null {
   if (!hasGithubConfig(config)) {
     return null;
@@ -56,35 +68,34 @@ export function createGithubClient(config: AppConfig): Octokit | null {
 export async function syncForumPostToGithub(
   config: AppConfig,
   db: AkronDatabase,
-  input: GithubSyncInput
+  input: GithubSyncInput,
+  dependencies: GithubSyncDependencies = {}
 ): Promise<{ issueNumber: number; issueUrl: string }> {
   const existing = await db.query.githubLinks.findFirst({ where: eq(githubLinks.discordThreadId, input.discordThreadId) });
-  if (existing) {
-    if (input.updateExisting) {
-      const client = createGithubClient(config);
-      if (!client) {
-        throw new Error("GitHub configuration is incomplete.");
-      }
-
-      await client.issues.update({
-        owner: config.githubOwner,
-        repo: config.githubRepo,
-        issue_number: existing.githubIssueNumber,
-        title: `[${githubIssueKindLabel(input.kind)}]: ${input.title}`,
-        body: formatGithubIssueBody(input)
-      });
-    }
-
+  if (existing && !input.updateExisting) {
     return { issueNumber: existing.githubIssueNumber, issueUrl: existing.githubIssueUrl };
   }
 
-  const client = createGithubClient(config);
+  const client = dependencies.githubClient ?? createGithubClient(config);
   if (!client) {
     throw new Error("GitHub configuration is incomplete.");
   }
 
+  const stableInput = await materializeGithubAttachments(config, input, dependencies);
+
+  if (existing) {
+    await client.issues.update({
+      owner: config.githubOwner,
+      repo: config.githubRepo,
+      issue_number: existing.githubIssueNumber,
+      title: `[${githubIssueKindLabel(input.kind)}]: ${input.title}`,
+      body: formatGithubIssueBody(stableInput)
+    });
+    return { issueNumber: existing.githubIssueNumber, issueUrl: existing.githubIssueUrl };
+  }
+
   const labels = ["discord", input.kind, "needs-triage"];
-  const body = formatGithubIssueBody(input);
+  const body = formatGithubIssueBody(stableInput);
   const created = await client.issues.create({
     owner: config.githubOwner,
     repo: config.githubRepo,
@@ -102,6 +113,77 @@ export async function syncForumPostToGithub(
   });
 
   return { issueNumber: created.data.number, issueUrl: created.data.html_url };
+}
+
+export async function materializeGithubAttachments(
+  config: AppConfig,
+  input: GithubSyncInput,
+  dependencies: Pick<GithubSyncDependencies, "optimizeImage" | "r2Client"> = {}
+): Promise<GithubSyncInput> {
+  const attachments = input.attachments ?? [];
+  const conversation = (input.conversation ?? []).slice(0, 50);
+  const hasDiscordImages = attachments.some(shouldMaterializeGithubAttachment) ||
+    conversation.some(message => message.attachments.some(shouldMaterializeGithubAttachment));
+  if (!hasDiscordImages) {
+    return input;
+  }
+
+  const uploadWorker = hasUploadWorkerConfig(config) ? createUploadWorkerClient(config) : undefined;
+  const optimizeImage = dependencies.optimizeImage ?? uploadWorker?.transformCatalogCapture.bind(uploadWorker);
+  if (!optimizeImage) {
+    throw new Error("Upload Worker is required to optimize Discord images before GitHub sync.");
+  }
+
+  const r2Client = dependencies.r2Client ?? createR2Client(config);
+  const storedBySource = new Map<string, Promise<{
+    url: string;
+    contentType: "image/jpeg";
+    sizeBytes: number;
+  }>>();
+  const materialize = async (attachment: GithubAttachment): Promise<GithubAttachment> => {
+    if (!shouldMaterializeGithubAttachment(attachment)) {
+      return attachment;
+    }
+
+    const sourceDigest = githubAttachmentDigest(input.discordThreadId, attachment);
+    let stored = storedBySource.get(sourceDigest);
+    if (!stored) {
+      stored = optimizeImage(attachment.url).then(optimized => {
+        const key = githubAttachmentObjectKey(input.discordThreadId, attachment, optimized.extension);
+        return putR2Object(config, r2Client, {
+          key,
+          body: optimized.bytes,
+          contentType: optimized.contentType
+        }).then(url => ({
+          url,
+          contentType: optimized.contentType,
+          sizeBytes: optimized.bytes.length
+        }));
+      });
+      storedBySource.set(sourceDigest, stored);
+    }
+
+    const storedObject = await stored;
+    return {
+      ...attachment,
+      url: storedObject.url,
+      contentType: storedObject.contentType,
+      sizeBytes: storedObject.sizeBytes
+    };
+  };
+
+  return {
+    ...input,
+    attachments: input.attachments
+      ? await Promise.all(input.attachments.map(materialize))
+      : undefined,
+    conversation: input.conversation
+      ? await Promise.all(conversation.map(async message => ({
+        ...message,
+        attachments: await Promise.all(message.attachments.map(materialize))
+      })))
+      : undefined
+  };
 }
 
 export async function linkGithubIssue(
@@ -324,4 +406,32 @@ function formatBytes(bytes: number): string {
     return `${Math.round(bytes / 1024)} KB`;
   }
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function shouldMaterializeGithubAttachment(attachment: GithubAttachment): boolean {
+  if (!attachment.contentType.toLowerCase().startsWith("image/")) {
+    return false;
+  }
+
+  try {
+    const url = new URL(attachment.url);
+    return url.protocol === "https:" &&
+      ["cdn.discordapp.com", "media.discordapp.net"].includes(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function githubAttachmentDigest(threadId: string, attachment: GithubAttachment): string {
+  // Discord signs the query string, so it must not be part of the durable object identity.
+  const sourceIdentity = attachment.id?.trim() || new URL(attachment.url).pathname;
+  return createHash("sha256")
+    .update(`${threadId}\0${sourceIdentity}\0${attachment.contentType}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function githubAttachmentObjectKey(threadId: string, attachment: GithubAttachment, extension: string): string {
+  const threadSegment = threadId.replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown-thread";
+  return `github-attachments/${threadSegment}/${githubAttachmentDigest(threadId, attachment)}.${extension}`;
 }
