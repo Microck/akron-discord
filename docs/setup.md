@@ -207,6 +207,10 @@ Manual commands:
 
 Created GitHub issues include the forum post title, source Discord link, starter description, starter attachments, and up to 100 recent non-bot thread replies. Image attachments render inline in GitHub. Video attachments and other files are linked with content type and size metadata.
 
+Before an issue is created or refreshed, the bot sends image attachments from Discord's CDN through the Upload Worker. The Worker removes metadata, scales images down, converts them to JPEG, and keeps each result within the 4 MiB catalog image limit before the bot stores it in R2 under `github-attachments/<thread-id>/...`. If the optimizer or storage step fails, GitHub sync fails instead of publishing an expiring Discord CDN URL or storing the original bytes.
+
+GitHub image sync requires `UPLOAD_WORKER_URL` and `UPLOAD_WORKER_BOT_SECRET`. These values must point to the same signed Upload Worker deployment used for catalog image processing.
+
 Re-run `/sync-issue` on an already-linked thread to refresh the GitHub issue title/body with the current Discord description, attachments, and conversation.
 
 Use `/solved` in any forum post to apply the forum's completion tag and archive the thread. The thread author, moderators, and admins can run it.
