@@ -20,18 +20,15 @@ import type { AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
 import { embedAssets, embedAssetAttachment, embedAssetUrl, type EmbedAssetName } from "../embed-assets.js";
 import { scanStates } from "../db/schema.js";
-import { mapCatalogScopes, statusForumTags, submissionChannelScopes } from "../server-spec.js";
-import { logAudit, sendAuditLog } from "../services/audit.js";
+import { directSubmissionChannelScopes, statusForumTags } from "../server-spec.js";
+import { logAudit } from "../services/audit.js";
 import { isModerator } from "../permissions.js";
 import { createR2Client, publicR2Url, putR2Object } from "../services/r2.js";
-import { publishCatalogEntry } from "../services/catalog.js";
-import { resolveMapSid } from "../services/map-resolver.js";
 import { reviewWithNim } from "../services/nim-review.js";
-import { createUploadWorkerClient } from "../services/upload-worker-client.js";
 import { utcNow } from "../time.js";
 import { validateAkrArchive } from "./archive.js";
 import { formatSection } from "./sections.js";
-import { isSupportedMapUrl, parseSubmissionPost } from "./post-parser.js";
+import { parseSubmissionPost } from "./post-parser.js";
 import { akrMaxBytes, type AkronProfileSection, type ScanStatus } from "./types.js";
 
 type ScanThreadInput = {
@@ -59,7 +56,7 @@ const scanNotifyCustomId = `${scanButtonPrefix}notify`;
 const scanConfirmCancelPrefix = `${scanButtonPrefix}confirm-cancel:`;
 
 export function isSubmissionForumName(name: string): boolean {
-  return submissionChannelScopes.has(name);
+  return directSubmissionChannelScopes.has(name);
 }
 
 export async function scanSubmissionThread(input: ScanThreadInput): Promise<ScanSubmissionResult> {
@@ -74,7 +71,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
 
   await applyStatusTag(input.thread, parent, "Pending Scan");
 
-  const scope = submissionChannelScopes.get(parent.name) as AkronProfileSection;
+  const scope = directSubmissionChannelScopes.get(parent.name) as AkronProfileSection;
   const starter = await input.thread.fetchStarterMessage();
   if (!starter) {
     return await finishScan(input, parent, {
@@ -91,8 +88,6 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
   let archiveSection: AkronProfileSection | undefined;
   let archiveMapSid = "";
   let r2PackKey = "";
-  let r2ImageKey = "";
-  let catalogPublished = false;
   let scannedArchiveKey = "";
   let scannedArchiveUrl = "";
   let scannedArchiveSha256 = "";
@@ -100,16 +95,6 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
   if (!attachmentPlan.akr) {
     status = "Needs Fix";
     reasons.push("Attach exactly one `.akr` file.");
-  }
-
-  if (isMapCatalogScope(scope)) {
-    if (!parsed.mapUrl) {
-      status = "Needs Fix";
-      reasons.push("Include a supported map link in the form `Map: https://gamebanana.com/mods/...`.");
-    } else if (!isSupportedMapUrl(parsed.mapUrl)) {
-      status = "Needs Fix";
-      reasons.push("Map link must be a supported GameBanana mod URL.");
-    }
   }
 
   let akrBytes: Buffer | undefined;
@@ -155,53 +140,6 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
     }
   }
 
-  if (isMapCatalogScope(scope) && parsed.mapUrl && isSupportedMapUrl(parsed.mapUrl) && status !== "Flagged") {
-    const mapIdentity = resolveCatalogMapIdentity(await resolveMapSid(input.db, parsed.mapUrl), archiveMapSid, parsed.mapUrl);
-    if (!mapIdentity.mapSid) {
-      status = status === "Published" ? "Needs Moderator Review" : status;
-      reasons.push("Map link is valid, but the .akr did not include a map SID. A moderator must add a mapping.");
-    } else if (mapIdentity.conflict) {
-      status = status === "Published" ? "Needs Moderator Review" : status;
-      reasons.push(`Archive map SID ${archiveMapSid} does not match mapped SID ${mapIdentity.mappingSid}.`);
-    } else if (akrBytes && status === "Published") {
-      try {
-        const optimizedImage = attachmentPlan.image
-          ? await createUploadWorkerClient(input.config).transformCatalogCapture(attachmentPlan.image.url)
-          : undefined;
-        const result = await publishCatalogEntry(input.config, input.db, input.r2Client ?? createR2Client(input.config), {
-          discordThreadId: input.thread.id,
-          title: input.thread.name,
-          description: parsed.description,
-          section: scope,
-          mapSid: mapIdentity.mapSid,
-          mapUrl: mapIdentity.mapUrl,
-          discordUrl: input.thread.url,
-          authorName: starter.member?.displayName ?? starter.author.username,
-          authorAvatarUrl: starter.author.displayAvatarURL({ extension: "jpg", size: 128 }),
-          akrBytes,
-          image: optimizedImage
-        });
-        archiveMapSid = mapIdentity.mapSid;
-        r2PackKey = result.packKey;
-        r2ImageKey = result.imageKey;
-        scannedArchiveKey = result.packKey;
-        scannedArchiveUrl = result.entry.downloadUrl;
-        catalogPublished = true;
-      } catch (error) {
-        status = "Needs Moderator Review";
-        reasons.push(error instanceof Error ? error.message : "Failed to publish to R2 catalog.");
-        await logAudit(input.db, {
-          actorId: "bot",
-          action: "catalog_publish_failed",
-          target: input.thread.id,
-          details: { threadUrl: input.thread.url, reason: reasons.at(-1) }
-        });
-        await sendAuditLog(input.thread.guild, `Catalog publish failed for ${input.thread.url}: ${reasons.at(-1)}`);
-        await sendLog(input.thread.guild, "bot-alerts", `Catalog publish failed for ${input.thread.url}: ${reasons.at(-1)}`);
-      }
-    }
-  }
-
   if (akrBytes && status === "Published" && !scannedArchiveUrl) {
     try {
       const scannedArchive = await archiveScannedAkr(input.config, input.r2Client ?? createR2Client(input.config), {
@@ -234,15 +172,12 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
     mapSid: archiveMapSid,
     reasons: uniqueReasons(reasons),
     r2PackKey,
-    r2ImageKey,
-    catalogPublished,
     scannedArchiveKey,
     scannedArchiveUrl,
     scannedArchiveSha256,
     starter,
     hasAkrAttachment: Boolean(attachmentPlan.akr),
-    hasCaptureImage: Boolean(attachmentPlan.image),
-    isMapCatalogSubmission: isMapCatalogScope(scope)
+    hasCaptureImage: Boolean(attachmentPlan.image)
   });
 }
 
@@ -256,15 +191,12 @@ async function finishScan(
     mapSid?: string;
     reasons: string[];
     r2PackKey?: string;
-    r2ImageKey?: string;
-    catalogPublished?: boolean;
     scannedArchiveKey?: string;
     scannedArchiveUrl?: string;
     scannedArchiveSha256?: string;
     starter?: Message<true>;
     hasAkrAttachment?: boolean;
     hasCaptureImage?: boolean;
-    isMapCatalogSubmission?: boolean;
   }
 ): Promise<ScanSubmissionResult> {
   const previousState = await input.db.query.scanStates.findFirst({
@@ -287,7 +219,7 @@ async function finishScan(
       title: input.thread.name,
       reasonsJson: JSON.stringify(result.reasons),
       r2PackKey: result.r2PackKey ?? "",
-      r2ImageKey: result.r2ImageKey ?? "",
+      r2ImageKey: "",
       lastScannedUtc: utcNow()
     })
     .onConflictDoUpdate({
@@ -302,20 +234,17 @@ async function finishScan(
         title: input.thread.name,
         reasonsJson: JSON.stringify(result.reasons),
         r2PackKey: result.r2PackKey ?? "",
-        r2ImageKey: result.r2ImageKey ?? "",
+        r2ImageKey: "",
         lastScannedUtc: utcNow()
       }
     });
 
   const embed = buildScanEmbed(result.status, result.scope, result.reasons, {
-    mapUrl: result.mapUrl,
     mapSid: result.mapSid,
     scannedArchiveUrl: result.scannedArchiveUrl,
     scannedArchiveSha256: result.scannedArchiveSha256,
-    catalogPublished: result.catalogPublished,
     hasAkrAttachment: result.hasAkrAttachment,
-    hasCaptureImage: result.hasCaptureImage,
-    isMapCatalogSubmission: result.isMapCatalogSubmission
+    hasCaptureImage: result.hasCaptureImage
   });
   await input.thread.send({
     embeds: [embed],
@@ -323,20 +252,6 @@ async function finishScan(
     components: buildScanComponents(result.status, repeatedFailure)
   });
   await sendLog(input.thread.guild, "scan-log", `${result.status}: ${input.thread.url}`);
-  if (result.status === "Published" && result.catalogPublished && result.r2PackKey) {
-    await logAudit(input.db, {
-      actorId: "bot",
-      action: "catalog_published",
-      target: input.thread.id,
-      details: {
-        threadUrl: input.thread.url,
-        packKey: result.r2PackKey,
-        imageKey: result.r2ImageKey,
-        mapSid: result.mapSid
-      }
-    });
-    await sendAuditLog(input.thread.guild, `Catalog published for ${input.thread.url}: ${result.r2PackKey}`);
-  }
   if (result.status === "Flagged") {
     await logAudit(input.db, {
       actorId: "bot",
@@ -531,14 +446,11 @@ export function buildScanEmbed(
   scope: AkronProfileSection,
   reasons: string[],
   archive: {
-    mapUrl?: string;
     mapSid?: string;
     scannedArchiveUrl?: string;
     scannedArchiveSha256?: string;
-    catalogPublished?: boolean;
     hasAkrAttachment?: boolean;
     hasCaptureImage?: boolean;
-    isMapCatalogSubmission?: boolean;
   }
 ): EmbedBuilder {
   const color = scanEmbedColor(status);
@@ -549,7 +461,7 @@ export function buildScanEmbed(
     .setThumbnail(embedAssetUrl(scanEmbedAsset(status)))
     .addFields({ name: "Scope", value: formatSection(scope), inline: true });
 
-  embed.setDescription(buildScanChecklist(status, scope, reasons, archive));
+  embed.setDescription(buildScanChecklist(status, reasons, archive));
 
   if (archive.mapSid) {
     embed.addFields({ name: "Map SID", value: archive.mapSid, inline: true });
@@ -582,39 +494,28 @@ export function buildScanEmbed(
 
 function buildScanChecklist(
   status: ScanStatus,
-  scope: AkronProfileSection,
   reasons: string[],
   archive: {
-    mapUrl?: string;
     mapSid?: string;
     scannedArchiveUrl?: string;
     scannedArchiveSha256?: string;
-    catalogPublished?: boolean;
     hasAkrAttachment?: boolean;
     hasCaptureImage?: boolean;
-    isMapCatalogSubmission?: boolean;
   }
 ): string {
   const ok = status === "Published";
-  const mapRequired = archive.isMapCatalogSubmission ?? isMapCatalogScope(scope);
   const attention = status === "Needs Fix" || status === "Needs Moderator Review" || status === "Flagged";
   const lines = [
     `**Result:** ${scanValidityLabel(status)}`,
     "",
     `${checkbox(Boolean(archive.hasAkrAttachment))} `.concat("One `.akr` attachment found"),
     `${checkbox(Boolean(archive.scannedArchiveUrl))} `.concat("Approved public `.akr` stored"),
-    mapRequired
-      ? `${checkbox(Boolean(archive.mapUrl))} Supported map link included`
-      : "[-] Map link not required for this forum",
-    mapRequired
-      ? `${checkbox(Boolean(archive.mapSid))} Map identity resolved`
-      : "[-] Map identity not required for this forum",
+    "[-] Map link not required for this forum",
+    "[-] Map identity not required for this forum",
     `${checkbox(reasons.length === 0 || ok)} Deterministic archive validation passed`,
     `${checkbox(status !== "Flagged")} Malware check did not flag the post`,
     archive.hasCaptureImage ? "[x] Optional capture image attached" : "[-] Optional capture image not attached",
-    mapRequired
-      ? `${checkbox(Boolean(archive.catalogPublished))} Published to the Akron catalog`
-      : "[-] Catalog publishing not used for Discord-only packs",
+    "[-] Catalog publishing not used for Discord-only packs",
     attention ? "[!] Action needed before this is valid" : "[x] No user action needed"
   ];
 
@@ -737,29 +638,6 @@ export function hasMalwareArchiveReason(reasons: string[]): boolean {
   return reasons.some(reason =>
     /suspicious text/i.test(reason)
   );
-}
-
-export function resolveCatalogMapIdentity(
-  mapping: { mapUrl: string; mapSid: string } | null,
-  archiveMapSid: string,
-  submittedMapUrl: string
-): {
-  mapSid: string;
-  mapUrl: string;
-  conflict: boolean;
-  mappingSid?: string;
-} {
-  const mapSid = mapping?.mapSid ?? archiveMapSid;
-  return {
-    mapSid,
-    mapUrl: mapping?.mapUrl ?? submittedMapUrl,
-    conflict: Boolean(mapping && archiveMapSid && mapping.mapSid !== archiveMapSid),
-    mappingSid: mapping?.mapSid
-  };
-}
-
-function isMapCatalogScope(scope: AkronProfileSection): boolean {
-  return mapCatalogScopes.has(scope);
 }
 
 function uniqueReasons(reasons: string[]): string[] {

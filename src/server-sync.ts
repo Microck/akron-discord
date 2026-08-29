@@ -14,7 +14,7 @@ import {
 } from "discord.js";
 import { botSettings } from "./db/schema.js";
 import type { AkronDatabase } from "./db/database.js";
-import { categorySpecs, channelSpecs, roleSpecs, submissionChannelScopes, type ChannelSpec } from "./server-spec.js";
+import { categorySpecs, channelSpecs, packChannelScopes, roleSpecs, type ChannelSpec } from "./server-spec.js";
 import {
   buildFaqEmbed,
   buildForumExampleSpecs,
@@ -242,6 +242,14 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
     id: guildId,
     deny: [PermissionsBitField.Flags.ViewChannel]
   };
+  const everyoneReplyDeny = {
+    id: guildId,
+    deny: [
+      PermissionsBitField.Flags.ViewChannel,
+      PermissionsBitField.Flags.SendMessages,
+      PermissionsBitField.Flags.CreatePublicThreads
+    ]
+  };
   const memberReadAllow = {
     id: member,
     allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
@@ -255,6 +263,14 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
       PermissionsBitField.Flags.SendMessages,
       PermissionsBitField.Flags.SendMessagesInThreads,
       PermissionsBitField.Flags.CreatePublicThreads
+    ]
+  };
+  const memberReplyAllow = {
+    id: member,
+    allow: [
+      PermissionsBitField.Flags.ViewChannel,
+      PermissionsBitField.Flags.ReadMessageHistory,
+      PermissionsBitField.Flags.SendMessagesInThreads
     ]
   };
   const moderatorAllow = {
@@ -340,7 +356,10 @@ export function buildPermissionOverwrites(guildId: string, roles: Map<string, st
   }
 
   if (spec.visibility === "member") {
-    return [everyoneDeny, memberPostAllow, moderatorAllow, adminAllow, ...botAllow];
+    const replyOnly = spec.memberPosting === "reply";
+    const everyoneOverwrite = replyOnly ? everyoneReplyDeny : everyoneDeny;
+    const memberOverwrite = replyOnly ? memberReplyAllow : memberPostAllow;
+    return [everyoneOverwrite, memberOverwrite, moderatorAllow, adminAllow, ...botAllow];
   }
 
   if (spec.visibility === "tester") {
@@ -372,8 +391,8 @@ function buildForumTags(spec: ChannelSpec): GuildForumTagData[] | undefined {
 }
 
 function buildChannelTopic(spec: ChannelSpec, config?: AppConfig): string | undefined {
-  if (spec.type === ChannelType.GuildForum && submissionChannelScopes.has(spec.name)) {
-    return forumGuidelines(submissionChannelScopes.get(spec.name) ?? "Akron");
+  if (spec.type === ChannelType.GuildForum && packChannelScopes.has(spec.name)) {
+    return forumGuidelines(packChannelScopes.get(spec.name) ?? "Akron");
   }
 
   if (spec.name === "issues") {
