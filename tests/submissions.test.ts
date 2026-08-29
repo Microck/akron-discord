@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { buildPortableSetupStateExample, validateAkrArchive } from "../src/submissions/archive.js";
 import { normalizeMapUrl, parseSubmissionPost } from "../src/submissions/post-parser.js";
-import { buildScanComponents, buildScanEmbed, buildScannedArchiveKey, hasMalwareArchiveReason, resolveCatalogMapIdentity } from "../src/submissions/scanner.js";
+import {
+  buildScanComponents,
+  buildScanEmbed,
+  buildScannedArchiveKey,
+  hasMalwareArchiveReason,
+  isSubmissionForumName
+} from "../src/submissions/scanner.js";
 import { formatSection, normalizeSection, sectionTag } from "../src/submissions/sections.js";
 import { archiveValidationFixtures, canonicalStateForSection, zipJson, zipText } from "./archive-fixtures.js";
 
@@ -368,6 +374,11 @@ describe("map URL normalization", () => {
 });
 
 describe("submission scan classification", () => {
+  it("scans only the general pack forums for direct Discord submissions", () => {
+    expect(["keybind-packs", "hud-layouts", "audio-packs", "recorder-packs"].every(isSubmissionForumName)).toBe(true);
+    expect(["startpos-packs", "auto-kill-areas", "auto-deafen-areas"].some(isSubmissionForumName)).toBe(false);
+  });
+
   it("only treats malware-like archive findings as flagged reasons", () => {
     expect(hasMalwareArchiveReason([
       "Archive contains too many files.",
@@ -384,38 +395,12 @@ describe("submission scan classification", () => {
     );
   });
 
-  it("uses the archive map SID when no manual map override exists", () => {
-    expect(resolveCatalogMapIdentity(null, "Glyph/Glyph", "https://gamebanana.com/mods/150453")).toEqual({
-      mapSid: "Glyph/Glyph",
-      mapUrl: "https://gamebanana.com/mods/150453",
-      conflict: false,
-      mappingSid: undefined
-    });
-  });
-
-  it("detects manual map overrides that conflict with the archive map SID", () => {
-    expect(resolveCatalogMapIdentity(
-      { mapUrl: "https://gamebanana.com/mods/150453", mapSid: "Other/Map" },
-      "Glyph/Glyph",
-      "https://gamebanana.com/mods/150453"
-    )).toEqual({
-      mapSid: "Other/Map",
-      mapUrl: "https://gamebanana.com/mods/150453",
-      conflict: true,
-      mappingSid: "Other/Map"
-    });
-  });
-
   it("formats scan feedback as a validity checklist", () => {
-    const embed = buildScanEmbed("Published", "StartPos", [], {
-      mapUrl: "https://gamebanana.com/mods/150453",
-      mapSid: "Glyph/Glyph",
-      scannedArchiveUrl: "https://akron.micr.dev/submissions/startpos-packs/123/hash.akr",
+    const embed = buildScanEmbed("Published", "Keybinds", [], {
+      scannedArchiveUrl: "https://akron.micr.dev/submissions/keybind-packs/123/hash.akr",
       scannedArchiveSha256: "a".repeat(64),
-      catalogPublished: true,
       hasAkrAttachment: true,
-      hasCaptureImage: true,
-      isMapCatalogSubmission: true
+      hasCaptureImage: true
     }).toJSON();
 
     expect(embed.title).toBe("Akron Scan: Valid");
@@ -424,14 +409,12 @@ describe("submission scan classification", () => {
     expect(embed.description).toContain("**Result:** Valid");
     expect(embed.description).toContain("[x] One `.akr` attachment found");
     expect(embed.description).toContain("[x] Approved public `.akr` stored");
-    expect(embed.description).toContain("[x] Published to the Akron catalog");
+    expect(embed.description).toContain("[-] Catalog publishing not used for Discord-only packs");
     expect(embed.fields?.some(field => field.name === "Scanned File")).toBe(true);
   });
 
   it("marks invalid scan feedback as action-needed", () => {
-    const embed = buildScanEmbed("Needs Fix", "StartPos", ["Attach exactly one `.akr` file."], {
-      isMapCatalogSubmission: true
-    }).toJSON();
+    const embed = buildScanEmbed("Needs Fix", "Keybinds", ["Attach exactly one `.akr` file."], {}).toJSON();
 
     expect(embed.title).toBe("Akron Scan: Needs Fix");
     expect(embed.color).toBe(0x80848e);
@@ -442,10 +425,9 @@ describe("submission scan classification", () => {
   });
 
   it("uses the flagged leaf and red color for flagged scan feedback", () => {
-    const embed = buildScanEmbed("Flagged", "StartPos", ["Archive contains an unsafe path."], {
+    const embed = buildScanEmbed("Flagged", "Keybinds", ["Archive contains an unsafe path."], {
       hasAkrAttachment: true,
-      scannedArchiveSha256: "b".repeat(64),
-      isMapCatalogSubmission: true
+      scannedArchiveSha256: "b".repeat(64)
     }).toJSON();
 
     expect(embed.color).toBe(0xcf222e);
@@ -456,9 +438,8 @@ describe("submission scan classification", () => {
   });
 
   it("keeps AI review issues under the generic attention label", () => {
-    const embed = buildScanEmbed("Needs Moderator Review", "StartPos", ["model could not decide."], {
-      hasAkrAttachment: true,
-      isMapCatalogSubmission: true
+    const embed = buildScanEmbed("Needs Moderator Review", "Keybinds", ["model could not decide."], {
+      hasAkrAttachment: true
     }).toJSON();
 
     expect(embed.title).toBe("Akron Scan: Needs Review");

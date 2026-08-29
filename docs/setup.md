@@ -120,36 +120,36 @@ On a fresh server where `AKRON_ADMIN_ROLE_ID` is still blank, Discord users with
 
 ## Submission Flow
 
-Users post directly in forum channels. The bot scans the starter post and applies one status tag:
+StartPos, Auto Kill, and Auto Deafen packs use Akron's in-game **Interface > Upload Pack** flow. The Upload Worker stores each upload in private quarantine. Staff review it, confirm Discord attribution, and approve or reject it. Approval publishes the pack to the catalog and lets the bot create its showcase post in:
+
+- `startpos-packs`
+- `auto-kill-areas`
+- `auto-deafen-areas`
+
+Members can read and reply in these showcase forums, but they cannot create posts. The bot skips its own showcase posts during direct submission scanning.
+
+Keybind, HUD, audio, and recorder packs still use direct forum posts. The bot scans each starter post and applies one status tag:
 
 - `Published`
 - `Needs Fix`
 - `Needs Moderator Review`
 - `Flagged`
 
-Map catalog forums publish to R2 when validation passes:
-
-- `startpos-packs`
-- `auto-kill-areas`
-- `auto-deafen-areas`
-
-General pack forums are scanned but stay Discord-only:
+These general pack forums stay Discord-only:
 
 - `keybind-packs`
 - `hud-layouts`
 - `audio-packs`
 - `recorder-packs`
 
-Map captures are optional but strongly recommended. If present, the bot validates the image, converts it to JPEG for Celeste/FNA compatibility, and uploads only the optimized image to R2.
+Captures are optional for direct general pack posts. If present, the bot validates the attachment, but general packs never enter the map catalog.
 
-If image optimization fails, the bot keeps the post out of the catalog and marks it `Needs Moderator Review`.
-
-In-game uploads use the Cloudflare upload Worker instead of Discord attachments. The Worker accepts source captures up to 100 MiB, keeps them in quarantine while moderation and attribution checks run, then uses Cloudflare Image Transformations to publish one canonical JPEG capture capped at 4 MiB. Cloudflare Images Free includes 5,000 unique transformations per month for images stored outside Cloudflare Images, so this path stays free as long as approved uploaded captures stay below that monthly volume.
+In-game uploads use the Cloudflare upload Worker instead of Discord attachments. The Worker accepts source captures up to 24 MiB, keeps them in quarantine while moderation and attribution checks run, then uses Cloudflare Image Transformations to publish one canonical JPEG capture capped at 4 MiB. Cloudflare Images Free includes 5,000 unique transformations per month for images stored outside Cloudflare Images, so this path stays free as long as approved uploaded captures stay below that monthly volume.
 
 Current limits:
 
 - `.akr` attachment: 4 MiB.
-- Optional capture image source before optimization: 100 MiB.
+- Optional capture image source before optimization: 24 MiB.
 - Optimized capture stored in R2: 4 MiB.
 - Catalog index read by Akron: 1 MiB.
 - Pack download read by Akron: 4 MiB.
