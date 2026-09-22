@@ -156,6 +156,90 @@ Current limits:
 
 Cloudflare R2 Standard storage currently includes 10 GB-month, 1 million Class A operations, 10 million Class B operations, and free Internet egress each month. Publishing writes are Class A operations. Catalog refreshes and pack downloads are Class B operations. Large source captures only live in Discord; the bot stores the optimized JPEG in R2.
 
+## Diagnostic delivery
+
+The game uploads consented reports to `POST /uploads/diagnostics`. Schema
+version 1 now requires `description`, a string of at most 4,000 UTF-16 code
+units. Empty descriptions are valid. Descriptions are preserved as written,
+including reproduction steps and links. Coordinate this deployment with the
+game client that sends the field and discloses channel access.
+
+The official Akron bot posts reports to `#diagnostic-alert`,
+channel `1551699232992534558`, in the configured guild. The channel ID is fixed
+as `diagnosticChannelId` in `src/config.ts`; public callers cannot select a
+recipient. No webhook or new Discord secret is needed.
+
+On September 21, 2026, an authenticated Bot API check confirmed this channel
+belongs to the configured Akron guild `1500603974410305598`. The bot had
+View Channel, Send Messages, Embed Links, Attach Files and Read Message History.
+`@everyone` could not view the channel. These permissions are checked before
+delivery. The bot does not alter access. Keep the channel private and explain
+to players that people with access can read the description and full JSON
+attachment. Message mention parsing is disabled even when the report contains
+`@everyone`, role mentions or user mentions.
+
+### Deploy
+
+Keep the existing `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `UPLOAD_WORKER_URL` and
+`UPLOAD_WORKER_BOT_SECRET` in the bot environment. The Worker's `BOT_HMAC_SECRET`
+must match `UPLOAD_WORKER_BOT_SECRET`. Use the direct Worker origin, not the
+website proxy. Existing R2 and D1 bindings are unchanged.
+
+Apply the additive D1 migration before deploying either consumer:
+
+```sh
+npx wrangler d1 migrations apply akron-uploads --remote --config wrangler.uploads.toml
+npx wrangler deploy --config wrangler.uploads.toml
+docker compose up -d --build akron-discord
+```
+
+Migration `0004_diagnostic_delivery.sql` creates `diagnostic_deliveries` and its
+pending index. No local bot SQLite migration, Cloudflare Queue binding,
+webhook, or new environment variable is required. Deploy the game client
+with the new description field in the same rollout.
+
+### Delivery and recovery
+
+The Worker returns `201 {reportId,status:\"received\"}` only after both the private
+R2 write and D1 outbox insert finish. This means uploaded and queued for the
+support channel, not already delivered. A duplicate report ID returns `409`
+without overwriting data. If R2 succeeded but D1 failed, retrying the identical
+report can finish acceptance; a different body cannot take over that ID.
+
+The bot claims one report at a time, polls every 30 seconds and renews its
+five-minute lease during delivery. D1 checks the claim token on renewal,
+retry and acknowledgement, so an expired consumer cannot discard a newer
+consumer's work. A crash leaves the report reclaimable when its lease expires.
+Failures use exponential backoff from 30 seconds to one hour and never exhaust
+an attempt budget. Discord.js manages Discord HTTP rate limits. Diagnostic
+Worker requests time out after 30 seconds.
+
+Successful Discord messages include the complete stored JSON attachment,
+the unmodified description, and bounded map/context and version summaries.
+Only after Discord returns a message ID does the bot acknowledge delivery.
+If Discord posted but its response or the acknowledgement was lost, the next
+attempt checks bot-authored attachment names in channel history back to the
+first delivery attempt. A deterministic nonce with `enforceNonce` also protects
+near-simultaneous retries. This is recoverable at-least-once delivery, not an
+unconditional exactly-once guarantee if messages are deleted or external
+operations outlive lost leases.
+
+Inspect pending work without downloading private log content:
+
+```sh
+npx wrangler d1 execute akron-uploads --remote --config wrangler.uploads.toml \
+  --command \"SELECT report_id, accepted_utc, attempts, available_utc, claim_until_utc FROM diagnostic_deliveries WHERE delivered_utc IS NULL ORDER BY accepted_utc LIMIT 100\"
+docker compose logs --since 15m akron-discord
+```
+
+Repair the bot credentials, Worker connection or channel permissions if jobs
+remain pending. Retries resume automatically, including after bot restarts.
+Do not delete outbox rows to retry them. Delivered rows retain their Discord
+message ID, and normal upload cleanup never deletes diagnostic rows or reports.
+Reports stored before this rollout have no outbox row and are not automatically
+posted. Maintainers can still retrieve them using the signed endpoint described
+in the README.
+
 ## GitHub Sync
 
 `issues` and `suggestions` forum posts sync to the configured GitHub repo. The GitHub issue body includes a source Discord link and quotes user text as untrusted content.

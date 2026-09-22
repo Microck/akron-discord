@@ -13,6 +13,7 @@ if (envFile) {
 }
 
 const optionalId = z.string().trim().optional().default("");
+export const diagnosticChannelId = "1551699232992534558";
 
 const configSchema = z.object({
   discordToken: z.string().min(1),

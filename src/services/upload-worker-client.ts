@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
+import { diagnosticDeliveryJobSchema, diagnosticReportSchema, type DiagnosticDeliveryJob, type DiagnosticReport } from "../upload-diagnostics.js";
+import { z } from "zod";
 import {
   signBotRequest,
   type CatalogPack,
@@ -9,6 +11,8 @@ import {
   type UploadAiReview,
   type UploadDiscordMessages
 } from "../upload-worker.js";
+
+const diagnosticClaimResponseSchema = z.strictObject({ job: diagnosticDeliveryJobSchema.nullable() });
 
 export type UploadWorkerJob = {
   batchId: string;
@@ -81,6 +85,11 @@ export type UploadWorkerCatalogAuthor = {
 };
 
 export type UploadWorkerClient = {
+  claimDiagnostic(): Promise<DiagnosticDeliveryJob | null>;
+  getDiagnosticReport(reportId: string): Promise<{ report: DiagnosticReport; bytes: Buffer }>;
+  renewDiagnostic(job: DiagnosticDeliveryJob): Promise<void>;
+  retryDiagnostic(job: DiagnosticDeliveryJob): Promise<void>;
+  acknowledgeDiagnostic(job: DiagnosticDeliveryJob, messageId: string): Promise<void>;
   claimJobs(limit?: number): Promise<UploadWorkerJob[]>;
   requeueJobs(submissionIds: string[]): Promise<void>;
   acknowledgeDelivered(submissionIds: string[]): Promise<void>;
@@ -107,8 +116,29 @@ export function createUploadWorkerClient(config: AppConfig, fetchImpl: typeof fe
   if (!baseUrl || !secret) {
     throw new Error("Upload Worker URL and bot secret are required.");
   }
+  const diagnosticRequest = (path: string, body: unknown) =>
+    signedJson(fetchImpl, baseUrl, secret, path, body, AbortSignal.timeout(30_000));
 
   return {
+    async claimDiagnostic(): Promise<DiagnosticDeliveryJob | null> {
+      const response = await diagnosticRequest("/bot/diagnostics/claim", {});
+      const body = diagnosticClaimResponseSchema.parse(await response.json());
+      return body.job;
+    },
+    async getDiagnosticReport(reportId: string): Promise<{ report: DiagnosticReport; bytes: Buffer }> {
+      const response = await diagnosticRequest(`/bot/diagnostics/${reportId}`, {});
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return { report: diagnosticReportSchema.parse(JSON.parse(bytes.toString("utf8"))), bytes };
+    },
+    async renewDiagnostic(job: DiagnosticDeliveryJob): Promise<void> {
+      await diagnosticRequest(`/bot/diagnostics/${job.reportId}/renew`, { claimToken: job.claimToken });
+    },
+    async retryDiagnostic(job: DiagnosticDeliveryJob): Promise<void> {
+      await diagnosticRequest(`/bot/diagnostics/${job.reportId}/retry`, { claimToken: job.claimToken });
+    },
+    async acknowledgeDiagnostic(job: DiagnosticDeliveryJob, messageId: string): Promise<void> {
+      await diagnosticRequest(`/bot/diagnostics/${job.reportId}/delivered`, { claimToken: job.claimToken, messageId });
+    },
     async claimJobs(limit = 10): Promise<UploadWorkerJob[]> {
       const response = await signedJson(fetchImpl, baseUrl, secret, "/bot/jobs/claim", { limit });
       const body = await readJson(response) as { jobs?: UploadWorkerJob[] };
@@ -200,7 +230,8 @@ async function signedJson(
   baseUrl: string,
   secret: string,
   path: string,
-  body: unknown
+  body: unknown,
+  signal?: AbortSignal
 ): Promise<Response> {
   const bodyText = JSON.stringify(body);
   const timestamp = new Date().toISOString();
@@ -221,7 +252,8 @@ async function signedJson(
       "x-akron-nonce": nonce,
       "x-akron-signature": signature
     },
-    body: bodyText
+    body: bodyText,
+    signal
   });
 
   if (!response.ok) {

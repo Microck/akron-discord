@@ -29,6 +29,12 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { catalogImageMaxBytes } from "./submissions/types.js";
 import type { D1Database, D1PreparedStatement, D1Result, RateLimit } from "@cloudflare/workers-types";
+import {
+  diagnosticClaimLeaseMs,
+  handleDiagnosticsRequest,
+  type DiagnosticDeliveryJob,
+  type DiagnosticDeliveryStore
+} from "./upload-diagnostics.js";
 
 export type CloudflareUploadEnv = {
   UPLOAD_DB: D1Database;
@@ -63,7 +69,7 @@ type R2Bucket = {
   put(
     key: string,
     value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string,
-    options?: { httpMetadata?: { contentType?: string } }
+    options?: { httpMetadata?: { contentType?: string }; onlyIf?: { etagDoesNotMatch: string } }
   ): Promise<unknown>;
   get(key: string): Promise<R2ObjectBody | null>;
   delete(key: string): Promise<void>;
@@ -167,8 +173,17 @@ export default {
     if (rateLimitResponse) {
       return rateLimitResponse;
     }
+    const store = new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL);
+    const diagnosticsResponse = await handleDiagnosticsRequest(request, {
+      bucket: env.UPLOAD_QUARANTINE_BUCKET,
+      botSecret: env.BOT_HMAC_SECRET,
+      store
+    });
+    if (diagnosticsResponse) {
+      return diagnosticsResponse;
+    }
     const worker = createUploadWorker({
-      store: new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL),
+      store,
       botSecret: env.BOT_HMAC_SECRET,
       publicUploadBaseUrl: env.UPLOAD_PUBLIC_UPLOAD_BASE_URL,
       optimizeCatalogCapture,
@@ -219,6 +234,7 @@ export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitE
 
 function edgeLimiterForRequest(method: string, pathname: string, env: EdgeRateLimitEnv): RateLimit | null | undefined {
   if (method === "POST" && pathname === "/uploads/prepare") return env.UPLOAD_PREPARE_RATE_LIMITER ?? null;
+  if (method === "POST" && pathname === "/uploads/diagnostics") return env.UPLOAD_PREPARE_RATE_LIMITER ?? null;
   if (method === "PUT" && /^\/uploads\/objects\/[^/]+$/.test(pathname)) return env.UPLOAD_OBJECT_RATE_LIMITER ?? null;
   if (method === "POST" && pathname === "/uploads/complete") return env.UPLOAD_COMPLETE_RATE_LIMITER ?? null;
   if (method === "POST" && /^\/bot\/attribution\/[^/]+\/confirm$/.test(pathname)) return env.UPLOAD_ATTRIBUTION_RATE_LIMITER ?? null;
@@ -232,13 +248,59 @@ function edgeError(error: string, status: number, headers: Record<string, string
   });
 }
 
-export class CloudflareUploadStore implements UploadWorkerStore {
+export class CloudflareUploadStore implements UploadWorkerStore, DiagnosticDeliveryStore {
   constructor(
     private readonly db: D1Database,
     private readonly quarantineBucket: R2Bucket,
     private readonly publicBucket: R2Bucket,
     private readonly publicBaseUrl = "https://akron.micr.dev"
   ) {}
+
+  async enqueueDiagnostic(reportId: string, now: Date): Promise<boolean> {
+    const result = await this.db.prepare(
+      "INSERT INTO diagnostic_deliveries (report_id, accepted_utc, available_utc) VALUES (?, ?, ?) ON CONFLICT(report_id) DO NOTHING"
+    ).bind(reportId, now.toISOString(), now.toISOString()).run();
+    return result.meta.changes === 1;
+  }
+
+  async claimDiagnostic(now: Date): Promise<DiagnosticDeliveryJob | null> {
+    const nowIso = now.toISOString();
+    return this.db.prepare([
+      "UPDATE diagnostic_deliveries SET claim_token = ?, claim_until_utc = ?,",
+      "attempts = attempts + 1, first_attempt_utc = COALESCE(first_attempt_utc, ?)",
+      "WHERE report_id = (SELECT report_id FROM diagnostic_deliveries",
+      "WHERE delivered_utc IS NULL AND available_utc <= ?",
+      "AND (claim_until_utc IS NULL OR claim_until_utc <= ?)",
+      "ORDER BY available_utc, report_id LIMIT 1)",
+      "RETURNING report_id AS reportId, claim_token AS claimToken, attempts, first_attempt_utc AS firstAttemptUtc"
+    ].join(" ")).bind(randomUUID(), new Date(now.getTime() + diagnosticClaimLeaseMs).toISOString(), nowIso, nowIso, nowIso)
+      .first<DiagnosticDeliveryJob>();
+  }
+
+  async renewDiagnostic(reportId: string, claimToken: string, now: Date): Promise<boolean> {
+    const result = await this.db.prepare([
+      "UPDATE diagnostic_deliveries SET claim_until_utc = ?",
+      "WHERE report_id = ? AND claim_token = ? AND claim_until_utc > ? AND delivered_utc IS NULL"
+    ].join(" ")).bind(new Date(now.getTime() + diagnosticClaimLeaseMs).toISOString(), reportId, claimToken, now.toISOString()).run();
+    return result.meta.changes === 1;
+  }
+
+  async retryDiagnostic(reportId: string, claimToken: string, now: Date): Promise<boolean> {
+    const result = await this.db.prepare([
+      "UPDATE diagnostic_deliveries SET claim_token = NULL, claim_until_utc = NULL,",
+      "available_utc = strftime('%Y-%m-%dT%H:%M:%fZ', ?, '+' || MIN(3600, 30 * (1 << MIN(attempts - 1, 7))) || ' seconds')",
+      "WHERE report_id = ? AND claim_token = ? AND claim_until_utc > ? AND delivered_utc IS NULL"
+    ].join(" ")).bind(now.toISOString(), reportId, claimToken, now.toISOString()).run();
+    return result.meta.changes === 1;
+  }
+
+  async acknowledgeDiagnostic(reportId: string, claimToken: string, messageId: string, now: Date): Promise<boolean> {
+    const result = await this.db.prepare([
+      "UPDATE diagnostic_deliveries SET delivered_utc = ?, discord_message_id = ?, claim_token = NULL, claim_until_utc = NULL",
+      "WHERE report_id = ? AND claim_token = ? AND claim_until_utc > ? AND delivered_utc IS NULL"
+    ].join(" ")).bind(now.toISOString(), messageId, reportId, claimToken, now.toISOString()).run();
+    return result.meta.changes === 1;
+  }
 
   async getBatch(id: string): Promise<UploadBatchRecord | undefined> {
     const row = await this.db
