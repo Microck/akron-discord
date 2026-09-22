@@ -200,7 +200,7 @@ with the new description field in the same rollout.
 
 ### Delivery and recovery
 
-The Worker returns `201 {reportId,status:\"received\"}` only after both the private
+The Worker returns `201 {"reportId":"<id>","status":"received"}` only after both the private
 R2 write and D1 outbox insert finish. This means uploaded and queued for the
 support channel, not already delivered. A duplicate report ID returns `409`
 without overwriting data. If R2 succeeded but D1 failed, retrying the identical
@@ -228,7 +228,7 @@ Inspect pending work without downloading private log content:
 
 ```sh
 npx wrangler d1 execute akron-uploads --remote --config wrangler.uploads.toml \
-  --command \"SELECT report_id, accepted_utc, attempts, available_utc, claim_until_utc FROM diagnostic_deliveries WHERE delivered_utc IS NULL ORDER BY accepted_utc LIMIT 100\"
+  --command "SELECT report_id, accepted_utc, attempts, available_utc, claim_until_utc FROM diagnostic_deliveries WHERE delivered_utc IS NULL ORDER BY accepted_utc LIMIT 100"
 docker compose logs --since 15m akron-discord
 ```
 
