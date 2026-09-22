@@ -1787,11 +1787,11 @@ async function deleteSubmissionByDiscordThread(input: {
   return json({ ok: true, deleted });
 }
 
-async function readSignedJson(
+export async function readSignedJson(
   request: Request,
   secret: string,
   now: () => Date,
-  store: UploadWorkerStore
+  store: Pick<UploadWorkerStore, "rememberBotNonce">
 ): Promise<Record<string, unknown> | Response> {
   const declaredLength = readContentLength(request);
   if (declaredLength !== undefined && declaredLength > botJsonMaxBytes) {
@@ -2643,7 +2643,7 @@ function clone<T>(value: T): T {
   return value;
 }
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(readonly status: number, readonly code: string) {
     super(code);
   }
