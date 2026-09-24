@@ -34,6 +34,8 @@ const database = createDatabase(config.databasePath);
 const scanTimers = new Map<string, NodeJS.Timeout>();
 let uploadModerationTimer: NodeJS.Timeout | null = null;
 let githubWebhookServer: ReturnType<typeof startGithubWebhookServer> = null;
+const runtimeAlertIntervalMs = 60 * 60 * 1000;
+const recentRuntimeAlerts = new Map<string, number>();
 
 const client = new Client({
   intents: [
@@ -206,9 +208,19 @@ async function reportRuntimeError(error: unknown): Promise<void> {
   const guild = client.guilds.cache.get(config.discordGuildId);
   const channel = guild?.channels.cache.find(candidate => candidate.name === "bot-alerts" && candidate.type === ChannelType.GuildText) as TextChannel | undefined;
   if (channel) {
+    const alertText = message.slice(0, 1900);
+    const now = Date.now();
+    for (const [reportedMessage, reportedAt] of recentRuntimeAlerts) {
+      if (now - reportedAt >= runtimeAlertIntervalMs) recentRuntimeAlerts.delete(reportedMessage);
+    }
+    if (recentRuntimeAlerts.has(alertText)) return;
+    // Polls repeat every 30 seconds. Reserve the alert before awaiting Discord
+    // so concurrent failures do not post the same incident twice.
+    recentRuntimeAlerts.set(alertText, now);
     try {
-      await channel.send({ content: message.slice(0, 1900) });
+      await channel.send({ content: alertText });
     } catch (reportingError) {
+      recentRuntimeAlerts.delete(alertText);
       console.error("Failed to send the runtime error to bot-alerts.", reportingError);
     }
   }
