@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint .",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/src/index.js",
     "test": "vitest run",
@@ -27,9 +28,11 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260728.1",
+    "@oxlint/plugins": "1.85.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.9.2",
     "@types/yauzl": "^2.10.3",
+    "oxlint": "1.85.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.6"

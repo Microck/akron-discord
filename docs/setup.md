@@ -6,6 +6,13 @@ Install dependencies:
 npm install
 ```
 
+Run `npm run lint`, `npm run check`, and `npm test` before deploying. Lint uses
+the local anti-slop Oxlint plugin. Six generic rules are deliberately not enabled:
+they flag required checks on untrusted JSON, intentional `unknown` types, and
+assertions in test fixtures throughout this codebase. Complexity is capped at 80
+to cover the existing command and request dispatchers without forcing a broad
+rewrite during lint installation.
+
 Copy `.env.example` to `.env` and fill in the values. Required for normal runtime:
 
 ```text

@@ -525,12 +525,11 @@ describe("Cloudflare private diagnostics", () => {
       },
       cancel() { cancelled = true; }
     });
+    const headers = new Headers({ "content-type": "application/json", "cf-connecting-ip": "192.0.2.1" });
+    if (declaredLength) headers.set("content-length", declaredLength);
     const request = new Request("https://uploads.test/uploads/diagnostics", {
       method: "POST",
-      headers: {
-        "content-type": "application/json", "cf-connecting-ip": "192.0.2.1",
-        ...(declaredLength ? { "content-length": declaredLength } : {})
-      },
+      headers,
       body, duplex: "half"
     } as RequestInit);
     const response = await uploadWorker.fetch(request, env);

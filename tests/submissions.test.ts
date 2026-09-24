@@ -356,16 +356,16 @@ function canonicalSetup(
   state: Record<string, unknown> | undefined = undefined,
   section = "StartPos"
 ): Record<string, unknown> {
-  return {
+  const setup = {
     format: "akron-setup-v2",
     name: "Test Pack",
     createdUtc: "2026-01-01T00:00:00.000Z",
     section,
-    state: state ?? canonicalStateForSection(section),
-    ...(section === "StartPos" ? { startPositions: {} } : {}),
-    ...(section === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {}),
-    ...extra
+    state: state ?? canonicalStateForSection(section)
   };
+  if (section === "StartPos") Object.assign(setup, { startPositions: {} });
+  if (section === "Keybinds") Object.assign(setup, { buttonBindings: {}, menuActionBindings: {} });
+  return Object.assign(setup, extra);
 }
 
 describe("map URL normalization", () => {

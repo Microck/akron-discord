@@ -654,15 +654,19 @@ function buildExampleAkrBytes(spec: ReturnType<typeof buildForumExampleSpecs>[nu
     name,
     createdUtc: "2026-01-01T00:00:00.000Z",
     section: spec.akrSection,
-    state: exampleSetupState(spec.akrSection),
-    ...(spec.akrSection === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {}),
-    ...(spec.akrSection === "StartPos" ? {
+    state: exampleSetupState(spec.akrSection)
+  };
+  if (spec.akrSection === "Keybinds") {
+    Object.assign(setup, { buttonBindings: {}, menuActionBindings: {} });
+  }
+  if (spec.akrSection === "StartPos") {
+    Object.assign(setup, {
       startPositions: {
         "1": { room: "glyph/a-00", areaSid: "Glyph/Glyph", x: 48, y: 128, usesSpawnConfig: false, dashes: -1, staminaPercent: -1, facing: "Current", idle: true, grab: false },
         "2": { room: "glyph/a-03", areaSid: "Glyph/Glyph", x: 176, y: 96, usesSpawnConfig: false, dashes: -1, staminaPercent: -1, facing: "Current", idle: true, grab: false }
       }
-    } : {})
-  };
+    });
+  }
 
   return buildStoredZip([
     { name: "manifest.json", content: JSON.stringify(manifest, null, 2) + "\n" },

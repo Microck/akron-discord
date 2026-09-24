@@ -405,7 +405,7 @@ describe("GitHub issue body", () => {
           },
           githubClient: {
             issues: {
-              async create(input: { body?: string | null }): Promise<unknown> {
+              async create(input: { body?: string | null }) {
                 issueBodies.push(input.body ?? "");
                 return {
                   data: {
@@ -996,10 +996,10 @@ describe("upload moderation messages", () => {
     };
     const client = {
       guilds: {
-        async fetch(): Promise<unknown> {
+        async fetch() {
           return {
             channels: {
-              async fetch(): Promise<unknown> {
+              async fetch() {
                 return {
                   find(predicate: (candidate: typeof channel) => boolean): typeof channel | null {
                     return predicate(channel) ? channel : null;
@@ -1075,10 +1075,10 @@ describe("upload moderation messages", () => {
     };
     const client = {
       guilds: {
-        async fetch(): Promise<unknown> {
+        async fetch() {
           return {
             members: {
-              async fetch(discordUserId: string): Promise<unknown> {
+              async fetch(discordUserId: string) {
                 expect(discordUserId).toBe("123456789012345678");
                 return {
                   async send(): Promise<void> {
@@ -1088,7 +1088,7 @@ describe("upload moderation messages", () => {
               }
             },
             channels: {
-              async fetch(): Promise<unknown> {
+              async fetch() {
                 return {
                   find(predicate: (candidate: typeof channel) => boolean): typeof channel | null {
                     return predicate(channel) ? channel : null;
@@ -1204,7 +1204,7 @@ describe("upload moderation messages", () => {
       type: ChannelType.GuildForum,
       availableTags: [{ id: "published-tag", name: "Published" }],
       threads: {
-        async create(input: unknown): Promise<unknown> {
+        async create(input: unknown) {
           if (threadCreateFailures > 0) {
             threadCreateFailures -= 1;
             throw new Error("Discord thread create failed.");
@@ -1234,13 +1234,13 @@ describe("upload moderation messages", () => {
               }
               (createdThread as { archived: boolean }).archived = value;
             },
-            async fetchStarterMessage(): Promise<unknown> {
+            async fetchStarterMessage() {
               return starterMessage;
             }
           };
           return createdThread;
         },
-        async fetch(id: string): Promise<unknown> {
+        async fetch(id: string) {
           if (threadFetchFailures > 0) {
             threadFetchFailures -= 1;
             throw new Error("Discord thread fetch failed.");
@@ -1259,10 +1259,10 @@ describe("upload moderation messages", () => {
     };
     const client = {
       guilds: {
-        async fetch(): Promise<unknown> {
+        async fetch() {
           return {
             channels: {
-              async fetch(): Promise<unknown> {
+              async fetch() {
                 return {
                   find(predicate: (candidate: typeof forum) => boolean): typeof forum | null {
                     return predicate(forum) ? forum : null;
@@ -1477,7 +1477,7 @@ describe("upload moderation messages", () => {
     const thread = {
       id: "456",
       archived: false,
-      async fetchStarterMessage(): Promise<unknown> {
+      async fetchStarterMessage() {
         return starterMessage;
       }
     };
@@ -1487,21 +1487,21 @@ describe("upload moderation messages", () => {
       type: ChannelType.GuildForum,
       availableTags: [{ id: "published-tag", name: "Published" }],
       threads: {
-        async create(): Promise<unknown> {
+        async create() {
           recreatedPublicationCount += 1;
           return thread;
         },
-        async fetch(id: string): Promise<unknown> {
+        async fetch(id: string) {
           return id === thread.id ? thread : null;
         }
       }
     };
     const client = {
       guilds: {
-        async fetch(): Promise<unknown> {
+        async fetch() {
           return {
             channels: {
-              async fetch(): Promise<unknown> {
+              async fetch() {
                 return {
                   find(predicate: (candidate: typeof forum) => boolean): typeof forum | null {
                     return predicate(forum) ? forum : null;
@@ -1514,7 +1514,7 @@ describe("upload moderation messages", () => {
       }
     };
     const worker = {
-      async getSubmissionContext(submissionId: string): Promise<unknown> {
+      async getSubmissionContext(submissionId: string) {
         if (submissionId === "deleted-submission") {
           return uploadModerationJob(submissionId, { status: "deleted" });
         }

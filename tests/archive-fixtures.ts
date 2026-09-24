@@ -284,6 +284,16 @@ function setupArchive(parts: {
   state?: Record<string, unknown>;
   setup?: Record<string, unknown>;
 }): Record<string, unknown> {
+  const setup = {
+    format: "akron-setup-v2",
+    name: `${parts.section} Test Pack`,
+    createdUtc: "2026-01-01T00:00:00.000Z",
+    section: parts.section,
+    state: parts.state ?? canonicalStateForSection(parts.section)
+  };
+  if (parts.section === "StartPos") Object.assign(setup, { startPositions: {} });
+  if (parts.section === "Keybinds") Object.assign(setup, { buttonBindings: {}, menuActionBindings: {} });
+  Object.assign(setup, parts.setup);
   return {
     "manifest.json": {
       format: "akron-archive",
@@ -295,16 +305,7 @@ function setupArchive(parts: {
       target: { game: "Celeste", mapSid: parts.mapSid ?? mapSid },
       ...parts.manifest
     },
-    "setup.json": {
-      format: "akron-setup-v2",
-      name: `${parts.section} Test Pack`,
-      createdUtc: "2026-01-01T00:00:00.000Z",
-      section: parts.section,
-      state: parts.state ?? canonicalStateForSection(parts.section),
-      ...(parts.section === "StartPos" ? { startPositions: {} } : {}),
-      ...(parts.section === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {}),
-      ...parts.setup
-    }
+    "setup.json": setup
   };
 }
 

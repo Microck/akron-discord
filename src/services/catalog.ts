@@ -1,6 +1,7 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import type { AkronDatabase } from "../db/database.js";
 import { catalogEntries } from "../db/schema.js";
@@ -36,6 +37,33 @@ export type CatalogIndex = {
   version: 3;
   packs: CatalogPack[];
 };
+
+// Catalog JSON is read from public storage. Validate it before it becomes the
+// source for later publication and Discord message updates.
+const catalogPackSchema = z.looseObject({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string(),
+  section: z.enum(allowedSections),
+  mapSid: z.string(),
+  mapUrl: z.string(),
+  discordUrl: z.string().refine(isCatalogDiscordUrl),
+  downloadUrl: z.string().min(1),
+  authorName: z.string(),
+  authorAvatarUrl: z.string(),
+  imageUrl: z.string().optional(),
+  images: z.array(z.looseObject({ url: z.string(), roomName: z.string() })),
+  downloadCount: z.number().refine(value => Number.isSafeInteger(value) && value >= 0),
+  updatedUtc: z.string().min(1),
+  tags: z.array(z.string()),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sizeBytes: z.number().refine(value => Number.isSafeInteger(value) && value > 0)
+});
+const catalogIndexSchema = z.looseObject({
+  format: z.literal("akron-community-pack-index-v3"),
+  version: z.literal(3),
+  packs: z.array(catalogPackSchema)
+});
 
 export type PublishCatalogInput = {
   discordThreadId: string;
@@ -205,44 +233,12 @@ export function parseCatalogIndex(text: string | null): CatalogIndex {
     return { format: "akron-community-pack-index-v3", version: 3, packs: [] };
   }
 
-  const parsed = JSON.parse(text) as Partial<CatalogIndex>;
-  if (parsed.format !== "akron-community-pack-index-v3" || parsed.version !== 3 || !Array.isArray(parsed.packs) ||
-      parsed.packs.some(pack => !isCatalogPack(pack))) {
+  const parsed = catalogIndexSchema.safeParse(JSON.parse(text));
+  if (!parsed.success) {
     throw new Error("Existing catalog/index.json has an unsupported format.");
   }
 
-  return parsed as CatalogIndex;
-}
-
-function isCatalogPack(value: unknown): value is CatalogPack {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const pack = value as Partial<CatalogPack>;
-  return typeof pack.id === "string" && pack.id.length > 0 &&
-    typeof pack.title === "string" && pack.title.length > 0 &&
-    typeof pack.description === "string" &&
-    allowedSections.includes(pack.section as AkronProfileSection) &&
-    typeof pack.mapSid === "string" &&
-    typeof pack.mapUrl === "string" &&
-    typeof pack.downloadUrl === "string" && pack.downloadUrl.length > 0 &&
-    typeof pack.authorName === "string" &&
-    typeof pack.authorAvatarUrl === "string" &&
-    (pack.imageUrl === undefined || typeof pack.imageUrl === "string") &&
-    Number.isSafeInteger(pack.downloadCount) && pack.downloadCount! >= 0 &&
-    Array.isArray(pack.tags) && pack.tags.every(tag => typeof tag === "string") &&
-    typeof pack.discordUrl === "string" &&
-    typeof pack.updatedUtc === "string" && pack.updatedUtc.length > 0 &&
-    /^[a-f0-9]{64}$/.test(pack.sha256 ?? "") &&
-    isCatalogDiscordUrl(pack.discordUrl) &&
-    isCatalogImages(pack.images) &&
-    Number.isSafeInteger(pack.sizeBytes) && pack.sizeBytes! > 0;
-}
-
-function isCatalogImages(value: CatalogPack["images"] | undefined): boolean {
-  return Array.isArray(value) && value.every(image =>
-    image && typeof image === "object" && typeof image.url === "string" && typeof image.roomName === "string"
-  );
+  return parsed.data;
 }
 
 function isCatalogDiscordUrl(value: string | undefined): boolean {

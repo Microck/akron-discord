@@ -1378,15 +1378,3 @@ function deriveBatchStatusForStore(batch: UploadBatchRecord): UploadBatchRecord[
   }
   return "withdrawn";
 }
-
-function isClaimableModerationJob(submission: UploadSubmissionRecord, now: Date): boolean {
-  if (submission.status === "queued" || submission.status === "awaiting_attribution") {
-    return true;
-  }
-  if (submission.status !== "reviewing" || submission.moderationDeliveredUtc) {
-    return false;
-  }
-
-  const claimedAt = Date.parse(submission.reviewClaimedUtc ?? "");
-  return !Number.isFinite(claimedAt) || claimedAt <= now.getTime() - moderationClaimLeaseMs;
-}

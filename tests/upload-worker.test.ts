@@ -1842,6 +1842,15 @@ class FailingCatalogMetadataStore extends InMemoryUploadStore {
 }
 
 function validArchive(section: string): Buffer {
+  const setup = {
+    format: "akron-setup-v2",
+    name: `${section} Test Pack`,
+    createdUtc: "2026-01-01T00:00:00.000Z",
+    section,
+    state: canonicalStateForSection(section)
+  };
+  if (section === "StartPos") Object.assign(setup, { startPositions: {} });
+  if (section === "Keybinds") Object.assign(setup, { buttonBindings: {}, menuActionBindings: {} });
   return zipJson({
     "manifest.json": {
       format: "akron-archive",
@@ -1852,15 +1861,7 @@ function validArchive(section: string): Buffer {
       createdAt: "2026-01-01T00:00:00.000Z",
       target: { game: "Celeste", mapSid }
     },
-    "setup.json": {
-      format: "akron-setup-v2",
-      name: `${section} Test Pack`,
-      createdUtc: "2026-01-01T00:00:00.000Z",
-      section,
-      state: canonicalStateForSection(section),
-      ...(section === "StartPos" ? { startPositions: {} } : {}),
-      ...(section === "Keybinds" ? { buttonBindings: {}, menuActionBindings: {} } : {})
-    }
+    "setup.json": setup
   });
 }
 

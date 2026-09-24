@@ -21,7 +21,7 @@ import type { AkronDatabase } from "../db/database.js";
 import { embedAssets, embedAssetAttachment, embedAssetUrl, type EmbedAssetName } from "../embed-assets.js";
 import { scanStates } from "../db/schema.js";
 import { directSubmissionChannelScopes, statusForumTags } from "../server-spec.js";
-import { logAudit, sendAuditLog } from "../services/audit.js";
+import { logAudit } from "../services/audit.js";
 import { isModerator } from "../permissions.js";
 import { createR2Client, publicR2Url, putR2Object } from "../services/r2.js";
 import { reviewWithNim } from "../services/nim-review.js";
@@ -85,7 +85,6 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
   const parsed = parseSubmissionPost(starter.content);
   const reasons = [...attachmentPlan.problems];
   let status: ScanStatus = hasBlockingAttachmentProblems(attachmentPlan) ? "Needs Fix" : "Published";
-  let archiveSection: AkronProfileSection | undefined;
   let archiveMapSid = "";
   let r2PackKey = "";
   let scannedArchiveKey = "";
@@ -103,7 +102,6 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
       akrBytes = await downloadAttachment(attachmentPlan.akr, akrMaxBytes);
       scannedArchiveSha256 = hashAkrBytes(akrBytes);
       const archive = await validateAkrArchive(akrBytes);
-      archiveSection = archive.section;
       archiveMapSid = archive.mapSid ?? "";
       reasons.push(...archive.reasons);
 

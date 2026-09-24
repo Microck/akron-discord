@@ -189,9 +189,8 @@ async function handleApplicationModal(interaction: ModalSubmitInteraction, db: A
     return;
   }
 
-  let applicationId: number;
   try {
-    applicationId = await createPlaytesterApplicationReview({
+    await createPlaytesterApplicationReview({
       db,
       application: {
         userId: interaction.user.id,

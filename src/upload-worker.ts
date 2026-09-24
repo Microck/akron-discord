@@ -1112,7 +1112,7 @@ async function prepareUpload(input: {
     await input.store.putObject(packObject);
   }
 
-  const responseBody: Record<string, unknown> = {
+  const responseBody = {
     batchId,
     expiresUtc,
     captures: responseCaptures,
@@ -1977,18 +1977,18 @@ function isClaimableModerationStatus(submission: UploadSubmissionRecord, now: Da
   return !Number.isFinite(claimedAt) || claimedAt <= now.getTime() - moderationClaimLeaseMs;
 }
 
-function publicBatchStatus(batch: UploadBatchRecord): Record<string, unknown> {
+function publicBatchStatus(batch: UploadBatchRecord) {
   return batchStatus(batch, publicAttribution);
 }
 
-function botBatchStatus(batch: UploadBatchRecord): Record<string, unknown> {
+function botBatchStatus(batch: UploadBatchRecord) {
   return batchStatus(batch, botAttribution);
 }
 
-function batchStatus(
+function batchStatus<T>(
   batch: UploadBatchRecord,
-  attribution: (attribution: UploadAttribution) => Record<string, unknown>
-): Record<string, unknown> {
+  attribution: (attribution: UploadAttribution) => T
+) {
   return {
     batchId: batch.id,
     status: batch.status,
@@ -2181,7 +2181,7 @@ function authorNameForAttribution(attribution: UploadAttribution): string {
   return "Anonymous";
 }
 
-function readCatalogAuthor(body: Record<string, unknown>, attribution: UploadAttribution): { name: string; avatarUrl: string } {
+function readCatalogAuthor(body: Record<string, unknown>, attribution: UploadAttribution) {
   if (attribution.mode !== "discord") {
     return { name: "Anonymous", avatarUrl: "" };
   }
@@ -2202,7 +2202,7 @@ function readCatalogAuthor(body: Record<string, unknown>, attribution: UploadAtt
   return { name, avatarUrl: avatar.toString() };
 }
 
-function publicAttribution(attribution: UploadAttribution): Record<string, unknown> {
+function publicAttribution(attribution: UploadAttribution) {
   if (attribution.mode === "anonymous") {
     return { mode: "anonymous", label: "Anonymous" };
   }
@@ -2213,7 +2213,7 @@ function publicAttribution(attribution: UploadAttribution): Record<string, unkno
   };
 }
 
-function botAttribution(attribution: UploadAttribution): Record<string, unknown> {
+function botAttribution(attribution: UploadAttribution) {
   if (attribution.mode === "anonymous") {
     return publicAttribution(attribution);
   }
@@ -2581,7 +2581,7 @@ async function bufferFromBody(body: Buffer | ReadableStream<Uint8Array>, maxByte
 export function capUploadBodyStream(
   body: Buffer | ReadableStream<Uint8Array>,
   maxBytes: number
-): { body: Buffer | ReadableStream<Uint8Array>; uploadedBytes: Promise<number> } {
+) {
   if (Buffer.isBuffer(body)) {
     if (body.length > maxBytes) {
       throw new UploadTooLargeError(maxBytes);
