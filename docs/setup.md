@@ -80,6 +80,22 @@ docker compose up -d --build
 
 The container stores SQLite data in `./data` through the compose volume.
 
+## Health checks
+
+The bot HTTP server always listens on `GITHUB_WEBHOOK_PORT` (default `3005`).
+`GET /health` returns HTTP 200 with `ready: true` only while the Discord
+client is ready and a read of the SQLite `bot_settings` table succeeds.
+Otherwise it returns HTTP 503 with `ready: false`. The response has
+`Cache-Control: no-store` and contains no account, guild, or database details.
+Keep this port private. Gatus reaches it over Tailscale from the status host.
+GitHub webhook handling still requires `GITHUB_WEBHOOK_SECRET`.
+
+`GET /uploads/health` checks the D1 `upload_batches` table and reads R2
+metadata from both upload buckets. It returns HTTP 200 with `ready: true`
+only when all three reads succeed. Failures return HTTP 503 and `ready: false`.
+This endpoint creates no submissions or objects and returns no storage data.
+These checks prove dependency reads, not write access or a full upload cycle.
+
 ## Sentry
 
 Create separate Sentry projects for the Node bot and the Cloudflare upload

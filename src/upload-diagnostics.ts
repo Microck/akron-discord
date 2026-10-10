@@ -50,7 +50,7 @@ const deliveredSchema = leaseSchema.extend({ messageId: z.string().regex(/^\d{17
 
 export async function handleDiagnosticsRequest(request: Request, input: {
   reportError?: ErrorReporter;
-  bucket: CloudflareUploadEnv["UPLOAD_QUARANTINE_BUCKET"];
+  bucket: Pick<CloudflareUploadEnv["UPLOAD_QUARANTINE_BUCKET"], "put" | "get" | "delete">;
   botSecret: string;
   store: Pick<UploadWorkerStore, "rememberBotNonce"> & DiagnosticDeliveryStore;
 }): Promise<Response | undefined> {

@@ -34,6 +34,11 @@ class TestD1 {
 
 class TestR2 {
   readonly objects = new Map<string, Buffer>();
+  failHead = false;
+  async head(key: string): Promise<object | null> {
+    if (this.failHead) throw new Error("Private storage failure.");
+    return this.objects.has(key) ? {} : null;
+  }
   failPutAt = 0;
   failPutKey = "";
   beforePut?: () => Promise<void>;
@@ -67,6 +72,32 @@ class TestR2 {
   }
   async delete(key: string): Promise<void> { this.objects.delete(key); }
 }
+
+describe("upload dependency health", () => {
+  it("checks empty D1 and R2 stores without writing data", async () => {
+    const { env, d1, quarantine, publicBucket } = diagnosticStore();
+    const changes = d1.sqlite.prepare("SELECT total_changes() AS count").get();
+    const response = await uploadWorker.fetch(new Request("https://uploads.test/uploads/health"), env);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ ready: true });
+    expect(d1.sqlite.prepare("SELECT total_changes() AS count").get()).toEqual(changes);
+    expect(quarantine.objects.size).toBe(0);
+    expect(publicBucket.objects.size).toBe(0);
+    d1.sqlite.close();
+  });
+
+  it.each(["database", "quarantine", "public"])("returns 503 when %s reads fail", async dependency => {
+    const { env, d1, quarantine, publicBucket } = diagnosticStore();
+    if (dependency === "database") d1.sqlite.exec("DROP TABLE upload_batches");
+    if (dependency === "quarantine") quarantine.failHead = true;
+    if (dependency === "public") publicBucket.failHead = true;
+    const response = await uploadWorker.fetch(new Request("https://uploads.test/uploads/health"), env);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ready: false });
+    d1.sqlite.close();
+  });
+});
 
 describe("Cloudflare upload store consistency", () => {
   it("rejects streamed uploads whose body length differs from the declaration", async () => {
