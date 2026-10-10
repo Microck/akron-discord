@@ -37,7 +37,12 @@ const instrumented = Sentry.withSentry((env: CloudflareUploadEnv) => ({
 // An absent DSN selects the original handler; no SDK client or transport is created.
 export default {
   fetch(request: Request, env: CloudflareUploadEnv, ctx: ExecutionContext): Promise<Response> {
-    return env.SENTRY_DSN?.trim() ? instrumented.fetch(request, env, ctx) : plain.fetch(request, env);
+    if (!env.SENTRY_DSN?.trim()) return plain.fetch(request, env);
+    // Caller-controlled trace context can override sampling and bypass payload sanitizers.
+    const headers = new Headers(request.headers);
+    headers.delete("sentry-trace");
+    headers.delete("baggage");
+    return instrumented.fetch(new Request(request, { headers }), env, ctx);
   },
   scheduled(controller: unknown, env: CloudflareUploadEnv, ctx: ExecutionContext): Promise<void> {
     return env.SENTRY_DSN?.trim() ? instrumented.scheduled(controller, env, ctx) : plain.scheduled(controller, env);

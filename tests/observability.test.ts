@@ -102,6 +102,50 @@ describe("Sentry Node capture with an offline transport", () => {
 });
 
 describe("handled Worker failures", () => {
+  it("keeps Worker sampling local and excludes incoming baggage from real SDK envelopes", () => {
+    // Run the Worker in a separate process because its SDK installs its own async scope strategy.
+    const captured = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import { createServer } from "node:http";
+      import worker from "./src/instrumentation-worker.ts";
+      const envelopes = [];
+      const server = createServer(async (request, response) => {
+        let body = "";
+        for await (const chunk of request) body += chunk;
+        envelopes.push(body);
+        response.end("{}");
+      });
+      await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const statuses = [];
+        for (const rate of ["0", "1"]) {
+          const pending = [];
+          const response = await worker.fetch(new Request("https://uploads.test/unknown", {
+            headers: {
+              "sentry-trace": "11111111111111111111111111111111-2222222222222222-1",
+              baggage: "sentry-environment=${secret},sentry-public_key=test,sentry-trace_id=11111111111111111111111111111111"
+            }
+          }), {
+            SENTRY_DSN: "http://test@127.0.0.1:" + server.address().port + "/1",
+            SENTRY_TRACES_SAMPLE_RATE: rate
+          }, { waitUntil: promise => pending.push(promise) });
+          statuses.push(response.status);
+          await response.text();
+          await Promise.all(pending);
+        }
+        console.log(JSON.stringify({ statuses, envelopes }));
+      } finally {
+        await new Promise(resolve => server.close(resolve));
+      }
+    `], { encoding: "utf8", timeout: 10_000 });
+    expect(captured.status, captured.stderr).toBe(0);
+    const { statuses, envelopes } = JSON.parse(captured.stdout) as { statuses: number[]; envelopes: string[] };
+    expect(statuses).toEqual([503, 503]);
+    expect(envelopes.filter(envelope => envelope.includes('"type":"event"'))).toHaveLength(2);
+    expect(envelopes.filter(envelope => envelope.includes('"type":"span"'))).toHaveLength(1);
+    expect(envelopes.join("\n")).not.toContain(secret);
+    expect(envelopes.join("\n")).not.toContain("11111111111111111111111111111111");
+  });
+
   it("captures an unexpected storage failure once without changing its 500 response", async () => {
     const store = new InMemoryUploadStore();
     const failure = new Error("test storage outage");

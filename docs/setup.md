@@ -134,6 +134,8 @@ Tracing is off by default in both runtimes. Set `SENTRY_TRACES_SAMPLE_RATE`
 to a value between `0` and `1` to sample operation timings. Empty bot polls
 carry error context but do not create spans. Outgoing trace-header propagation
 is disabled, including requests to Discord, GitHub, NVIDIA, and storage.
+The upload Worker discards incoming `sentry-trace` and `baggage` headers before
+instrumentation so callers cannot override sampling or inject trace metadata.
 
 ### Data sent
 
