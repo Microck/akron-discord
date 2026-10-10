@@ -34,7 +34,7 @@ const config = loadConfig();
 const database = createDatabase(config.databasePath);
 const scanTimers = new Map<string, NodeJS.Timeout>();
 let uploadModerationTimer: NodeJS.Timeout | null = null;
-let githubWebhookServer: ReturnType<typeof startGithubWebhookServer> = null;
+let githubWebhookServer: ReturnType<typeof startGithubWebhookServer> | null = null;
 
 const client = new Client({
   intents: [

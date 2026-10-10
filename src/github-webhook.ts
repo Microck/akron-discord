@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { ChannelType, type AnyThreadChannel, type Client } from "discord.js";
 import type { AppConfig } from "./config.js";
 import type { AkronDatabase } from "./db/database.js";
@@ -48,11 +48,7 @@ export function startGithubWebhookServer(input: {
   config: AppConfig;
   db: AkronDatabase;
   onError: (error: unknown) => Promise<void>;
-}): Server | null {
-  if (!input.config.githubWebhookSecret) {
-    console.log("GitHub webhook server disabled: GITHUB_WEBHOOK_SECRET is not configured.");
-    return null;
-  }
+}): Server {
 
   const server = createServer((request, response) => {
     void withNodeOperation("bot.github_webhook", () => handleGithubWebhookRequest(input, request, response).catch(async error => {
@@ -62,7 +58,7 @@ export function startGithubWebhookServer(input: {
     }));
   });
   server.listen(input.config.githubWebhookPort, "0.0.0.0", () => {
-    console.log(`GitHub webhook server listening on port ${input.config.githubWebhookPort}`);
+    console.log(`Bot HTTP server listening on port ${input.config.githubWebhookPort}`);
   });
   return server;
 }
@@ -76,7 +72,23 @@ async function handleGithubWebhookRequest(
   request: IncomingMessage,
   response: ServerResponse
 ): Promise<void> {
-  if (request.method !== "POST" || request.url !== "/github/webhook") {
+  if (request.method === "GET" && request.url === "/health") {
+    // Probe the application's table, not just the SQLite connection.
+    let ready = input.client.isReady();
+    try {
+      input.db.get(sql`SELECT key FROM bot_settings LIMIT 1`);
+    } catch {
+      ready = false;
+    }
+    response.writeHead(ready ? 200 : 503, {
+      "content-type": "application/json",
+      "cache-control": "no-store"
+    });
+    response.end(JSON.stringify({ ready }));
+    return;
+  }
+
+  if (!input.config.githubWebhookSecret || request.method !== "POST" || request.url !== "/github/webhook") {
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: "not found" }));
     return;

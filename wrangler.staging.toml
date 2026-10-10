@@ -64,3 +64,11 @@ namespace_id = "4107104"
 
 # Secrets:
 # wrangler secret put BOT_HMAC_SECRET --config wrangler.staging.toml
+
+[[ratelimits]]
+name = "UPLOAD_HEALTH_RATE_LIMITER"
+namespace_id = "4107105"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60

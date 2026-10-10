@@ -45,6 +45,7 @@ export type CloudflareUploadEnv = {
   UPLOAD_DB: D1Database;
   UPLOAD_QUARANTINE_BUCKET: R2Bucket;
   UPLOAD_PUBLIC_BUCKET: R2Bucket;
+  UPLOAD_HEALTH_RATE_LIMITER: RateLimit;
   UPLOAD_PREPARE_RATE_LIMITER: RateLimit;
   UPLOAD_OBJECT_RATE_LIMITER: RateLimit;
   UPLOAD_COMPLETE_RATE_LIMITER: RateLimit;
@@ -56,6 +57,7 @@ export type CloudflareUploadEnv = {
 };
 
 type EdgeRateLimitEnv = Pick<CloudflareUploadEnv,
+  | "UPLOAD_HEALTH_RATE_LIMITER"
   | "UPLOAD_PREPARE_RATE_LIMITER"
   | "UPLOAD_OBJECT_RATE_LIMITER"
   | "UPLOAD_COMPLETE_RATE_LIMITER"
@@ -71,6 +73,7 @@ type DurableLock = {
 // Keep the R2 boundary narrow so the shared upload core can use Node streams
 // in tests while the production binding still follows the Workers API.
 type R2Bucket = {
+  head(key: string): Promise<unknown>;
   put(
     key: string,
     value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string,
@@ -180,6 +183,20 @@ export function createCloudflareUploadWorker(reportError?: ErrorReporter) {
       if (rateLimitResponse) {
         return rateLimitResponse;
       }
+      if (request.method === "GET" && new URL(request.url).pathname === "/uploads/health") {
+        // Empty tables and absent objects are valid. Failed binding reads are not.
+        // Metadata probes avoid downloading private objects or writing health data.
+        const checks = await Promise.allSettled([
+          env.UPLOAD_DB.prepare("SELECT id FROM upload_batches LIMIT 1").all(),
+          env.UPLOAD_QUARANTINE_BUCKET.head("__health__"),
+          env.UPLOAD_PUBLIC_BUCKET.head("catalog/index.json")
+        ]);
+        const ready = checks.every(check => check.status === "fulfilled");
+        return Response.json({ ready }, {
+          status: ready ? 200 : 503,
+          headers: { "cache-control": "no-store" }
+        });
+      }
       const store = new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL);
       const diagnosticsResponse = await handleDiagnosticsRequest(request, {
         bucket: env.UPLOAD_QUARANTINE_BUCKET,
@@ -247,6 +264,7 @@ export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitE
 }
 
 function edgeLimiterForRequest(method: string, pathname: string, env: EdgeRateLimitEnv): RateLimit | null | undefined {
+  if (method === "GET" && pathname === "/uploads/health") return env.UPLOAD_HEALTH_RATE_LIMITER ?? null;
   if (method === "POST" && pathname === "/uploads/prepare") return env.UPLOAD_PREPARE_RATE_LIMITER ?? null;
   if (method === "POST" && pathname === "/uploads/diagnostics") return env.UPLOAD_PREPARE_RATE_LIMITER ?? null;
   if (method === "PUT" && /^\/uploads\/objects\/[^/]+$/.test(pathname)) return env.UPLOAD_OBJECT_RATE_LIMITER ?? null;
