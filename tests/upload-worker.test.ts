@@ -25,7 +25,7 @@ const mapSid = "SpringCollab2020/1-Beginner";
 
 describe("upload worker", () => {
   it("enforces the route-specific Cloudflare edge rate limits", async () => {
-    const calls: Record<string, string[]> = { prepare: [], object: [], complete: [], attribution: [] };
+    const calls: Record<string, string[]> = { health: [], prepare: [], object: [], complete: [], attribution: [] };
     const limiter = (name: keyof typeof calls, success = true) => ({
       async limit(input: { key: string }): Promise<{ success: boolean }> {
         calls[name].push(input.key);
@@ -33,6 +33,7 @@ describe("upload worker", () => {
       }
     });
     const env = {
+      UPLOAD_HEALTH_RATE_LIMITER: limiter("health"),
       UPLOAD_PREPARE_RATE_LIMITER: limiter("prepare"),
       UPLOAD_OBJECT_RATE_LIMITER: limiter("object"),
       UPLOAD_COMPLETE_RATE_LIMITER: limiter("complete", false),
@@ -43,6 +44,7 @@ describe("upload worker", () => {
       headers: { "cf-connecting-ip": "203.0.113.42" }
     });
 
+    expect(await enforceEdgeRateLimit(request("GET", "/uploads/health"), env)).toBeUndefined();
     expect(await enforceEdgeRateLimit(request("POST", "/uploads/prepare"), env)).toBeUndefined();
     expect(await enforceEdgeRateLimit(request("PUT", "/uploads/objects/object-id?token=value"), env)).toBeUndefined();
     const blocked = await enforceEdgeRateLimit(request("POST", "/uploads/complete"), env);
@@ -53,6 +55,7 @@ describe("upload worker", () => {
     expect(await enforceEdgeRateLimit(request("GET", "/uploads/challenge"), env)).toBeUndefined();
 
     expect(Object.fromEntries(Object.entries(calls).map(([name, keys]) => [name, keys.length]))).toEqual({
+      health: 1,
       prepare: 1,
       object: 1,
       complete: 1,
@@ -66,6 +69,7 @@ describe("upload worker", () => {
     let calls = 0;
     const limiter = { async limit(): Promise<{ success: boolean }> { calls += 1; return { success: true }; } };
     const response = await enforceEdgeRateLimit(new Request(`${baseUrl}/uploads/prepare`, { method: "POST" }), {
+      UPLOAD_HEALTH_RATE_LIMITER: limiter,
       UPLOAD_PREPARE_RATE_LIMITER: limiter,
       UPLOAD_OBJECT_RATE_LIMITER: limiter,
       UPLOAD_COMPLETE_RATE_LIMITER: limiter,

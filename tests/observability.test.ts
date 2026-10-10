@@ -180,7 +180,7 @@ describe("handled Worker failures", () => {
     const reportError: ErrorReporter = (...args) => { reports.push(args); };
     const request = new Request("https://uploads.test/uploads/prepare", { method: "POST", headers: { "cf-connecting-ip": "203.0.113.1" } });
     const limiter = { limit: async () => ({ success: false }) };
-    const env = { UPLOAD_PREPARE_RATE_LIMITER: limiter, UPLOAD_OBJECT_RATE_LIMITER: limiter, UPLOAD_COMPLETE_RATE_LIMITER: limiter, UPLOAD_ATTRIBUTION_RATE_LIMITER: limiter };
+    const env = { UPLOAD_HEALTH_RATE_LIMITER: limiter, UPLOAD_PREPARE_RATE_LIMITER: limiter, UPLOAD_OBJECT_RATE_LIMITER: limiter, UPLOAD_COMPLETE_RATE_LIMITER: limiter, UPLOAD_ATTRIBUTION_RATE_LIMITER: limiter };
     expect((await enforceEdgeRateLimit(request, env, reportError))?.status).toBe(429);
     expect(reports).toHaveLength(0);
     limiter.limit = async () => { throw new Error("edge unavailable"); };

@@ -34,8 +34,10 @@ class TestD1 {
 
 class TestR2 {
   readonly objects = new Map<string, Buffer>();
+  headReads = 0;
   failHead = false;
   async head(key: string): Promise<object | null> {
+    this.headReads++;
     if (this.failHead) throw new Error("Private storage failure.");
     return this.objects.has(key) ? {} : null;
   }
@@ -74,10 +76,25 @@ class TestR2 {
 }
 
 describe("upload dependency health", () => {
+  it("rejects excessive health requests before probing storage", async () => {
+    const { env, d1, quarantine, publicBucket } = diagnosticStore();
+    let healthRequests = 0;
+    env.UPLOAD_HEALTH_RATE_LIMITER = { async limit() { return { success: healthRequests++ === 0 }; } };
+    const request = () => new Request("https://uploads.test/uploads/health", { headers: { "cf-connecting-ip": "192.0.2.1" } });
+    expect((await uploadWorker.fetch(request(), env)).status).toBe(200);
+    // A closed database would fail immediately if the rejected request probed it.
+    d1.sqlite.close();
+    const rejected = await uploadWorker.fetch(request(), env);
+    expect(rejected.status).toBe(429);
+    expect(rejected.headers.get("retry-after")).toBe("60");
+    expect(quarantine.headReads).toBe(1);
+    expect(publicBucket.headReads).toBe(1);
+  });
+
   it("checks empty D1 and R2 stores without writing data", async () => {
     const { env, d1, quarantine, publicBucket } = diagnosticStore();
     const changes = d1.sqlite.prepare("SELECT total_changes() AS count").get();
-    const response = await uploadWorker.fetch(new Request("https://uploads.test/uploads/health"), env);
+    const response = await uploadWorker.fetch(new Request("https://uploads.test/uploads/health", { headers: { "cf-connecting-ip": "192.0.2.1" } }), env);
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({ ready: true });
@@ -92,7 +109,7 @@ describe("upload dependency health", () => {
     if (dependency === "database") d1.sqlite.exec("DROP TABLE upload_batches");
     if (dependency === "quarantine") quarantine.failHead = true;
     if (dependency === "public") publicBucket.failHead = true;
-    const response = await uploadWorker.fetch(new Request("https://uploads.test/uploads/health"), env);
+    const response = await uploadWorker.fetch(new Request("https://uploads.test/uploads/health", { headers: { "cf-connecting-ip": "192.0.2.1" } }), env);
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ ready: false });
     d1.sqlite.close();
@@ -785,6 +802,7 @@ function diagnosticStore() {
     UPLOAD_DB: fixture.d1 as never,
     UPLOAD_QUARANTINE_BUCKET: fixture.quarantine,
     UPLOAD_PUBLIC_BUCKET: fixture.publicBucket,
+    UPLOAD_HEALTH_RATE_LIMITER: limiter,
     UPLOAD_PREPARE_RATE_LIMITER: limiter,
     UPLOAD_OBJECT_RATE_LIMITER: limiter,
     UPLOAD_COMPLETE_RATE_LIMITER: limiter,

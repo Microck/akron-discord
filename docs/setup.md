@@ -95,6 +95,9 @@ metadata from both upload buckets. It returns HTTP 200 with `ready: true`
 only when all three reads succeed. Failures return HTTP 503 and `ready: false`.
 This endpoint creates no submissions or objects and returns no storage data.
 These checks prove dependency reads, not write access or a full upload cycle.
+The upload health route has a separate edge limit of 60 requests per minute
+per client address. It checks that limit before reading storage, without
+using player upload quotas.
 
 ## Sentry
 
