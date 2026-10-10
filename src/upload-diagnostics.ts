@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { HttpError, readSignedJson, type UploadWorkerStore } from "./upload-worker.js";
 import type { CloudflareUploadEnv } from "./upload-worker-cloudflare.js";
+import { reportSafely, type ErrorReporter } from "./observability/privacy.js";
 
 export const diagnosticMaxBytes = 4 * 1024 * 1024;
 const diagnosticLogMaxBytes = 1024 * 1024;
@@ -48,6 +49,7 @@ const leaseSchema = z.strictObject({ claimToken: z.uuid() });
 const deliveredSchema = leaseSchema.extend({ messageId: z.string().regex(/^\d{17,20}$/) });
 
 export async function handleDiagnosticsRequest(request: Request, input: {
+  reportError?: ErrorReporter;
   bucket: CloudflareUploadEnv["UPLOAD_QUARANTINE_BUCKET"];
   botSecret: string;
   store: Pick<UploadWorkerStore, "rememberBotNonce"> & DiagnosticDeliveryStore;
@@ -135,6 +137,7 @@ export async function handleDiagnosticsRequest(request: Request, input: {
   } catch (error) {
     if (error instanceof HttpError) return diagnosticJson({ error: error.code }, error.status);
     // An upstream exception can contain request data. Never log diagnostic contents.
+    reportSafely(input.reportError, new Error("Diagnostic storage request failed."), "upload.diagnostics_store", { httpStatus: 500 });
     console.error("Diagnostic storage request failed.");
     return diagnosticJson({ error: "internal_error" }, 500);
   }

@@ -29,6 +29,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { catalogImageMaxBytes } from "./submissions/types.js";
 import type { D1Database, D1PreparedStatement, D1Result, RateLimit } from "@cloudflare/workers-types";
+import { reportSafely, uploadRoute, type ErrorReporter } from "./observability/privacy.js";
 import {
   diagnosticClaimLeaseMs,
   handleDiagnosticsRequest,
@@ -37,6 +38,10 @@ import {
 } from "./upload-diagnostics.js";
 
 export type CloudflareUploadEnv = {
+  SENTRY_DSN?: string;
+  SENTRY_ENVIRONMENT?: string;
+  SENTRY_RELEASE?: string;
+  SENTRY_TRACES_SAMPLE_RATE?: string;
   UPLOAD_DB: D1Database;
   UPLOAD_QUARANTINE_BUCKET: R2Bucket;
   UPLOAD_PUBLIC_BUCKET: R2Bucket;
@@ -161,58 +166,66 @@ type CatalogEntryRow = {
 };
 
 const uploadObjectPrefix = "quarantine/uploads";
-export default {
-  async fetch(request: Request, env: CloudflareUploadEnv): Promise<Response> {
-    if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
-      return new Response(JSON.stringify({ error: "upload_service_unavailable" }), {
-        status: 503,
-        headers: { "content-type": "application/json; charset=utf-8" }
+export function createCloudflareUploadWorker(reportError?: ErrorReporter) {
+  return {
+    async fetch(request: Request, env: CloudflareUploadEnv): Promise<Response> {
+      if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
+        reportSafely(reportError, new Error("Upload service configuration is incomplete."), "upload.configuration", { httpStatus: 503 });
+        return new Response(JSON.stringify({ error: "upload_service_unavailable" }), {
+          status: 503,
+          headers: { "content-type": "application/json; charset=utf-8" }
+        });
+      }
+      const rateLimitResponse = await enforceEdgeRateLimit(request, env, reportError);
+      if (rateLimitResponse) {
+        return rateLimitResponse;
+      }
+      const store = new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL);
+      const diagnosticsResponse = await handleDiagnosticsRequest(request, {
+        bucket: env.UPLOAD_QUARANTINE_BUCKET,
+        botSecret: env.BOT_HMAC_SECRET,
+        store,
+        reportError
       });
-    }
-    const rateLimitResponse = await enforceEdgeRateLimit(request, env);
-    if (rateLimitResponse) {
-      return rateLimitResponse;
-    }
-    const store = new CloudflareUploadStore(env.UPLOAD_DB, env.UPLOAD_QUARANTINE_BUCKET, env.UPLOAD_PUBLIC_BUCKET, env.UPLOAD_PUBLIC_BASE_URL);
-    const diagnosticsResponse = await handleDiagnosticsRequest(request, {
-      bucket: env.UPLOAD_QUARANTINE_BUCKET,
-      botSecret: env.BOT_HMAC_SECRET,
-      store
-    });
-    if (diagnosticsResponse) {
-      return diagnosticsResponse;
-    }
-    const worker = createUploadWorker({
-      store,
-      botSecret: env.BOT_HMAC_SECRET,
-      publicUploadBaseUrl: env.UPLOAD_PUBLIC_UPLOAD_BASE_URL,
-      optimizeCatalogCapture,
-      termsVersion: readTermsVersion(env.UPLOAD_TERMS_VERSION)
-    });
-    return worker.fetch(request);
-  },
+      if (diagnosticsResponse) {
+        return diagnosticsResponse;
+      }
+      const worker = createUploadWorker({
+        store,
+        reportError,
+        botSecret: env.BOT_HMAC_SECRET,
+        publicUploadBaseUrl: env.UPLOAD_PUBLIC_UPLOAD_BASE_URL,
+        optimizeCatalogCapture,
+        termsVersion: readTermsVersion(env.UPLOAD_TERMS_VERSION)
+      });
+      return worker.fetch(request);
+    },
 
-  async scheduled(_controller: unknown, env: CloudflareUploadEnv): Promise<void> {
-    if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
-      throw new Error("BOT_HMAC_SECRET must be at least 32 characters.");
+    async scheduled(_controller: unknown, env: CloudflareUploadEnv): Promise<void> {
+      if (!env.BOT_HMAC_SECRET || env.BOT_HMAC_SECRET.length < 32) {
+        throw new Error("BOT_HMAC_SECRET must be at least 32 characters.");
+      }
+      const store = new CloudflareUploadStore(
+        env.UPLOAD_DB,
+        env.UPLOAD_QUARANTINE_BUCKET,
+        env.UPLOAD_PUBLIC_BUCKET,
+        env.UPLOAD_PUBLIC_BASE_URL
+      );
+      await store.cleanupExpired(new Date(), 100);
     }
-    const store = new CloudflareUploadStore(
-      env.UPLOAD_DB,
-      env.UPLOAD_QUARANTINE_BUCKET,
-      env.UPLOAD_PUBLIC_BUCKET,
-      env.UPLOAD_PUBLIC_BASE_URL
-    );
-    await store.cleanupExpired(new Date(), 100);
-  }
-};
+  };
+}
 
-export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitEnv): Promise<Response | undefined> {
+export default createCloudflareUploadWorker();
+
+export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitEnv, reportError?: ErrorReporter): Promise<Response | undefined> {
   const url = new URL(request.url);
   const limiter = edgeLimiterForRequest(request.method, url.pathname, env);
   if (limiter === undefined) {
     return undefined;
   }
   if (limiter === null) {
+    reportSafely(reportError, new Error("Upload edge rate limiter is not configured."), "upload.configuration", { route: uploadRoute(request.url), httpStatus: 503 });
     return edgeError("upload_service_unavailable", 503);
   }
 
@@ -227,6 +240,7 @@ export async function enforceEdgeRateLimit(request: Request, env: EdgeRateLimitE
     const decision = await limiter.limit({ key });
     return decision.success ? undefined : edgeError("edge_rate_limit_exceeded", 429, { "retry-after": "60" });
   } catch (error) {
+    reportSafely(reportError, error, "upload.rate_limit", { route: uploadRoute(request.url), httpStatus: 503 });
     console.error("Upload edge rate limiter failed.", error);
     return edgeError("upload_service_unavailable", 503);
   }

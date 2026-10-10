@@ -14,7 +14,11 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
 COPY tests ./tests
-RUN npm run build && npm prune --omit=dev
+COPY scripts ./scripts
+ARG SENTRY_ORG
+ARG SENTRY_PROJECT
+ARG SENTRY_RELEASE
+RUN --mount=type=secret,id=sentry_auth_token,required=false npm run build:release && npm prune --omit=dev
 
 FROM node:24-bookworm-slim@sha256:cb4e8f7c443347358b7875e717c29e27bf9befc8f5a26cf18af3c3dec80e58c5 AS runtime
 
@@ -23,6 +27,8 @@ LABEL org.opencontainers.image.source="https://github.com/Microck/akron-discord"
 
 ENV NODE_ENV=production
 ENV DATABASE_PATH=/app/data/akron-discord.sqlite
+ARG SENTRY_RELEASE
+ENV SENTRY_RELEASE=${SENTRY_RELEASE}
 
 WORKDIR /app
 
@@ -44,4 +50,4 @@ USER akron
 
 VOLUME ["/app/data"]
 
-CMD ["node", "dist/src/index.js"]
+CMD ["node", "--import", "./dist/src/instrumentation-node.js", "dist/src/index.js"]

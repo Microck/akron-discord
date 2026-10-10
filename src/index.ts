@@ -28,6 +28,7 @@ import {
 } from "./services/upload-moderation.js";
 import { handleScanButtonInteraction, scanSubmissionThread } from "./submissions/scanner.js";
 import { utcNow } from "./time.js";
+import { captureNodeError, flushNodeTelemetry, withNodeOperation } from "./observability/node.js";
 
 const config = loadConfig();
 const database = createDatabase(config.databasePath);
@@ -63,36 +64,38 @@ client.once(Events.ClientReady, readyClient => {
 });
 
 client.on(Events.InteractionCreate, async interaction => {
-  try {
-    if (interaction.isButton() && interaction.customId === verifyButtonCustomId) {
-      await handleVerifyButton(interaction.member as GuildMember | null);
-      await interaction.reply({ embeds: [buildVerifyEmbed()], components: buildVerifyComponents(), ephemeral: true });
-      return;
-    }
+  await withNodeOperation("bot.interaction", async () => {
+    try {
+      if (interaction.isButton() && interaction.customId === verifyButtonCustomId) {
+        await handleVerifyButton(interaction.member as GuildMember | null);
+        await interaction.reply({ embeds: [buildVerifyEmbed()], components: buildVerifyComponents(), ephemeral: true });
+        return;
+      }
 
-    if (interaction.isButton() && await handleScanButtonInteraction({ interaction, config, db: database.db })) {
-      return;
-    }
+      if (interaction.isButton() && await handleScanButtonInteraction({ interaction, config, db: database.db })) {
+        return;
+      }
 
-    if (interaction.isButton() && await handleUploadModerationInteraction({ interaction, config, db: database.db })) {
-      return;
-    }
+      if (interaction.isButton() && await handleUploadModerationInteraction({ interaction, config, db: database.db })) {
+        return;
+      }
 
-    if (await handlePlaytestingInteraction({ interaction, config, db: database.db })) {
-      return;
-    }
+      if (await handlePlaytestingInteraction({ interaction, config, db: database.db })) {
+        return;
+      }
 
-    if (interaction.isChatInputCommand() && client.isReady()) {
-      await handleCommand({ interaction, client, config, db: database.db });
+      if (interaction.isChatInputCommand() && client.isReady()) {
+        await handleCommand({ interaction, client, config, db: database.db });
+      }
+    } catch (error) {
+      await reportRuntimeError(error);
+      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: "Akron bot action failed. Staff have been alerted.", ephemeral: true });
+      } else if (interaction.isRepliable()) {
+        await interaction.followUp({ content: "Akron bot action failed. Staff have been alerted.", ephemeral: true });
+      }
     }
-  } catch (error) {
-    await reportRuntimeError(error);
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: "Akron bot action failed. Staff have been alerted.", ephemeral: true });
-    } else if (interaction.isRepliable()) {
-      await interaction.followUp({ content: "Akron bot action failed. Staff have been alerted.", ephemeral: true });
-    }
-  }
+  });
 });
 
 client.on(Events.ThreadCreate, thread => {
@@ -102,33 +105,37 @@ client.on(Events.ThreadCreate, thread => {
 });
 
 client.on(Events.MessageCreate, async message => {
-  try {
-    if (message.guildId !== config.discordGuildId) {
-      return;
-    }
+  await withNodeOperation("bot.message", async () => {
+    try {
+      if (message.guildId !== config.discordGuildId) {
+        return;
+      }
 
-    await handlePlaytestingMessage({ message, config, db: database.db });
-    if (isForumStarterMessage(message)) {
-      scheduleForumThread(message.channel as AnyThreadChannel);
+      await handlePlaytestingMessage({ message, config, db: database.db });
+      if (isForumStarterMessage(message)) {
+        scheduleForumThread(message.channel as AnyThreadChannel);
+      }
+    } catch (error) {
+      await reportRuntimeError(error);
     }
-  } catch (error) {
-    await reportRuntimeError(error);
-  }
+  });
 });
 
 client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
-  try {
-    const message = newMessage.partial ? await newMessage.fetch() : newMessage;
-    if (message.guildId === config.discordGuildId && isForumStarterMessage(message)) {
-      const thread = message.channel as AnyThreadChannel;
-      if (await shouldSkipAutoRescan(thread)) {
-        return;
+  await withNodeOperation("bot.message_update", async () => {
+    try {
+      const message = newMessage.partial ? await newMessage.fetch() : newMessage;
+      if (message.guildId === config.discordGuildId && isForumStarterMessage(message)) {
+        const thread = message.channel as AnyThreadChannel;
+        if (await shouldSkipAutoRescan(thread)) {
+          return;
+        }
+        scheduleForumThread(thread);
       }
-      scheduleForumThread(thread);
+    } catch (error) {
+      await reportRuntimeError(error);
     }
-  } catch (error) {
-    await reportRuntimeError(error);
-  }
+  });
 });
 
 process.on("SIGINT", shutdown);
@@ -180,7 +187,7 @@ function scheduleForumThread(thread: AnyThreadChannel): void {
 
   scanTimers.set(thread.id, setTimeout(() => {
     scanTimers.delete(thread.id);
-    void handleForumThread(thread).catch(reportRuntimeError);
+    void withNodeOperation("bot.forum_scan", () => handleForumThread(thread).catch(reportRuntimeError));
   }, 2000));
 }
 
@@ -201,6 +208,7 @@ async function shouldSkipAutoRescan(thread: AnyThreadChannel): Promise<boolean> 
 }
 
 async function reportRuntimeError(error: unknown): Promise<void> {
+  captureNodeError(error);
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   console.error(message);
   const guild = client.guilds.cache.get(config.discordGuildId);
@@ -224,5 +232,6 @@ async function shutdown(): Promise<void> {
   githubWebhookServer?.close();
   client.destroy();
   database.sqlite.close();
+  await flushNodeTelemetry();
   process.exit(0);
 }

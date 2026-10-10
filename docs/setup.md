@@ -80,6 +80,121 @@ docker compose up -d --build
 
 The container stores SQLite data in `./data` through the compose volume.
 
+## Sentry
+
+Create separate Sentry projects for the Node bot and the Cloudflare upload
+Worker. The SDKs are pinned to `11.6.0`. A missing or empty `SENTRY_DSN` disables
+capture and selects the original Worker handler; no Sentry account or token is
+required to build, test, or run either service.
+
+### Node bot
+
+Add the following to the bot's deployment environment (or its selected
+`.env.prod` / `.env.staging` file):
+
+```text
+SENTRY_DSN=<Node project DSN>
+SENTRY_ENVIRONMENT=production
+SENTRY_RELEASE=akron-discord@<git-commit-sha>
+SENTRY_TRACES_SAMPLE_RATE=0
+```
+
+`npm start`, `npm run dev`, and the Docker entrypoint preload
+`instrumentation-node` before application imports. The preload shares the
+existing dotenv selection with `config.ts`, so production never falls back
+to a development `.env`. Hand-written launch commands must include
+`--import ./dist/src/instrumentation-node.js`.
+
+Handled bot errors, uncaught exceptions/rejections, catalog cache write
+failures, R2 archive failures, and NIM review failures are captured. Discord
+interactions, webhook deliveries, forum scans, and claimed moderation or
+diagnostic jobs get isolated operation context. Errors are captured once when
+re-thrown through the central runtime handler. Shutdown allows at most two
+seconds for telemetry flushing before the existing process exit.
+
+### Upload Worker
+
+Wrangler now loads `src/instrumentation-worker.ts`; the portable handler and
+store remain in `src/upload-worker-cloudflare.ts`. Configure the Worker
+project's DSN separately:
+
+```sh
+npx wrangler secret put SENTRY_DSN --config wrangler.uploads.toml
+```
+
+Use `wrangler.staging.toml` for staging. Its environment is already `staging`;
+the production/example configs use `production`. Set `SENTRY_RELEASE` in the
+Worker's deployment variables to `akron-upload-worker@<git-commit-sha>`.
+The wrapper captures unexpected request and scheduled cleanup failures;
+explicit reporters also capture swallowed internal 500s and rate-limiter
+outages. Expected validation/authentication/quota responses are not errors.
+The Sentry wrapper attaches its flush work to the Worker execution context.
+
+Tracing is off by default in both runtimes. Set `SENTRY_TRACES_SAMPLE_RATE`
+to a value between `0` and `1` to sample operation timings. Empty bot polls
+carry error context but do not create spans. Outgoing trace-header propagation
+is disabled, including requests to Discord, GitHub, NVIDIA, and storage.
+
+### Data sent
+
+Error events retain release/environment, service and operation name, error
+type, stack file/line/function coordinates, and optional opaque report or
+submission IDs, attempt count and HTTP status. Exception messages are replaced
+with a fixed operation label. Stack paths are normalized to remove host home
+directories; source maps restore the source locations.
+
+The v11 `dataCollection` options explicitly disable user information, cookies,
+headers, query parameters, HTTP bodies, database values, queue arguments,
+AI inputs/outputs, frame variables and source context lines. Final allowlist
+hooks also remove breadcrumbs, arbitrary contexts/extras, raw requests,
+attachments, span links and span payloads. Logs and metrics are dropped.
+Diagnostic storage/delivery retains its existing sanitized error boundary;
+raw diagnostic exceptions, player descriptions, logs, report JSON, signed
+URLs, and HMAC credentials are never forwarded to Sentry. Accepted diagnostic
+reports still follow the private R2 and Discord delivery flow described below.
+
+### Source maps and releases
+
+TypeScript builds emit source maps with embedded sources. `npm run build`
+is offline with respect to Sentry. `npm run build:release` additionally runs
+the uploader, which skips without a build token. When a token is present,
+`SENTRY_ORG`, `SENTRY_PROJECT`, and `SENTRY_RELEASE` are required; an upload
+failure fails that release build.
+
+Provide `SENTRY_AUTH_TOKEN` only to trusted build jobs, never runtime or
+frontend environments. The uploader injects Debug IDs before uploading with
+the pinned Sentry CLI and associates artifacts with `SENTRY_RELEASE`.
+Deploy the same injected JavaScript and use the identical runtime release.
+
+For Docker, pass organization/project/release as build arguments and the
+token as a BuildKit secret (not an argument). The image records only the
+release, and the CLI is removed with development dependencies:
+
+```sh
+docker build \
+  --secret id=sentry_auth_token,env=SENTRY_AUTH_TOKEN \
+  --build-arg SENTRY_ORG \
+  --build-arg SENTRY_PROJECT \
+  --build-arg SENTRY_RELEASE \
+  -t akron-discord .
+```
+
+Worker source maps must match Wrangler's bundled artifact, not `dist/src`.
+In the trusted Worker deployment job, build once, inject/upload that output,
+then deploy that same bundle without rebundling. Set the Worker project and
+release in the build environment before running:
+
+```sh
+npx wrangler deploy --dry-run --outdir .sentry-worker --config wrangler.uploads.toml
+SENTRY_SOURCEMAP_DIR=.sentry-worker SENTRY_SOURCEMAP_URL_PREFIX=app:/// npm run sentry:sourcemaps
+npx wrangler deploy .sentry-worker/instrumentation-worker.js --no-bundle --config wrangler.uploads.toml
+```
+
+Pass the same `SENTRY_RELEASE` as a Worker deployment variable. Use the staging
+config for all three commands when deploying staging. Do not expose `.map`
+files as public assets. SDK reference: [Node setup](https://docs.sentry.io/platforms/javascript/guides/node/)
+and [Cloudflare setup](https://docs.sentry.io/platforms/javascript/guides/cloudflare/).
+
 ## Cloudflare R2
 
 Create one private bucket for catalog archives and optimized map captures. Enable public `r2.dev` access or attach a public custom domain, then set `CLOUDFLARE_R2_PUBLIC_BASE_URL` to that raw storage origin.

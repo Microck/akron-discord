@@ -2,6 +2,11 @@
 
 Official Discord bot for Akron's single community server. It manages server setup, verification, `.akr` submission scanning, R2 catalog publishing, and Discord forum to GitHub issue sync.
 
+Optional Sentry error reporting is available for the Node bot and Cloudflare
+upload Worker as separate projects. Both remain disabled without a DSN.
+See [Sentry setup and privacy](docs/setup.md#sentry) for deployment, source maps,
+and the deliberately limited data sent to Sentry.
+
 ## Private diagnostics
 
 The upload Worker accepts `POST /uploads/diagnostics` from Akron's consent menu.

@@ -30,6 +30,7 @@ import {
   type UploadWorkerStatusSubmission
 } from "./upload-worker-client.js";
 import type { UploadAiReview } from "../upload-worker.js";
+import { withNodeOperation } from "../observability/node.js";
 
 const customIdPrefix = "upload-review";
 const publicationReservationLeaseMs = 5 * 60 * 1000;
@@ -122,7 +123,7 @@ export function pollUploadModerationQueue(input: {
   if (moderationPollInFlight) {
     return moderationPollInFlight;
   }
-  const poll = pollUploadModerationQueueOnce(input).finally(() => {
+  const poll = withNodeOperation("bot.moderation_poll", () => pollUploadModerationQueueOnce(input)).finally(() => {
     if (moderationPollInFlight === poll) {
       moderationPollInFlight = undefined;
     }
@@ -152,47 +153,49 @@ async function pollUploadModerationQueueOnce(input: {
     }
 
     for (const job of jobs) {
-      try {
-        if (job.attribution.mode === "discord" && !job.attribution.confirmed) {
-          if (!job.attribution.discordUserId) {
-            throw new Error("Discord attribution job did not include a Discord user ID.");
-          }
-          // Resolve attribution only through the configured guild. A public
-          // caller must not be able to turn the bot into an arbitrary-user DM
-          // relay by supplying an unrelated Discord snowflake.
-          const guild = await input.client.guilds.fetch(input.config.discordGuildId);
-          const member = await guild.members.fetch(job.attribution.discordUserId);
-          await member.send({
-            embeds: buildUploadModerationEmbeds(job),
-            components: buildUploadModerationComponents(job)
-          });
-        } else {
-          const reviewedJob = await prepareUploadReviewJob({
-            config: input.config,
-            worker,
-            job
-          });
-          const message = await channel.send({
-            embeds: buildUploadModerationEmbeds(reviewedJob),
-            components: buildUploadModerationComponents(reviewedJob)
-          });
-          await recordReviewMessage({ worker, config: input.config, job: reviewedJob, message, onError: input.onError });
-        }
+      await withNodeOperation("bot.moderation_delivery", async () => {
         try {
-          await worker.acknowledgeDelivered([job.submissionId]);
-        } catch (acknowledgeError) {
-          await input.onError(acknowledgeError);
-        }
-      } catch (error) {
-        if (shouldRequeueFailedDeliveryImmediately(job)) {
-          try {
-            await worker.requeueJobs([job.submissionId]);
-          } catch (requeueError) {
-            await input.onError(requeueError);
+          if (job.attribution.mode === "discord" && !job.attribution.confirmed) {
+            if (!job.attribution.discordUserId) {
+              throw new Error("Discord attribution job did not include a Discord user ID.");
+            }
+            // Resolve attribution only through the configured guild. A public
+            // caller must not be able to turn the bot into an arbitrary-user DM
+            // relay by supplying an unrelated Discord snowflake.
+            const guild = await input.client.guilds.fetch(input.config.discordGuildId);
+            const member = await guild.members.fetch(job.attribution.discordUserId);
+            await member.send({
+              embeds: buildUploadModerationEmbeds(job),
+              components: buildUploadModerationComponents(job)
+            });
+          } else {
+            const reviewedJob = await prepareUploadReviewJob({
+              config: input.config,
+              worker,
+              job
+            });
+            const message = await channel.send({
+              embeds: buildUploadModerationEmbeds(reviewedJob),
+              components: buildUploadModerationComponents(reviewedJob)
+            });
+            await recordReviewMessage({ worker, config: input.config, job: reviewedJob, message, onError: input.onError });
           }
+          try {
+            await worker.acknowledgeDelivered([job.submissionId]);
+          } catch (acknowledgeError) {
+            await input.onError(acknowledgeError);
+          }
+        } catch (error) {
+          if (shouldRequeueFailedDeliveryImmediately(job)) {
+            try {
+              await worker.requeueJobs([job.submissionId]);
+            } catch (requeueError) {
+              await input.onError(requeueError);
+            }
+          }
+          await input.onError(error);
         }
-        await input.onError(error);
-      }
+      }, { submissionId: job.submissionId });
     }
   } catch (error) {
     await input.onError(error);

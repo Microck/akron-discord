@@ -10,6 +10,7 @@ import { utcNow } from "../time.js";
 import { slugMapSid } from "./map-resolver.js";
 import { deleteR2Object, putR2Object, r2ObjectExists } from "./r2.js";
 import { createUploadWorkerClient } from "./upload-worker-client.js";
+import { captureNodeError } from "../observability/node.js";
 
 export type CatalogPack = {
   id: string;
@@ -317,5 +318,6 @@ function safePathSegments(value: string): string[] {
 }
 
 function defaultCatalogErrorReporter(error: unknown): void {
+  captureNodeError(error, "bot.catalog_cache");
   console.error("Catalog reconciliation failed after the Worker index was committed.", error);
 }
