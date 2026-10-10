@@ -5,7 +5,7 @@ FROM node:24-bookworm-slim@sha256:cb4e8f7c443347358b7875e717c29e27bf9befc8f5a26c
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ pkg-config \
+  && apt-get install -y --no-install-recommends ca-certificates python3 make g++ pkg-config \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./

@@ -87,6 +87,19 @@ Worker. The SDKs are pinned to `11.6.0`. A missing or empty `SENTRY_DSN` disable
 capture and selects the original Worker handler; no Sentry account or token is
 required to build, test, or run either service.
 
+### Maintained projects
+
+The maintained organization is `syntaxis-h1`. Use `akron-discord` for the bot
+and `akron-upload-worker` for the upload Worker. Both projects discard client
+IP addresses and derived geolocation, and use Sentry's default sensitive-data
+scrubbing. Their debug files are restricted to organization owners.
+
+Repository variables provide `SENTRY_ORG`, `SENTRY_PROJECT`, `SENTRY_DSN`,
+`SENTRY_UPLOAD_PROJECT`, and `SENTRY_UPLOAD_DSN`. `SENTRY_AUTH_TOKEN` is a
+repository secret for trusted builds. These GitHub settings do not inject
+values into Docker or Wrangler automatically. The deployment environment
+must supply the bot values below and the Worker's separate DSN/release.
+
 ### Node bot
 
 Add the following to the bot's deployment environment (or its selected
@@ -168,8 +181,13 @@ frontend environments. The uploader injects Debug IDs before uploading with
 the pinned Sentry CLI and associates artifacts with `SENTRY_RELEASE`.
 Deploy the same injected JavaScript and use the identical runtime release.
 
-For Docker, pass organization/project/release as build arguments and the
-token as a BuildKit secret (not an argument). The image records only the
+Compose passes `SENTRY_ORG`, `SENTRY_PROJECT`, and `SENTRY_RELEASE` from its
+build environment and reads the exported `SENTRY_AUTH_TOKEN` as a BuildKit
+secret. Keep that token out of the runtime `.env` file. Without an exported
+token, ordinary builds skip the optional upload.
+
+For a direct Docker build, pass organization/project/release as build arguments
+and the token as a BuildKit secret (not an argument). The image records only the
 release, and the CLI is removed with development dependencies:
 
 ```sh
