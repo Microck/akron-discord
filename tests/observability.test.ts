@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as Sentry from "@sentry/node";
 import type { ErrorEvent, EventHint, NodeOptions } from "@sentry/node";
 import { spawnSync } from "node:child_process";
-import { privacyOptions, sanitizeErrorEvent, sanitizeSpan, uploadRoute } from "../src/observability/privacy.js";
+import { privacyOptions, sanitizeErrorEvent, sanitizeSpan, uploadRoute, type ErrorReporter } from "../src/observability/privacy.js";
 import { captureNodeError, flushNodeTelemetry, withNodeOperation } from "../src/observability/node.js";
 import { createUploadWorker, HttpError, InMemoryUploadStore } from "../src/upload-worker.js";
 import { enforceEdgeRateLimit } from "../src/upload-worker-cloudflare.js";
@@ -106,61 +106,56 @@ describe("handled Worker failures", () => {
     const store = new InMemoryUploadStore();
     const failure = new Error("test storage outage");
     store.getBatch = async () => { throw failure; };
-    const reportError = vi.fn();
+    const reports: Parameters<ErrorReporter>[] = [];
+    const reportError: ErrorReporter = (...args) => { reports.push(args); };
     const worker = createUploadWorker({ store, botSecret: "test", reportError });
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      const response = await worker.fetch(new Request(`https://uploads.test/uploads/status/${secret}?installId=${secret}`));
-      expect(response.status).toBe(500);
-      expect(await response.json()).toEqual({ error: "internal_error" });
-      expect(reportError).toHaveBeenCalledExactlyOnceWith(failure, "upload.request", { route: "/uploads/status/:batchId", httpStatus: 500 });
-    } finally { log.mockRestore(); }
+    const response = await worker.fetch(new Request(`https://uploads.test/uploads/status/${secret}?installId=${secret}`));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "internal_error" });
+    expect(reports).toEqual([[failure, "upload.request", { route: "/uploads/status/:batchId", httpStatus: 500 }]]);
   });
 
   it("does not report expected HttpErrors and remains operational if telemetry itself throws", async () => {
     const store = new InMemoryUploadStore();
-    const reportError = vi.fn(() => { throw new Error("telemetry unavailable"); });
+    const reports: Parameters<ErrorReporter>[] = [];
+    const reportError: ErrorReporter = (...args) => {
+      reports.push(args);
+      throw new Error("telemetry unavailable");
+    };
     const worker = createUploadWorker({ store, botSecret: "test", reportError });
     store.getBatch = async () => { throw new HttpError(409, "submission_locked"); };
     expect((await worker.fetch(new Request("https://uploads.test/uploads/status/test"))).status).toBe(409);
-    expect(reportError).not.toHaveBeenCalled();
+    expect(reports).toHaveLength(0);
     store.getBatch = async () => { throw new Error("storage failure"); };
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      expect((await worker.fetch(new Request("https://uploads.test/uploads/status/test"))).status).toBe(500);
-      expect(reportError).toHaveBeenCalledTimes(1);
-    } finally { log.mockRestore(); }
+    expect((await worker.fetch(new Request("https://uploads.test/uploads/status/test"))).status).toBe(500);
+    expect(reports).toHaveLength(1);
   });
 
   it("reports rate-limiter outages but not normal quota denials", async () => {
-    const reportError = vi.fn();
+    const reports: Parameters<ErrorReporter>[] = [];
+    const reportError: ErrorReporter = (...args) => { reports.push(args); };
     const request = new Request("https://uploads.test/uploads/prepare", { method: "POST", headers: { "cf-connecting-ip": "203.0.113.1" } });
     const limiter = { limit: async () => ({ success: false }) };
     const env = { UPLOAD_PREPARE_RATE_LIMITER: limiter, UPLOAD_OBJECT_RATE_LIMITER: limiter, UPLOAD_COMPLETE_RATE_LIMITER: limiter, UPLOAD_ATTRIBUTION_RATE_LIMITER: limiter };
     expect((await enforceEdgeRateLimit(request, env, reportError))?.status).toBe(429);
-    expect(reportError).not.toHaveBeenCalled();
+    expect(reports).toHaveLength(0);
     limiter.limit = async () => { throw new Error("edge unavailable"); };
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      expect((await enforceEdgeRateLimit(request, env, reportError))?.status).toBe(503);
-      expect(reportError).toHaveBeenCalledTimes(1);
-    } finally { log.mockRestore(); }
+    expect((await enforceEdgeRateLimit(request, env, reportError))?.status).toBe(503);
+    expect(reports).toHaveLength(1);
   });
 
   it("never passes the raw diagnostic storage exception to telemetry", async () => {
-    const reportError = vi.fn();
+    const reports: Parameters<ErrorReporter>[] = [];
+    const reportError: ErrorReporter = (...args) => { reports.push(args); };
     const report = { schemaVersion: 1, reportId: "a".repeat(32), createdUtc: "2026-01-01T00:00:00Z", description: secret, context: {}, versions: {}, system: {}, mods: [], logs: [] };
     const request = new Request("https://uploads.test/uploads/diagnostics", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(report) });
     const store = new InMemoryUploadStore() as InMemoryUploadStore & DiagnosticDeliveryStore;
     const bucket = { put: async () => { throw Object.assign(new Error(secret), { request: report }); }, get: async () => null, delete: async () => undefined };
-    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      const response = await handleDiagnosticsRequest(request, { bucket, store, botSecret: "test", reportError });
-      expect(response?.status).toBe(500);
-      expect(reportError).toHaveBeenCalledTimes(1);
-      expect(reportError.mock.calls[0][0].message).toBe("Diagnostic storage request failed.");
-      expect(JSON.stringify(reportError.mock.calls)).not.toContain(secret);
-    } finally { log.mockRestore(); }
+    const response = await handleDiagnosticsRequest(request, { bucket, store, botSecret: "test", reportError });
+    expect(response?.status).toBe(500);
+    expect(reports).toHaveLength(1);
+    expect((reports[0][0] as Error).message).toBe("Diagnostic storage request failed.");
+    expect(JSON.stringify(reports)).not.toContain(secret);
   });
 });
 

@@ -15,6 +15,7 @@ const observed = createCloudflareUploadWorker(reportError);
 const instrumented = Sentry.withSentry((env: CloudflareUploadEnv) => ({
   ...privacyOptions,
   dsn: env.SENTRY_DSN,
+  cacheClient: false,
   environment: env.SENTRY_ENVIRONMENT || "production",
   release: env.SENTRY_RELEASE,
   tracesSampleRate: tracesSampleRate(env.SENTRY_TRACES_SAMPLE_RATE),
