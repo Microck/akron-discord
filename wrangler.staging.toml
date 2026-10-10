@@ -1,5 +1,5 @@
 name = "akron-upload-worker-staging"
-main = "src/upload-worker-cloudflare.ts"
+main = "src/instrumentation-worker.ts"
 compatibility_date = "2026-07-06"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
@@ -9,6 +9,8 @@ preview_urls = false
 crons = ["17 4 * * *"]
 
 [vars]
+SENTRY_ENVIRONMENT = "staging"
+SENTRY_TRACES_SAMPLE_RATE = "0"
 UPLOAD_TERMS_VERSION = "1"
 UPLOAD_PUBLIC_BASE_URL = "https://akron-staging.micr.dev"
 UPLOAD_PUBLIC_UPLOAD_BASE_URL = "https://akron-staging.micr.dev"

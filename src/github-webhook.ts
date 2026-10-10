@@ -7,6 +7,7 @@ import type { AkronDatabase } from "./db/database.js";
 import { githubLinks, githubWebhookDeliveries } from "./db/schema.js";
 import { applyGithubClosedTag, applyGithubOpenTag } from "./github-forums.js";
 import { utcNow } from "./time.js";
+import { withNodeOperation } from "./observability/node.js";
 
 type GithubIssuePayload = {
   action: string;
@@ -54,11 +55,11 @@ export function startGithubWebhookServer(input: {
   }
 
   const server = createServer((request, response) => {
-    void handleGithubWebhookRequest(input, request, response).catch(async error => {
+    void withNodeOperation("bot.github_webhook", () => handleGithubWebhookRequest(input, request, response).catch(async error => {
       await input.onError(error);
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: "webhook failed" }));
-    });
+    }));
   });
   server.listen(input.config.githubWebhookPort, "0.0.0.0", () => {
     console.log(`GitHub webhook server listening on port ${input.config.githubWebhookPort}`);

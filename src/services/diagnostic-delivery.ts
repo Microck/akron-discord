@@ -2,6 +2,7 @@ import { ChannelType, EmbedBuilder, PermissionFlagsBits, type Client, type Messa
 import { diagnosticChannelId, type AppConfig } from "../config.js";
 import type { DiagnosticDeliveryJob, DiagnosticReport } from "../upload-diagnostics.js";
 import { createUploadWorkerClient, hasUploadWorkerConfig, type UploadWorkerClient } from "./upload-worker-client.js";
+import { withNodeOperation } from "../observability/node.js";
 
 let diagnosticPollInFlight: Promise<void> | undefined;
 
@@ -14,7 +15,7 @@ type DiagnosticPollInput = {
 
 export function pollDiagnosticQueue(input: DiagnosticPollInput): Promise<void> {
   if (diagnosticPollInFlight) return diagnosticPollInFlight;
-  const poll = pollDiagnosticQueueOnce(input).finally(() => {
+  const poll = withNodeOperation("bot.diagnostic_poll", () => pollDiagnosticQueueOnce(input)).finally(() => {
     if (diagnosticPollInFlight === poll) diagnosticPollInFlight = undefined;
   });
   diagnosticPollInFlight = poll;
@@ -41,7 +42,10 @@ async function pollDiagnosticQueueOnce(input: DiagnosticPollInput): Promise<void
     for (let count = 0; count < 10; count++) {
       const job = await worker.claimDiagnostic();
       if (!job) break;
-      await deliverDiagnostic({ ...input, worker, channel, job });
+      await withNodeOperation("bot.diagnostic_delivery", () => deliverDiagnostic({ ...input, worker, channel, job }), {
+        reportId: job.reportId,
+        attempt: job.attempts
+      });
     }
   } catch {
     await reportDiagnosticError(input, "Diagnostic polling failed; accepted reports remain queued.");

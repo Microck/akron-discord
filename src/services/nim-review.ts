@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { z } from "zod";
 import { hasNimConfig, type AppConfig } from "../config.js";
+import { captureNodeError } from "../observability/node.js";
 
 const nimReviewSchema = z.object({
   decision: z.enum(["allow", "needs_review", "reject"]),
@@ -60,6 +61,7 @@ export async function reviewWithNim(config: AppConfig, input: {
     }
     return nimReviewSchema.parse(JSON.parse(content));
   } catch (error) {
+    captureNodeError(error, "bot.nim_review");
     return {
       decision: "needs_review",
       severity: "medium",

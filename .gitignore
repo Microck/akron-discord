@@ -8,3 +8,4 @@ data/*.sqlite-wal
 tmp/
 coverage/
 .residue/
+.sentry-worker/

@@ -4,6 +4,7 @@ import { validateAkrArchive } from "./submissions/archive.js";
 import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js";
 import { sectionTag } from "./submissions/sections.js";
 import { akrMaxBytes, imageSourceMaxBytes, type AkronProfileSection } from "./submissions/types.js";
+import { reportSafely, uploadRoute, type ErrorReporter } from "./observability/privacy.js";
 
 export type UploadSection = Extract<AkronProfileSection, "StartPos" | "AutoKill" | "AutoDeafen">;
 export type UploadStatus =
@@ -214,6 +215,7 @@ export type DeleteSubmissionInput = {
 };
 
 export type UploadWorkerOptions = {
+  reportError?: ErrorReporter;
   store: UploadWorkerStore;
   botSecret: string;
   publicUploadBaseUrl?: string;
@@ -526,6 +528,7 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
         if (error instanceof HttpError) {
           return json({ error: error.code }, error.status);
         }
+        reportSafely(options.reportError, error, "upload.request", { route: uploadRoute(request.url), httpStatus: 500 });
         console.error("Upload worker request failed.", error);
         return json({ error: "internal_error" }, 500);
       }

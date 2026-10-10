@@ -27,6 +27,7 @@ import { createR2Client, publicR2Url, putR2Object } from "../services/r2.js";
 import { reviewWithNim } from "../services/nim-review.js";
 import { utcNow } from "../time.js";
 import { validateAkrArchive } from "./archive.js";
+import { captureNodeError } from "../observability/node.js";
 import { formatSection } from "./sections.js";
 import { parseSubmissionPost } from "./post-parser.js";
 import { akrMaxBytes, type AkronProfileSection, type ScanStatus } from "./types.js";
@@ -152,6 +153,7 @@ export async function scanSubmissionThread(input: ScanThreadInput): Promise<Scan
       scannedArchiveSha256 = scannedArchive.sha256;
       r2PackKey = scannedArchiveKey;
     } catch (error) {
+      captureNodeError(error, "bot.archive_store");
       status = "Needs Moderator Review";
       const reason = error instanceof Error ? error.message : "Failed to archive approved .akr to R2.";
       reasons.push("Failed to archive approved .akr to R2; publication is blocked until staff review.");

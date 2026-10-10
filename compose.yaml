@@ -1,6 +1,13 @@
 services:
   akron-discord:
-    build: .
+    build:
+      context: .
+      args:
+        SENTRY_ORG: ${SENTRY_ORG:-}
+        SENTRY_PROJECT: ${SENTRY_PROJECT:-}
+        SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      secrets:
+        - sentry_auth_token
     image: akron-discord:local
     env_file:
       - .env
@@ -18,3 +25,8 @@ services:
     ports:
       - "${GITHUB_WEBHOOK_PORT:-3005}:${GITHUB_WEBHOOK_PORT:-3005}"
     restart: unless-stopped
+
+# Available only to the build step, never mounted into the running bot.
+secrets:
+  sentry_auth_token:
+    environment: SENTRY_AUTH_TOKEN
