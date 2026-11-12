@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 import { loadConfig } from "./config.js";
 import { handleCommand } from "./commands.js";
 import { buildVerifyComponents, buildVerifyEmbed, verifyButtonCustomId } from "./content.js";
-import { createDatabase } from "./db/database.js";
+import { backupDatabase, createDatabase } from "./db/database.js";
 import { scanStates, verificationLogs } from "./db/schema.js";
 import { syncGithubForumThread } from "./github-forums.js";
 import { startGithubWebhookServer } from "./github-webhook.js";
@@ -34,6 +34,7 @@ const config = loadConfig();
 const database = createDatabase(config.databasePath);
 const scanTimers = new Map<string, NodeJS.Timeout>();
 let uploadModerationTimer: NodeJS.Timeout | null = null;
+let databaseBackupTimer: NodeJS.Timeout | undefined;
 let githubWebhookServer: ReturnType<typeof startGithubWebhookServer> | null = null;
 
 const client = new Client({
@@ -61,6 +62,10 @@ client.once(Events.ClientReady, readyClient => {
     db: database.db,
     onError: reportRuntimeError
   }).catch(reportRuntimeError);
+  // Started after ready so a failed backup can reach #bot-alerts.
+  const runDatabaseBackup = () => void backupDatabase(database.sqlite).catch(reportRuntimeError);
+  databaseBackupTimer = setInterval(runDatabaseBackup, 24 * 60 * 60 * 1000);
+  runDatabaseBackup();
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -229,6 +234,7 @@ async function shutdown(): Promise<void> {
   if (uploadModerationTimer) {
     clearInterval(uploadModerationTimer);
   }
+  clearInterval(databaseBackupTimer);
   githubWebhookServer?.close();
   client.destroy();
   database.sqlite.close();

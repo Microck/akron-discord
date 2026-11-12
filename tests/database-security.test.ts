@@ -1,10 +1,39 @@
-import { chmodSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createDatabase } from "../src/db/database.js";
+import Database from "better-sqlite3";
+import { backupDatabase, createDatabase } from "../src/db/database.js";
 import { logAudit } from "../src/services/audit.js";
 import { createPlaytesterApplicationReview, recoverPlaytesterApplicationReview } from "../src/services/playtesting.js";
+
+describe("database backups", () => {
+  it("keeps one private snapshot per day, refreshes today's, and prunes the oldest", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "akron-backup-"));
+    const database = createDatabase(join(directory, "akron.sqlite"));
+    try {
+      for (const day of ["2026-05-01", "2026-05-02", "2026-05-03"]) {
+        await backupDatabase(database.sqlite, new Date(`${day}T12:00:00Z`), 2);
+      }
+      await logAudit(database.db, { actorId: "user", action: "after_first_backup", target: "t" });
+      const latest = await backupDatabase(database.sqlite, new Date("2026-05-03T23:00:00Z"), 2);
+
+      const backups = join(directory, "backups");
+      expect(readdirSync(backups).sort()).toEqual(["akron-2026-05-02.sqlite", "akron-2026-05-03.sqlite"]);
+      expect(statSync(backups).mode & 0o777).toBe(0o700);
+      expect(statSync(latest).mode & 0o777).toBe(0o600);
+      const snapshot = new Database(latest, { readonly: true });
+      try {
+        expect(snapshot.prepare("SELECT action FROM audit_logs").pluck().all()).toContain("after_first_backup");
+      } finally {
+        snapshot.close();
+      }
+    } finally {
+      database.sqlite.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("database filesystem security", () => {
   it("restricts the data directory and SQLite files to the bot account", () => {

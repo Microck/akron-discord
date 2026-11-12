@@ -12,7 +12,9 @@ export const diagnosticReportSchema = z.strictObject({
   schemaVersion: z.literal(1),
   reportId: z.string().regex(reportIdPattern),
   createdUtc: z.iso.datetime(),
-  description: z.string().max(4000),
+  // Zod 4.6+ counts code points in string max(); the game caps the field in
+  // UTF-16 units (C# string.Length), so check that unit count directly.
+  description: z.string().refine(text => text.length <= 4000),
   context: metadataSchema,
   versions: metadataSchema,
   system: metadataSchema,

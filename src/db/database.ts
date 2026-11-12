@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
-import { dirname } from "node:path";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
 
@@ -27,6 +27,31 @@ export function createDatabase(path: string) {
     sqlite,
     db: drizzle(sqlite, { schema })
   };
+}
+
+const backupFilePattern = /^akron-\d{4}-\d{2}-\d{2}\.sqlite$/;
+
+// Writes one snapshot per UTC day to `<database dir>/backups` and keeps the
+// newest `keep` days. better-sqlite3's backup() uses SQLite's online backup
+// API, so the copy is consistent while the bot keeps writing; copying the file
+// directly can miss pages that still live in the -wal file. A later run on the
+// same day replaces that day's snapshot, so restarts do not evict older days.
+// The snapshots share the bot's disk: copy the directory off-host for
+// protection against losing the VPS itself.
+export async function backupDatabase(sqlite: Database.Database, now = new Date(), keep = 14): Promise<string> {
+  const directory = join(dirname(sqlite.name), "backups");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+  const target = join(directory, `akron-${now.toISOString().slice(0, 10)}.sqlite`);
+  await sqlite.backup(target);
+  chmodSync(target, 0o600);
+
+  // ISO dates sort lexically, so everything before the newest `keep` names is older.
+  const snapshots = readdirSync(directory).filter(name => backupFilePattern.test(name)).sort();
+  for (const name of snapshots.slice(0, -keep)) {
+    rmSync(join(directory, name));
+  }
+  return target;
 }
 
 function runMigrations(sqlite: Database.Database): void {

@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly run on main catches new npm advisories through the audit step
+  # and runner or registry drift, even in weeks with no commits.
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read

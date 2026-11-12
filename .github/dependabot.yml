@@ -1,0 +1,44 @@
+# Weekly grouped PRs so dependency upkeep is one review per ecosystem, gated by
+# CI (typecheck, tests, npm audit). The Sentry packages are pinned to the same
+# exact version for the bot and the Worker, so they move together in one group.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      sentry:
+        patterns:
+          - "@sentry/*"
+      npm-production:
+        dependency-type: production
+        exclude-patterns:
+          - "@sentry/*"
+      npm-development:
+        dependency-type: development
+        exclude-patterns:
+          - "@sentry/*"
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: deps
