@@ -80,6 +80,14 @@ docker compose up -d --build
 
 The container stores SQLite data in `./data` through the compose volume.
 
+### Database backups
+
+The bot writes a consistent snapshot of its SQLite database at startup and every 24 hours to `data/backups/akron-YYYY-MM-DD.sqlite`, one file per UTC day, and keeps the newest 14 days. It uses SQLite's online backup API, so snapshots are safe while the bot is running. A failed backup posts to `#bot-alerts`.
+
+The snapshots sit on the same disk as the live database. They cover a bad migration, accidental deletes, or a corrupted file, but not loss of the host. To cover that too, copy the directory off the host on a schedule, for example with a nightly cron job running `rclone sync data/backups <private-remote>:akron-discord-backups`. Use a private bucket. Never use the public catalog bucket, because the database holds Discord user IDs and playtester applications.
+
+To restore, stop the container, move `data/akron-discord.sqlite` and its `-wal` and `-shm` files aside, copy the chosen snapshot to `data/akron-discord.sqlite`, and start the container.
+
 ## Health checks
 
 The bot HTTP server always listens on `GITHUB_WEBHOOK_PORT` (default `3005`).
