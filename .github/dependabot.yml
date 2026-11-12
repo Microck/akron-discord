@@ -20,6 +20,12 @@ updates:
         dependency-type: development
         exclude-patterns:
           - "@sentry/*"
+    # @types/node tracks the Node 24 runtime the image and CI pin; newer
+    # majors describe APIs production does not have.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: deps
 
