@@ -1,0 +1,12 @@
+[Unit]
+Description=Copy Akron Discord SQLite snapshots to the private R2 bucket
+Wants=network-online.target
+After=network-online.target
+OnFailure=akron-discord-alert@%n.service
+
+[Service]
+Type=oneshot
+# The bot writes data/backups itself (one file per UTC day, 14 kept locally).
+# copy, not sync: the bucket keeps every day; its lifecycle rule expires
+# objects after 365 days.
+ExecStart=/usr/local/bin/rclone --config /etc/akron-discord/rclone.conf copy /home/ubuntu/akron-discord/data/backups r2:akron-discord-backups --include "akron-*.sqlite"

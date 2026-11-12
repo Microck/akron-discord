@@ -1,0 +1,6 @@
+[Unit]
+Description=Post failed unit %i to #bot-alerts
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/akron-discord-alert %i

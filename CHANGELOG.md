@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Accept an optional player-written diagnostic description and queue the full private report for Discord delivery with leased retries and recovery after uncertain sends.
 - Write a daily SQLite snapshot to `data/backups`, keep the newest 14 days, and report failed backups to `#bot-alerts`.
+- Deploy the bot and upload Worker automatically after CI passes on `main`: the bot image goes to GHCR and the host pulls it with database snapshot and automatic rollback; the Worker applies D1 migrations and deploys with matching Sentry source maps. Host failures post to `#bot-alerts`.
 
 ### Fixed
 

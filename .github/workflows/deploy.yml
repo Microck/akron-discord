@@ -1,0 +1,123 @@
+# Deploys main after CI passes on a push to main.
+#
+# - bot: builds the ARM image (the bot host is aarch64), uploads its source maps
+#   to Sentry, and pushes ghcr.io/microck/akron-discord:main plus a :<sha> tag.
+#   The host pulls :main on a timer (scripts/deploy/akron-discord-deploy.sh),
+#   so this workflow needs no access to the host.
+# - worker: applies pending D1 migrations, then builds the upload Worker once,
+#   uploads that bundle's source maps, and deploys the same bundle unbundled so
+#   Sentry's Debug IDs match what runs.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  # Scheduled and pull-request CI runs must not deploy; only pushes to main do.
+  DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
+
+jobs:
+  bot:
+    name: Publish bot image
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04-arm
+    environment: production
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # Required to push the bot image to GHCR.
+    steps:
+      - name: Checkout deployed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/microck/akron-discord:main
+            ghcr.io/microck/akron-discord:${{ env.DEPLOY_SHA }}
+          build-args: |
+            SENTRY_ORG=syntaxis-h1
+            SENTRY_PROJECT=akron-discord
+            SENTRY_RELEASE=akron-discord@${{ env.DEPLOY_SHA }}
+          secrets: |
+            sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
+
+  worker:
+    name: Deploy upload Worker
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: syntaxis-h1
+      SENTRY_PROJECT: akron-upload-worker
+    steps:
+      - name: Checkout deployed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.13.0
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Apply D1 migrations
+        run: npx wrangler d1 migrations apply akron-uploads --remote --config wrangler.uploads.toml
+
+      - name: Build, upload source maps, and deploy
+        env:
+          SENTRY_RELEASE: akron-upload-worker@${{ env.DEPLOY_SHA }}
+        run: |
+          set -euo pipefail
+          npx wrangler deploy --dry-run --outdir .sentry-worker --config wrangler.uploads.toml
+          SENTRY_SOURCEMAP_DIR=.sentry-worker SENTRY_SOURCEMAP_URL_PREFIX=app:/// npm run sentry:sourcemaps
+          npx wrangler deploy .sentry-worker/instrumentation-worker.js --no-bundle \
+            --config wrangler.uploads.toml \
+            --var "SENTRY_RELEASE:${SENTRY_RELEASE}" \
+            --message "Deploy ${DEPLOY_SHA}"
+
+      - name: Check upload health
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS https://akron.micr.dev/uploads/health | grep -q '"ready":true'; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::Upload Worker did not report ready after deploy."
+          exit 1
