@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260728.1",
-    "@sentry/cli": "3.8.0",
+    "@sentry/cli": "3.8.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.9.2",
     "@types/yauzl": "^2.10.3",
