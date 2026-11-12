@@ -10,7 +10,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "node --import tsx --import ./src/instrumentation-node.ts --watch src/index.ts",
     "start": "node --import ./dist/src/instrumentation-node.js dist/src/index.js",
-    "test": "vitest run",
+    "test": "vitest run --dir tests",
     "register-commands": "tsx src/register-commands.ts",
     "sentry:sourcemaps": "node scripts/upload-sourcemaps.mjs"
   },
@@ -29,14 +29,14 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260728.1",
+    "@cloudflare/workers-types": "^5.20261109.1",
     "@sentry/cli": "3.8.2",
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.9.2",
     "@types/yauzl": "^3.4.0",
-    "tsx": "^4.20.6",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.6"
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   },
   "overrides": {
     "undici": "6.29.1",
