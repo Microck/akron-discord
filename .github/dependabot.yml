@@ -40,5 +40,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Stay on the Node LTS line the image and CI pin (24). Major moves, such as
+    # odd-numbered non-LTS releases, are a deliberate upgrade, not a weekly bump.
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: deps
