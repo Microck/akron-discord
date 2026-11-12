@@ -1,0 +1,10 @@
+[Unit]
+Description=Deploy the latest Akron Discord bot image from GHCR
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+OnFailure=akron-discord-alert@%n.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/akron-discord-deploy

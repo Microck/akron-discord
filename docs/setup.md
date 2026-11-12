@@ -84,9 +84,30 @@ The container stores SQLite data in `./data` through the compose volume.
 
 The bot writes a consistent snapshot of its SQLite database at startup and every 24 hours to `data/backups/akron-YYYY-MM-DD.sqlite`, one file per UTC day, and keeps the newest 14 days. It uses SQLite's online backup API, so snapshots are safe while the bot is running. A failed backup posts to `#bot-alerts`.
 
-The snapshots sit on the same disk as the live database. They cover a bad migration, accidental deletes, or a corrupted file, but not loss of the host. To cover that too, copy the directory off the host on a schedule, for example with a nightly cron job running `rclone sync data/backups <private-remote>:akron-discord-backups`. Use a private bucket. Never use the public catalog bucket, because the database holds Discord user IDs and playtester applications.
+The snapshots sit on the same disk as the live database, so the production host also copies them every night at 03:30 UTC to the private R2 bucket `akron-discord-backups` (`akron-discord-backup-offsite.timer`). The bucket keeps every day and expires objects after 365 days. Never copy them to the public catalog bucket, because the database holds Discord user IDs and playtester applications.
 
 To restore, stop the container, move `data/akron-discord.sqlite` and its `-wal` and `-shm` files aside, copy the chosen snapshot to `data/akron-discord.sqlite`, and start the container.
+
+## Production deployment
+
+Merging to `main` deploys both consumers once CI passes on that push. The `Deploy` workflow (`.github/workflows/deploy.yml`) runs in the `production` environment, which only `main` can use:
+
+- **Bot:** builds the ARM image, uploads its source maps to the `akron-discord` Sentry project, and pushes `ghcr.io/microck/akron-discord:main` and `:<sha>`. The image carries its own `SENTRY_RELEASE`, so do not set one in the host environment.
+- **Upload Worker:** applies pending D1 migrations, builds the bundle once, uploads its source maps to `akron-upload-worker`, deploys that bundle, then checks `/uploads/health`.
+
+`production` environment configuration: `CLOUDFLARE_API_TOKEN` (account token limited to Workers Scripts, D1 and Account Settings read), `SENTRY_AUTH_TOKEN`, and the `CLOUDFLARE_ACCOUNT_ID` variable. Run the workflow manually from the Actions tab to redeploy `main`.
+
+The host never receives GitHub credentials. It pulls the public image itself. `scripts/host/` holds what is installed on it:
+
+| File | Installed as | Purpose |
+| --- | --- | --- |
+| `akron-discord-deploy.sh` | `/usr/local/bin/akron-discord-deploy` | Every 5 minutes, pulls `:main` and recreates the container if the image changed. Snapshots the database to `data/akron-discord-pre-deploy.sqlite` first, and rolls back to the previous image if the new one is not ready within two minutes. |
+| `akron-discord-alert.sh` | `/usr/local/bin/akron-discord-alert` | Posts a failed deploy or off-host backup run to `#bot-alerts` as the bot. Reads `/etc/akron-discord/alert.env` (`DISCORD_TOKEN`, `DISCORD_ALERT_CHANNEL_ID`). |
+| `systemd/*` | `/etc/systemd/system/` | Timers for deploys and the nightly R2 copy, and the `OnFailure=` alert template. The R2 copy reads `/etc/akron-discord/rclone.conf`, whose token can only access `akron-discord-backups`. |
+
+The compose file on the host must use `image: ghcr.io/microck/akron-discord:main`. A rollback leaves the failed image ID in `data/.failed-image` so later runs skip it; the next successful push replaces it.
+
+GitHub delivers webhooks to `https://oracle-ashburn-cloud.tailc896c6.ts.net/github/webhook`, the Tailscale Funnel address of the status host. Its Caddy (`/opt/akron-status/caddyfile`) forwards only that path over the tailnet to the bot at `100.96.124.15:3005`; the rest of the bot's HTTP port stays private. Funnel on the bot host itself drops ingress traffic, so the route goes through the status host.
 
 ## Health checks
 
@@ -347,13 +368,8 @@ Keep the existing `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `UPLOAD_WORKER_URL` and
 must match `UPLOAD_WORKER_BOT_SECRET`. Use the direct Worker origin, not the
 website proxy. Existing R2 and D1 bindings are unchanged.
 
-Apply the additive D1 migration before deploying either consumer:
-
-```sh
-npx wrangler d1 migrations apply akron-uploads --remote --config wrangler.uploads.toml
-npx wrangler deploy --config wrangler.uploads.toml
-docker compose up -d --build akron-discord
-```
+Apply the additive D1 migration before deploying either consumer. The `Deploy`
+workflow does this on every merge to `main`, before it deploys the Worker.
 
 Migration `0004_diagnostic_delivery.sql` creates `diagnostic_deliveries` and its
 pending index. No local bot SQLite migration, Cloudflare Queue binding,
