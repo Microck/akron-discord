@@ -462,7 +462,6 @@ Manual commands:
 /link-issue
 /unlink-issue
 /close-synced-issue
-/set-map-mapping
 ```
 
 `/sync-issue` reports the concrete outcome: created, already linked, or skipped with the reason. Manual sync can sync bot-authored posts from any forum channel; posts outside `issues` and `suggestions` sync as normal GitHub issues. Automatic background sync skips bot-authored posts and only syncs `issues` and `suggestions`.
@@ -476,8 +475,6 @@ GitHub image sync requires `UPLOAD_WORKER_URL` and `UPLOAD_WORKER_BOT_SECRET`. T
 Re-run `/sync-issue` on an already-linked thread to refresh the GitHub issue title/body with the current Discord description, attachments, and conversation.
 
 Use `/solved` in any forum post to apply the forum's completion tag and archive the thread. The thread author, moderators, and admins can run it.
-
-Use `/set-map-mapping` to connect a supported GameBanana map URL to the canonical Celeste map SID, then run `/rescan` on affected `Needs Moderator Review` submissions.
 
 ## Verification
 

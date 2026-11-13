@@ -21,10 +21,8 @@ import {
 import { isModerator, requireAdmin, requireModerator } from "./permissions.js";
 import { logAudit } from "./services/audit.js";
 import { applyGithubLabels, closeSyncedGithubIssue, linkGithubIssue, planGithubLabels, unlinkGithubIssue } from "./services/github-sync.js";
-import { upsertMapMapping } from "./services/map-resolver.js";
 import { createUploadWorkerClient, hasUploadWorkerConfig } from "./services/upload-worker-client.js";
 import { applyServerSync, planServerSync } from "./server-sync.js";
-import { isSupportedMapUrl, normalizeMapUrl } from "./submissions/post-parser.js";
 import { scanSubmissionThread } from "./submissions/scanner.js";
 import type { UploadDiscordMessage, UploadDiscordMessages } from "./upload-worker.js";
 
@@ -81,18 +79,6 @@ export const commandDefinitions = [
         .setDescription("Run a dry run or apply changes.")
         .setRequired(true)
         .addChoices({ name: "dry-run", value: "dry-run" }, { name: "apply", value: "apply" })
-    ),
-  new SlashCommandBuilder()
-    .setName("set-map-mapping")
-    .setDescription("Map a supported map URL to a Celeste map SID.")
-    .addStringOption(option =>
-      option.setName("map-url").setDescription("Supported GameBanana map URL.").setRequired(true)
-    )
-    .addStringOption(option =>
-      option.setName("map-sid").setDescription("Canonical Celeste map SID.").setRequired(true)
-    )
-    .addStringOption(option =>
-      option.setName("display-name").setDescription("Human-readable map name.").setRequired(true)
     ),
   new SlashCommandBuilder()
     .setName("delete-upload-pack")
@@ -307,31 +293,6 @@ export async function handleCommand(input: {
     const mode = interaction.options.getString("mode", true);
     const changes = mode === "apply" ? await applyGithubLabels(config) : await planGithubLabels(config);
     await interaction.editReply({ embeds: [buildListEmbed(`GitHub Labels ${mode}`, changes)] });
-    return;
-  }
-
-  if (interaction.commandName === "set-map-mapping") {
-    if (!await requireModerator(interaction, config)) {
-      return;
-    }
-
-    await interaction.deferReply({ ephemeral: true });
-    const mapUrl = normalizeMapUrl(interaction.options.getString("map-url", true));
-    if (!isSupportedMapUrl(mapUrl)) {
-      await interaction.editReply("Map URL must be a supported GameBanana mod URL.");
-      return;
-    }
-
-    const mapSid = interaction.options.getString("map-sid", true).trim();
-    const displayName = interaction.options.getString("display-name", true).trim();
-    await upsertMapMapping(db, { mapUrl, mapSid, displayName }, interaction.user.id);
-    await logAudit(db, {
-      actorId: interaction.user.id,
-      action: "map_mapping_set",
-      target: mapUrl,
-      details: { mapSid, displayName }
-    });
-    await interaction.editReply(`Stored mapping: ${mapUrl} -> ${mapSid}. Rescan affected posts when ready.`);
     return;
   }
 

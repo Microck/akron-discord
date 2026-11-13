@@ -6,8 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChannelType, RESTJSONErrorCodes } from "discord.js";
 import { formatGithubIssueBody, materializeGithubAttachments, syncForumPostToGithub } from "../src/services/github-sync.js";
-import { mergeCatalogIndex, publishCatalogEntry, type CatalogPack } from "../src/services/catalog.js";
-import { slugMapSid } from "../src/services/map-resolver.js";
+import { parseCatalogIndex, type CatalogPack } from "../src/services/catalog.js";
 import { publicAssetPath, publicR2Url } from "../src/services/r2.js";
 import { buildFaqEmbed, githubIssuesMarkdownLink } from "../src/content.js";
 import { githubIssueKindForForum, githubIssueKindForForumSync } from "../src/github-forums.js";
@@ -32,46 +31,21 @@ import {
   uploadModerationButtonId
 } from "../src/services/upload-moderation.js";
 
-describe("map resolver helpers", () => {
-  it("creates stable map SID slugs for R2 object paths", () => {
-    expect(slugMapSid("SpringCollab2020/1-Beginner")).toBe("springcollab2020-1-beginner");
-    expect(slugMapSid("   ")).toBe("unknown-map");
-  });
-});
-
-describe("catalog index merging", () => {
-  it("replaces an existing pack entry and preserves index contract fields", () => {
-    const previous = JSON.stringify({
-      format: "akron-community-pack-index-v3",
-      version: 3,
-      packs: [
-        pack({ id: "same", title: "Old" }),
-        pack({ id: "other", title: "Other" })
-      ]
-    });
-
-    const merged = mergeCatalogIndex(previous, pack({ id: "same", title: "New" }));
-
-    expect(merged.format).toBe("akron-community-pack-index-v3");
-    expect(merged.version).toBe(3);
-    expect(merged.packs.map(entry => entry.id).sort()).toEqual(["other", "same"]);
-    expect(merged.packs.find(entry => entry.id === "same")?.title).toBe("New");
-  });
-
+describe("catalog index parsing", () => {
   it("rejects the retired v1 catalog without a compatibility bridge", () => {
-    expect(() => mergeCatalogIndex(JSON.stringify({
+    expect(() => parseCatalogIndex(JSON.stringify({
       format: "akron-community-pack-index-v1",
       version: 1,
       packs: []
-    }), pack({ id: "new" }))).toThrow("unsupported format");
+    }))).toThrow("unsupported format");
   });
 
   it("rejects an existing v3 catalog with an unsafe Discord URL", () => {
-    expect(() => mergeCatalogIndex(JSON.stringify({
+    expect(() => parseCatalogIndex(JSON.stringify({
       format: "akron-community-pack-index-v3",
       version: 3,
       packs: [pack({ discordUrl: "https://example.com/channels/123/456" })]
-    }), pack({ id: "new" }))).toThrow("unsupported format");
+    }))).toThrow("unsupported format");
   });
 
   it("rejects catalog packs without a valid images array", () => {
@@ -79,11 +53,11 @@ describe("catalog index merging", () => {
     const invalidImage = { ...pack({}), images: [{ url: 42, roomName: "Room" }] };
 
     for (const catalogPack of [withoutImages, invalidImage]) {
-      expect(() => mergeCatalogIndex(JSON.stringify({
+      expect(() => parseCatalogIndex(JSON.stringify({
         format: "akron-community-pack-index-v3",
         version: 3,
         packs: [catalogPack]
-      }), pack({ id: "new" }))).toThrow("unsupported format");
+      }))).toThrow("unsupported format");
     }
   });
 
@@ -106,179 +80,26 @@ describe("catalog index merging", () => {
     };
 
     for (const [field, value] of Object.entries(invalidFields)) {
-      expect(() => mergeCatalogIndex(JSON.stringify({
+      expect(() => parseCatalogIndex(JSON.stringify({
         format: "akron-community-pack-index-v3",
         version: 3,
         packs: [{ ...pack({}), [field]: value }]
-      }), pack({ id: "new" }))).toThrow("unsupported format");
+      }))).toThrow("unsupported format");
     }
   });
 
   it("accepts direct-upload catalog packs without a legacy imageUrl", () => {
     const { imageUrl: _legacyImageUrl, ...directUploadPack } = pack({});
 
-    expect(mergeCatalogIndex(JSON.stringify({
+    expect(parseCatalogIndex(JSON.stringify({
       format: "akron-community-pack-index-v3",
       version: 3,
       packs: [directUploadPack]
-    }), pack({ id: "new" })).packs).toHaveLength(2);
+    })).packs).toHaveLength(1);
   });
 
   it("formats catalog backup timestamps without colons", () => {
     expect(formatCatalogBackupTimestamp(new Date("2026-05-20T12:34:56.789Z"))).toBe("2026-05-20T12-34-56Z");
-  });
-});
-
-describe("forum catalog publication reconciliation", () => {
-  it("returns a durable Worker publication when the local SQLite cache write fails", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-cache-"));
-    const database = createDatabase(join(directory, "akron.sqlite"));
-    const r2 = new TestS3();
-    const cacheErrors: unknown[] = [];
-    let workerCommitted = false;
-    try {
-      database.sqlite.exec([
-        "CREATE TRIGGER fail_catalog_cache BEFORE INSERT ON catalog_entries",
-        "BEGIN SELECT RAISE(ABORT, 'cache failed'); END;"
-      ].join(" "));
-      const published = await publishCatalogEntry(
-        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
-        database.db,
-        r2 as never,
-        catalogPublishInput(),
-        new Date("2026-01-01T00:00:00.000Z"),
-        {
-          async publishMetadata() { workerCommitted = true; },
-          reportCacheError(error) { cacheErrors.push(error); }
-        }
-      );
-
-      expect(workerCommitted).toBe(true);
-      expect(cacheErrors).toHaveLength(1);
-      expect(published.entry.downloadUrl).toContain("/maps/map-sid/");
-      expect(published.entry.discordUrl).toBe("https://discord.com/channels/123456789012345678/234567890123456789");
-      expect(r2.objects.has(published.packKey)).toBe(true);
-      expect(database.sqlite.prepare("SELECT COUNT(*) AS count FROM catalog_entries").get()).toEqual({ count: 0 });
-    } finally {
-      database.sqlite.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("deletes superseded immutable assets only after the new Worker index commits", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-superseded-"));
-    const database = createDatabase(join(directory, "akron.sqlite"));
-    const r2 = new TestS3();
-    const events: string[] = [];
-    r2.events = events;
-    const oldPackKey = "packs/map-sid/existing-oldrevision.akr";
-    const oldImageKey = "captures/map-sid/existing-oldrevision.webp";
-    r2.objects.set(oldPackKey, Buffer.from("old"));
-    r2.objects.set(oldImageKey, Buffer.from("old"));
-    database.sqlite.prepare([
-      "INSERT INTO catalog_entries",
-      "(id, discord_thread_id, title, description, section, map_sid, map_url, download_url, author_name, author_avatar_url, image_url, download_count, updated_utc, tags_json)",
-      "VALUES ('existing', 'thread', 'Old', '', 'StartPos', 'Map/Sid', '', ?, 'Author', '', ?, 0, '2025-01-01T00:00:00Z', '[]')"
-    ].join(" ")).run(
-      "https://akron.micr.dev/maps/map-sid/existing-oldrevision.akr",
-      "https://akron.micr.dev/maps/map-sid/existing-oldrevision/capture.webp"
-    );
-    try {
-      const published = await publishCatalogEntry(
-        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
-        database.db,
-        r2 as never,
-        catalogPublishInput({ image: { bytes: Buffer.from("new-image"), contentType: "image/jpeg", extension: "jpg" } }),
-        new Date("2026-01-01T00:00:00.000Z"),
-        { async publishMetadata() { events.push("worker-commit"); } }
-      );
-
-      expect(r2.objects.has(published.packKey)).toBe(true);
-      expect(r2.objects.has(published.imageKey)).toBe(true);
-      expect(r2.objects.has(oldPackKey)).toBe(false);
-      expect(r2.objects.has(oldImageKey)).toBe(false);
-      expect(events.indexOf("worker-commit")).toBeLessThan(events.indexOf(`delete:${oldPackKey}`));
-      expect(events.indexOf("worker-commit")).toBeLessThan(events.indexOf(`delete:${oldImageKey}`));
-    } finally {
-      database.sqlite.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it.each([
-    {
-      source: "raw R2",
-      imageUrl: "https://pub.example.r2.dev/captures/map-sid/existing-oldrevision/01-preview.jpg"
-    },
-    {
-      source: "branded",
-      imageUrl: "https://akron.micr.dev/maps/map-sid/existing-oldrevision/captures/01-preview.jpg"
-    },
-    {
-      source: "path-prefixed raw R2",
-      imageUrl: "https://pub.example.r2.dev/r2-public/captures/map-sid/existing-oldrevision/01-preview.jpg"
-    }
-  ])("deletes a superseded JPEG published through the $source URL", async ({ imageUrl }) => {
-    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-jpeg-cleanup-"));
-    const database = createDatabase(join(directory, "akron.sqlite"));
-    const r2 = new TestS3();
-    const oldImageKey = "captures/map-sid/existing-oldrevision/01-preview.jpg";
-    r2.objects.set(oldImageKey, Buffer.from("old"));
-    database.sqlite.prepare([
-      "INSERT INTO catalog_entries",
-      "(id, discord_thread_id, title, description, section, map_sid, map_url, download_url, author_name, author_avatar_url, image_url, download_count, updated_utc, tags_json)",
-      "VALUES ('existing', 'thread', 'Old', '', 'StartPos', 'Map/Sid', '', ?, 'Author', '', ?, 0, '2025-01-01T00:00:00Z', '[]')"
-    ].join(" ")).run(
-      "https://pub.example.r2.dev/packs/map-sid/existing-oldrevision.akr",
-      imageUrl
-    );
-    try {
-      await publishCatalogEntry(
-        config({ cloudflareR2Bucket: "bucket" }),
-        database.db,
-        r2 as never,
-        catalogPublishInput({ image: { bytes: Buffer.from("new-image"), contentType: "image/jpeg", extension: "jpg" } }),
-        new Date("2026-01-01T00:00:00.000Z"),
-        { async publishMetadata() {} }
-      );
-
-      expect(r2.objects.has(oldImageKey)).toBe(false);
-    } finally {
-      database.sqlite.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("preserves pre-existing content-addressed assets when metadata retry fails", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "akron-catalog-retry-"));
-    const database = createDatabase(join(directory, "akron.sqlite"));
-    const r2 = new TestS3();
-    const input = catalogPublishInput({ image: { bytes: Buffer.from("image"), contentType: "image/jpeg", extension: "jpg" } });
-    try {
-      const first = await publishCatalogEntry(
-        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
-        database.db,
-        r2 as never,
-        input,
-        new Date("2026-01-01T00:00:00.000Z"),
-        { async publishMetadata() {} }
-      );
-
-      await expect(publishCatalogEntry(
-        config({ akronPublicAssetBaseUrl: "https://akron.micr.dev", cloudflareR2Bucket: "bucket" }),
-        database.db,
-        r2 as never,
-        input,
-        new Date("2026-01-01T00:00:00.000Z"),
-        { async publishMetadata() { throw new Error("metadata failed"); } }
-      )).rejects.toThrow("metadata failed");
-
-      expect(r2.objects.has(first.packKey)).toBe(true);
-      expect(r2.objects.has(first.imageKey)).toBe(true);
-    } finally {
-      database.sqlite.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
   });
 });
 
@@ -1967,24 +1788,6 @@ function publishedUploadSubmission() {
         }
       ]
     }
-  };
-}
-
-function catalogPublishInput(
-  overrides: Partial<Parameters<typeof publishCatalogEntry>[3]> = {}
-): Parameters<typeof publishCatalogEntry>[3] {
-  return {
-    discordThreadId: "thread",
-    discordUrl: "https://discord.com/channels/123456789012345678/234567890123456789",
-    title: "Pack",
-    description: "Description",
-    section: "StartPos",
-    mapSid: "Map/Sid",
-    mapUrl: "https://gamebanana.com/mods/150453",
-    authorName: "Author",
-    authorAvatarUrl: "",
-    akrBytes: Buffer.from("new-pack"),
-    ...overrides
   };
 }
 

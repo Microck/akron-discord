@@ -160,7 +160,6 @@ export type UploadWorkerStore = {
   getUploadedObjectBody(id: string): Promise<UploadedObjectBody | undefined>;
   putUploadedObject(id: string, upload: PendingUploadedObjectBody): Promise<UploadedObjectWriteResult>;
   publishCatalogEntry(input: PublishCatalogEntryInput): Promise<CatalogPublication>;
-  publishCatalogMetadata(entry: CatalogPack): Promise<void>;
   recordAiReview(input: RecordAiReviewInput): Promise<UploadSubmissionRecord | undefined>;
   recordDiscordMessage(input: RecordDiscordMessageInput): Promise<UploadSubmissionRecord | undefined>;
   deleteSubmission(input: DeleteSubmissionInput): Promise<DeletedUploadSubmission | undefined>;
@@ -511,16 +510,6 @@ export function createUploadWorker(options: UploadWorkerOptions): { fetch(reques
             botSecret: options.botSecret,
             optimizeCatalogCapture: options.optimizeCatalogCapture
           });
-        }
-
-        if (request.method === "POST" && url.pathname === "/bot/catalog/entries") {
-          const body = await readSignedJson(request, options.botSecret, now, options.store);
-          if (body instanceof Response) {
-            return body;
-          }
-          const entry = readCatalogPack(body.entry);
-          await options.store.publishCatalogMetadata(entry);
-          return json({ ok: true, entryId: entry.id });
         }
 
         return json({ error: "not_found" }, 404);
@@ -2246,48 +2235,6 @@ function readAttribution(source: unknown): UploadAttribution {
   throw new HttpError(400, "attribution_mode_unsupported");
 }
 
-function readCatalogPack(source: unknown): CatalogPack {
-  const entry = readObject(source, "entry");
-  const section = readUploadSection(entry);
-  const sha256 = readRequiredString(entry, "sha256");
-  const sizeBytes = readRequiredNumber(entry, "sizeBytes");
-  if (!/^[a-f0-9]{64}$/.test(sha256) || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > akrMaxBytes) {
-    throw new HttpError(400, "catalog_integrity_invalid");
-  }
-  const images = readArray(entry.images ?? [], "images").map(rawImage => {
-    const image = readObject(rawImage, "image");
-    return {
-      url: readBoundedString(image, "url", 2048),
-      roomName: readOptionalBoundedString(image, "roomName", maxRoomNameLength)
-    };
-  });
-  if (images.length > 16) throw new HttpError(400, "catalog_images_invalid");
-  const tags = readArray(entry.tags ?? [], "tags").map(value => {
-    if (typeof value !== "string" || value.length === 0 || value.length > 64) throw new HttpError(400, "catalog_tags_invalid");
-    return value;
-  });
-  if (tags.length > 32) throw new HttpError(400, "catalog_tags_invalid");
-  return {
-    id: readBoundedString(entry, "id", 256),
-    title: readBoundedString(entry, "title", 256),
-    description: readOptionalBoundedString(entry, "description", 1_000),
-    section,
-    mapSid: readBoundedString(entry, "mapSid", 256),
-    mapUrl: readOptionalMapUrl(entry),
-    discordUrl: readOptionalDiscordUrl(entry),
-    downloadUrl: readBoundedString(entry, "downloadUrl", 2048),
-    authorName: readBoundedString(entry, "authorName", 256),
-    authorAvatarUrl: readOptionalBoundedString(entry, "authorAvatarUrl", 2048),
-    imageUrl: readOptionalBoundedString(entry, "imageUrl", 2048) || undefined,
-    images,
-    downloadCount: Math.max(0, Math.trunc(readOptionalNumber(entry, "downloadCount"))),
-    updatedUtc: readBoundedString(entry, "updatedUtc", 64),
-    tags,
-    sha256,
-    sizeBytes
-  };
-}
-
 function readDiscordUserId(source: Record<string, unknown>): string {
   const value = readRequiredString(source, "discordUserId");
   if (!/^\d{15,25}$/.test(value)) {
@@ -2396,14 +2343,6 @@ export function isCatalogDiscordUrl(value: unknown): boolean {
   } catch {
     return false;
   }
-}
-
-function readOptionalDiscordUrl(source: Record<string, unknown>): string {
-  const value = readOptionalBoundedString(source, "discordUrl", 2048);
-  if (!isCatalogDiscordUrl(value)) {
-    throw new HttpError(400, "catalog_discord_url_invalid");
-  }
-  return value;
 }
 
 function readRequiredNumber(source: Record<string, unknown>, key: string): number {
