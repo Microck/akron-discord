@@ -8,9 +8,15 @@
 # later runs skip it instead of flapping, and exits non-zero so OnFailure= alerts.
 set -euo pipefail
 
-dir=/home/ubuntu/akron-discord
-image=ghcr.io/microck/akron-discord:main
-container=akron-discord-akron-discord-1
+# Production defaults. The overrides exist so the rollback path can be exercised
+# against a disposable compose project and registry instead of the live bot.
+dir="${AKRON_DEPLOY_DIR:-/home/ubuntu/akron-discord}"
+image="${AKRON_DEPLOY_IMAGE:-ghcr.io/microck/akron-discord:main}"
+container="${AKRON_DEPLOY_CONTAINER:-akron-discord-akron-discord-1}"
+health_url="${AKRON_DEPLOY_HEALTH_URL:-http://127.0.0.1:3005/health}"
+# Local-only tag that keeps the last running image for rollback; derived from the
+# image so a test target never overwrites the production rollback image.
+previous_tag="${image%:*}:previous"
 failed_marker="$dir/data/.failed-image"
 cd "$dir"
 
@@ -25,7 +31,7 @@ fi
 
 wait_ready() {
   for _ in $(seq 1 24); do
-    if curl -fsS --max-time 5 http://127.0.0.1:3005/health 2>/dev/null | grep -q '"ready":true'; then
+    if curl -fsS --max-time 5 "$health_url" 2>/dev/null | grep -q '"ready":true'; then
       return 0
     fi
     sleep 5
@@ -37,7 +43,7 @@ if [ -n "$current_id" ]; then
   docker exec "$container" node -e \
     "require('better-sqlite3')('/app/data/akron-discord.sqlite',{readonly:true}).backup('/app/data/akron-discord-pre-deploy.sqlite')"
   chmod 600 data/akron-discord-pre-deploy.sqlite
-  docker tag "$current_id" akron-discord:previous
+  docker tag "$current_id" "$previous_tag"
 fi
 
 echo "deploying ${new_id} (was ${current_id:-none})"
@@ -52,7 +58,7 @@ fi
 echo "${new_id} did not report ready; rolling back" >&2
 printf '%s' "$new_id" > "$failed_marker"
 if [ -n "$current_id" ]; then
-  docker tag akron-discord:previous "$image"
+  docker tag "$previous_tag" "$image"
   docker compose -f compose.json up -d
   wait_ready || echo "previous image did not report ready either" >&2
 fi
