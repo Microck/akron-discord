@@ -9,7 +9,6 @@ import {
   maxBatchDeclaredBytes,
   shouldDeleteQuarantineBatch,
   signBotRequest,
-  type CatalogPack,
   type CatalogPublication,
   type PublishCatalogEntryInput,
   type UploadBatchRecord,
@@ -1363,50 +1362,6 @@ describe("upload worker", () => {
       images: [],
       mapSid
     });
-  });
-
-  it("serializes forum metadata and upload publication through one catalog writer", async () => {
-    const store = new InMemoryUploadStore();
-    const worker = createUploadWorker({ store, botSecret, now: () => new Date("2026-01-01T00:00:00.000Z") });
-    const submission: UploadBatchRecord["submissions"][number] = {
-      id: "upload-entry", batchId: "batch", section: "StartPos", mapSid, mapUrl: "", title: "Upload Entry",
-      description: "Upload path", packObjectId: "upload-pack", captures: [], attribution: { mode: "anonymous" },
-      status: "moderating", validationReasons: []
-    };
-    const forumEntry: CatalogPack = {
-      id: "forum-entry", title: "Forum Entry", description: "Forum path", section: "StartPos", mapSid, mapUrl: "",
-      discordUrl: "https://discord.com/channels/123456789012345678/234567890123456789",
-      downloadUrl: "https://akron.example.test/maps/map/forum.akr", authorName: "Forum Author", authorAvatarUrl: "",
-      imageUrl: "", images: [], downloadCount: 0, updatedUtc: "2026-01-01T00:00:00.000Z", tags: ["startpos"],
-      sha256: "b".repeat(64), sizeBytes: 128
-    };
-
-    const [, forumResponse] = await Promise.all([
-      store.publishCatalogEntry({
-        submission,
-        pack: {
-          id: "upload-pack", tokenHash: "token", kind: "pack", batchId: "batch", submissionId: submission.id,
-          maxBytes: 128, contentType: "application/octet-stream", uploadedBytes: 128, bytes: Buffer.alloc(128)
-        },
-        captures: [], now: new Date("2026-01-01T00:00:00.000Z"), captureSourceUrls: [],
-        optimizeCatalogCapture: async () => catalogJpeg(),
-        authorName: "Anonymous", authorAvatarUrl: ""
-      }),
-      signedBotJson(worker, "/bot/catalog/entries", { entry: forumEntry }, "forum-catalog-entry")
-    ]);
-
-    expect(forumResponse.status).toBe(200);
-    expect(store.getCatalogIndexForTesting().packs.map(pack => pack.id).sort()).toEqual(["forum-entry", "upload-entry-uploadentry"]);
-
-    const invalidDiscordResponse = await signedBotJson(worker, "/bot/catalog/entries", {
-      entry: {
-        ...forumEntry,
-        id: "invalid-discord-entry",
-        discordUrl: "https://example.com/channels/123456789012345678/234567890123456789"
-      }
-    }, "invalid-discord-catalog-entry");
-    expect(invalidDiscordResponse.status).toBe(400);
-    await expectJson(invalidDiscordResponse, { error: "catalog_discord_url_invalid" });
   });
 
   it("removes newly uploaded public objects when catalog commit fails", async () => {

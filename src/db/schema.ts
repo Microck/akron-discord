@@ -22,37 +22,6 @@ export const scanStates = sqliteTable("scan_states", {
   lastScannedUtc: text("last_scanned_utc").notNull()
 });
 
-export const catalogEntries = sqliteTable(
-  "catalog_entries",
-  {
-    id: text("id").primaryKey(),
-    discordThreadId: text("discord_thread_id").notNull(),
-    title: text("title").notNull(),
-    description: text("description").notNull(),
-    section: text("section").notNull(),
-    mapSid: text("map_sid").notNull(),
-    mapUrl: text("map_url").notNull(),
-    downloadUrl: text("download_url").notNull(),
-    authorName: text("author_name").notNull(),
-    authorAvatarUrl: text("author_avatar_url").notNull().default(""),
-    imageUrl: text("image_url").notNull().default(""),
-    downloadCount: integer("download_count").notNull().default(0),
-    updatedUtc: text("updated_utc").notNull(),
-    tagsJson: text("tags_json").notNull().default("[]")
-  },
-  table => ({
-    discordThreadIdIdx: uniqueIndex("catalog_entries_discord_thread_id_idx").on(table.discordThreadId)
-  })
-);
-
-export const mapMappings = sqliteTable("map_mappings", {
-  mapUrl: text("map_url").primaryKey(),
-  mapSid: text("map_sid").notNull(),
-  displayName: text("display_name").notNull(),
-  createdBy: text("created_by").notNull(),
-  createdUtc: text("created_utc").notNull()
-});
-
 export const verificationLogs = sqliteTable("verification_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id").notNull(),

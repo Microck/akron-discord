@@ -30,7 +30,7 @@ const routePatterns: Array<[RegExp, string]> = [
   [/^\/bot\/diagnostics\/(claim)$/, "/bot/diagnostics/$1"],
   [/^\/bot\/diagnostics\/[^/]+\/(renew|retry|delivered)$/, "/bot/diagnostics/:reportId/$1"],
   [/^\/bot\/diagnostics\/[^/]+$/, "/bot/diagnostics/:reportId"],
-  [/^\/bot\/catalog\/(entries|captures\/source|captures\/transform)$/, "/bot/catalog/$1"],
+  [/^\/bot\/catalog\/(captures\/source|captures\/transform)$/, "/bot/catalog/$1"],
   [/^\/bot\/jobs\/(claim|requeue|delivered)$/, "/bot/jobs/$1"],
   [/^\/bot\/reviews\/[^/]+$/, "/bot/reviews/:submissionId"],
   [/^\/bot\/discord-messages\/[^/]+$/, "/bot/discord-messages/:submissionId"],

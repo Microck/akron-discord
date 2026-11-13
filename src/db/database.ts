@@ -78,31 +78,6 @@ function runMigrations(sqlite: Database.Database): void {
       last_scanned_utc TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS catalog_entries (
-      id TEXT PRIMARY KEY,
-      discord_thread_id TEXT NOT NULL UNIQUE,
-      title TEXT NOT NULL,
-      description TEXT NOT NULL,
-      section TEXT NOT NULL,
-      map_sid TEXT NOT NULL,
-      map_url TEXT NOT NULL,
-      download_url TEXT NOT NULL,
-      author_name TEXT NOT NULL,
-      author_avatar_url TEXT NOT NULL DEFAULT '',
-      image_url TEXT NOT NULL DEFAULT '',
-      download_count INTEGER NOT NULL DEFAULT 0,
-      updated_utc TEXT NOT NULL,
-      tags_json TEXT NOT NULL DEFAULT '[]'
-    );
-
-    CREATE TABLE IF NOT EXISTS map_mappings (
-      map_url TEXT PRIMARY KEY,
-      map_sid TEXT NOT NULL,
-      display_name TEXT NOT NULL,
-      created_by TEXT NOT NULL,
-      created_utc TEXT NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS verification_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
