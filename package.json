@@ -29,15 +29,15 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261109.1",
+    "@cloudflare/workers-types": "^5.20261113.1",
     "@sentry/cli": "3.8.2",
     "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^24.9.2",
+    "@types/node": "^24.19.2",
     "@types/yauzl": "^3.4.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
-    "wrangler": "4.161.0"
+    "wrangler": "4.162.0"
   },
   "overrides": {
     "undici": "6.29.1",
